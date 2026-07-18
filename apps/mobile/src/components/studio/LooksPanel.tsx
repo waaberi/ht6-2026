@@ -12,11 +12,10 @@ type LooksPanelProps = {
   strength: number;
   loading: boolean;
   busy: boolean;
-  canApply: boolean;
   canRestore: boolean;
   onSelect: (look: SavedStyleProfile) => void;
   onStrengthChange: (strength: number) => void;
-  onApply: () => void;
+  onStrengthCommit: (strength: number) => void;
   onRestore: () => void;
 };
 
@@ -26,11 +25,10 @@ export const LooksPanel = ({
   strength,
   loading,
   busy,
-  canApply,
   canRestore,
   onSelect,
   onStrengthChange,
-  onApply,
+  onStrengthCommit,
   onRestore,
 }: LooksPanelProps) => {
   const selectedLook = looks.find((look) => look.id === selectedLookId);
@@ -94,7 +92,10 @@ export const LooksPanel = ({
         <View style={styles.controls}>
           <View style={styles.strengthHeader}>
             <Text style={styles.strengthLabel}>Strength</Text>
-            <Text style={styles.strengthValue}>{Math.round(strength * 100)}%</Text>
+            <View style={styles.strengthStatus}>
+              {busy ? <ActivityIndicator size="small" color={colors.primary} /> : null}
+              <Text style={styles.strengthValue}>{Math.round(strength * 100)}%</Text>
+            </View>
           </View>
           <Slider
             accessibilityLabel={`${selectedLook.name} strength`}
@@ -110,27 +111,12 @@ export const LooksPanel = ({
             step={0.01}
             value={strength}
             onValueChange={onStrengthChange}
+            onSlidingComplete={onStrengthCommit}
             minimumTrackTintColor={colors.primary}
             maximumTrackTintColor={colors.outlineStrong}
             thumbTintColor={colors.text}
             disabled={busy}
           />
-          <Pressable
-            accessibilityRole="button"
-            accessibilityState={{ disabled: !canApply || busy }}
-            disabled={!canApply || busy}
-            onPress={onApply}
-            style={({ pressed }) => [styles.apply, (!canApply || busy) && styles.applyDisabled, pressed && styles.pressed]}
-          >
-            {busy ? (
-              <ActivityIndicator size="small" color={colors.onPrimary} />
-            ) : (
-              <>
-                <MaterialCommunityIcons name="check" size={20} color={colors.onPrimary} />
-                <Text style={styles.applyLabel}>Apply</Text>
-              </>
-            )}
-          </Pressable>
         </View>
       ) : null}
     </>
@@ -165,19 +151,9 @@ const styles = StyleSheet.create({
   empty: { color: colors.textSecondary, fontSize: 13, textAlign: 'center', paddingVertical: 24 },
   controls: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.outline, paddingTop: 14 },
   strengthHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  strengthStatus: { minWidth: 60, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 6 },
   strengthLabel: { color: colors.text, fontSize: 13, fontWeight: '700' },
   strengthValue: { color: colors.textSecondary, fontSize: 12, fontVariant: ['tabular-nums'] },
   slider: { width: '100%', height: 48 },
-  apply: {
-    minHeight: 48,
-    flexDirection: 'row',
-    gap: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 8,
-    backgroundColor: colors.primary,
-  },
-  applyDisabled: { opacity: 0.42 },
-  applyLabel: { color: colors.onPrimary, fontSize: 13, fontWeight: '800' },
   pressed: { opacity: 0.72 },
 });

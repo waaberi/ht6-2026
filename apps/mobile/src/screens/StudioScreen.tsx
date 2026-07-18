@@ -14,8 +14,15 @@ import { deleteGeneratedLayerAsset, saveGeneratedLayerAsset } from '../data/phot
 import { recordRecommendationFeedback } from '../data/preferences';
 import { loadStyleProfiles, type SavedStyleProfile } from '../data/styleRepository';
 import { centeredCrop, restoreManualTransform, rotateClockwise, withStraighten } from '../domain/canvasTransforms';
-import { applyCoachAdjustmentTargets, planCoachAction } from '../domain/coachHarness';
-import { collectiveAdjustmentValues, currentVersion, removeLayer, reorderLayer, setCollectiveAdjustments, setLayerOpacity, StalePhotoVersionError, toggleLayer } from '../domain/layers';
+import {
+  buildCoachEditPreview,
+  isCoachEditPreviewCurrent,
+  isPreviewableCoachActionPlan,
+  planCoachAction,
+  type CoachEditPreview,
+  type PreviewableCoachActionPlan,
+} from '../domain/coachHarness';
+import { collectiveAdjustmentValues, currentVersion, mergeCollectiveAdjustments, removeLayer, reorderLayer, setCollectiveAdjustments, setLayerOpacity, StalePhotoVersionError, toggleLayer } from '../domain/layers';
 import type {
   AdjustmentValues,
   CanvasTransform,
@@ -46,6 +53,14 @@ type GenerativeDraft = {
   layer: GenerativePatchLayer;
   recommendation?: Issue;
 };
+type CoachEditDraft = {
+  sourcePhotoId: string;
+  sourceVersionId: string;
+  label: string;
+  preview: CoachEditPreview;
+  recommendation?: Issue;
+};
+type PreviewComparison = 'before' | 'after';
 
 const aspectLabel = (aspect: number) => {
   if (Math.abs(aspect - 1) < 0.001) return '1:1';
@@ -93,8 +108,6 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     selectedPhoto,
     analysis,
     analyzing,
-    addAdjustment,
-    addLayer,
     commitStack,
     restore,
     runAnalysis,
@@ -121,6 +134,10 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   const [generativeDraft, setGenerativeDraft] = useState<GenerativeDraft>();
   const generativeDraftRef = useRef<GenerativeDraft | undefined>(undefined);
   const generativeCommitRef = useRef(false);
+  const [coachEditDraft, setCoachEditDraft] = useState<CoachEditDraft>();
+  const coachEditDraftRef = useRef<CoachEditDraft | undefined>(undefined);
+  const coachEditCommitRef = useRef(false);
+  const [coachPreviewComparison, setCoachPreviewComparison] = useState<PreviewComparison>('after');
   const mountedRef = useRef(true);
   const adjustmentCommitRef = useRef(false);
   const [savedLooks, setSavedLooks] = useState<SavedStyleProfile[]>([]);
@@ -129,6 +146,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   const [selectedLookId, setSelectedLookId] = useState<string>();
   const [lookStrength, setLookStrength] = useState(0.75);
   const [lookDraftLayerId, setLookDraftLayerId] = useState(() => randomUUID());
+  const lookCommitRef = useRef(false);
   const [draftTransform, setDraftTransform] = useState<CanvasTransform>(() => identityCanvasTransform());
   const [draftLayerOpacities, setDraftLayerOpacities] = useState<Record<string, number>>({});
   const [layerBusyId, setLayerBusyId] = useState<string>();
@@ -150,11 +168,6 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     [version],
   );
   const selectedLook = savedLooks.find((look) => look.id === selectedLookId);
-  const lookChanged = Boolean(selectedLook) && (
-    styleLayerCount !== 1
-    || appliedLookLayer?.styleProfileId !== selectedLookId
-    || Math.abs((appliedLookLayer?.strength ?? -1) - lookStrength) > 0.001
-  );
   const visibleIssues = useMemo(
     () => analysis?.issues.filter((issue) => !dismissedIssueIds.includes(issue.id)) ?? [],
     [analysis?.issues, dismissedIssueIds],
@@ -176,6 +189,14 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     if (mountedRef.current) setGenerativeDraft(undefined);
   }, [deleteDraftAssets]);
 
+  const releaseCoachEditDraft = useCallback(() => {
+    coachEditDraftRef.current = undefined;
+    if (mountedRef.current) {
+      setCoachEditDraft(undefined);
+      setCoachPreviewComparison('after');
+    }
+  }, []);
+
   useEffect(() => () => {
     mountedRef.current = false;
     const draft = generativeDraftRef.current;
@@ -193,6 +214,14 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     releaseGenerativeDraft(true);
     setMessage('The photo changed, so the AI preview was discarded.');
   }, [releaseGenerativeDraft, selectedPhoto?.id, version?.id]);
+
+  useEffect(() => {
+    const draft = coachEditDraftRef.current;
+    if (!draft || coachEditCommitRef.current) return;
+    if (isCoachEditPreviewCurrent(draft, selectedPhoto?.id, version?.id)) return;
+    releaseCoachEditDraft();
+    setMessage('The photo changed, so the Coach preview was discarded.');
+  }, [releaseCoachEditDraft, selectedPhoto?.id, version?.id]);
 
   useEffect(() => {
     let active = true;
@@ -226,6 +255,11 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   const previewStack = useMemo<LayerStack | undefined>(() => {
     if (!version) return undefined;
     if (
+      tool === 'coach'
+      && coachEditDraft
+      && isCoachEditPreviewCurrent(coachEditDraft, selectedPhoto?.id, version.id)
+    ) return coachPreviewComparison === 'after' ? coachEditDraft.preview.stack : version.stack;
+    if (
       generativeDraft
       && generativeDraft.sourcePhotoId === selectedPhoto?.id
       && generativeDraft.sourceVersionId === version.id
@@ -247,7 +281,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
       appliedLookLayer?.id ?? lookDraftLayerId,
       appliedLookLayer?.createdAt ?? new Date().toISOString(),
     );
-  }, [appliedLookLayer?.createdAt, appliedLookLayer?.id, draftAdjustments, draftLayerOpacities, draftTransform, generativeDraft, lookDraftLayerId, lookStrength, selectedLook, selectedPhoto?.id, tool, version]);
+  }, [appliedLookLayer?.createdAt, appliedLookLayer?.id, coachEditDraft, coachPreviewComparison, draftAdjustments, draftLayerOpacities, draftTransform, generativeDraft, lookDraftLayerId, lookStrength, selectedLook, selectedPhoto?.id, tool, version]);
 
   const updateGenerativeTarget = useCallback((target: Region) => {
     setGenerativeTarget(target);
@@ -297,47 +331,49 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     setTool('ai');
   };
 
-  const applyIssue = async (issue: Issue) => {
+  const openCoachEditPreview = (
+    label: string,
+    plan: PreviewableCoachActionPlan,
+    recommendation?: Issue,
+  ) => {
+    const draft: CoachEditDraft = {
+      sourcePhotoId: selectedPhoto.id,
+      sourceVersionId: version.id,
+      label,
+      preview: buildCoachEditPreview(version.stack, plan, {
+        id: randomUUID(),
+        name: label,
+        createdAt: new Date().toISOString(),
+      }),
+      recommendation,
+    };
+    coachEditDraftRef.current = draft;
+    setCoachEditDraft(draft);
+    setCoachPreviewComparison('after');
+  };
+
+  const applyIssue = (issue: Issue) => {
     if (issue.fix?.kind === 'adjustment' && issue.fix.adjustments) {
-      setApplying(true);
-      try {
-        await addAdjustment(issue.fix.adjustments, `Fix: ${issue.title}`, version.id);
-        await acceptRecommendation(issue);
-        setTool('adjust');
-      } catch (error) {
-        setMessage(error instanceof Error ? error.message : 'Edit failed.');
-      } finally {
-        setApplying(false);
-      }
+      const adjusted = mergeCollectiveAdjustments(version.stack, issue.fix.adjustments);
+      openCoachEditPreview(`Fix: ${issue.title}`, {
+        kind: 'collective-adjustment',
+        adjustments: collectiveAdjustmentValues(adjusted),
+      }, issue);
     } else if (issue.fix?.kind === 'masked-adjustment' && issue.fix.adjustments) {
-      setApplying(true);
-      try {
-        await addLayer({
-          id: randomUUID(), type: 'masked-adjustment', name: `Fix: ${issue.title}`, enabled: true, opacity: 1,
-          createdAt: new Date().toISOString(), adjustments: issue.fix.adjustments,
-          mask: { type: 'polygon', region: issue.location },
-        }, `Fix: ${issue.title}`, version.id);
-        await acceptRecommendation(issue);
-        setTool('layers');
-      } catch (error) {
-        setMessage(error instanceof Error ? error.message : 'Edit failed.');
-      } finally {
-        setApplying(false);
-      }
+      openCoachEditPreview(`Fix: ${issue.title}`, {
+        kind: 'masked-adjustment',
+        adjustments: issue.fix.adjustments,
+        target: issue.location,
+      }, issue);
     } else if (issue.fix?.kind === 'transform' && issue.fix.canvasTransform) {
-      const changed = await commit({
-        ...version.stack,
-        canvasTransform: {
+      openCoachEditPreview(`Fix: ${issue.title}`, {
+        kind: 'canvas-transform',
+        transform: {
           ...version.stack.canvasTransform,
           ...issue.fix.canvasTransform,
           rotationDegrees: version.stack.canvasTransform.rotationDegrees + (issue.fix.canvasTransform.rotationDegrees ?? 0),
         },
-      }, `Fix: ${issue.title}`);
-      if (changed) {
-        await acceptRecommendation(issue);
-        setAdjustmentSection('crop');
-        setTool('adjust');
-      }
+      }, issue);
     } else if (issue.fix?.kind === 'retouch' || issue.fix?.kind === 'generative') {
       openGenerativeTool(
         issue.fix.kind === 'retouch' ? 'remove' : 'add',
@@ -381,31 +417,13 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     }
   };
 
-  const applyCoachAction = async (action: CoachAction) => {
+  const applyCoachAction = (action: CoachAction) => {
     if (!action.requiresConfirmation) return;
     setMessage(undefined);
     try {
       const plan = planCoachAction(action, version.stack.canvasTransform);
-      if (plan.kind === 'collective-adjustment') {
-        setApplying(true);
-        const changed = await commit(applyCoachAdjustmentTargets(version.stack, plan.adjustments), action.label, version.id);
-        if (changed) await acceptRecommendation(selectedIssue);
-        setTool('adjust');
-      } else if (plan.kind === 'masked-adjustment') {
-        setApplying(true);
-        await addLayer({
-          id: randomUUID(), type: 'masked-adjustment', name: action.label, enabled: true, opacity: 1,
-          createdAt: new Date().toISOString(), adjustments: plan.adjustments,
-          mask: { type: 'polygon', region: plan.target },
-        }, action.label, version.id);
-        await acceptRecommendation(selectedIssue);
-        setTool('layers');
-      } else if (plan.kind === 'canvas-transform') {
-        setApplying(true);
-        const changed = await commit({ ...version.stack, canvasTransform: plan.transform }, action.label);
-        if (changed) await acceptRecommendation(selectedIssue);
-        setAdjustmentSection('crop');
-        setTool('adjust');
+      if (isPreviewableCoachActionPlan(plan)) {
+        openCoachEditPreview(action.label, plan, selectedIssue);
       } else if (plan.kind === 'generative') {
         openGenerativeTool(plan.operation, plan.target, plan.prompt, selectedIssue?.id);
       } else if (plan.kind === 'expand') {
@@ -420,8 +438,44 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
       }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Coach action could not be prepared.');
+    }
+  };
+
+  const acceptCoachEditDraft = async () => {
+    const draft = coachEditDraftRef.current;
+    if (!draft || coachEditCommitRef.current) return;
+    coachEditCommitRef.current = true;
+    setMessage(undefined);
+    setApplying(true);
+    try {
+      if (!isCoachEditPreviewCurrent(
+        draft,
+        currentSelectionRef.current.photoId,
+        currentSelectionRef.current.versionId,
+      )) throw new StalePhotoVersionError();
+      await commitStack(draft.preview.stack, draft.label, draft.sourceVersionId);
+      releaseCoachEditDraft();
+      void acceptRecommendation(draft.recommendation).catch(() => undefined);
+      if (draft.preview.kind === 'masked-adjustment') {
+        setTool('layers');
+      } else {
+        if (draft.preview.kind === 'canvas-transform') setAdjustmentSection('crop');
+        setTool('adjust');
+      }
+    } catch (error) {
+      if (
+        error instanceof StalePhotoVersionError
+        || !mountedRef.current
+        || !isCoachEditPreviewCurrent(
+          draft,
+          currentSelectionRef.current.photoId,
+          currentSelectionRef.current.versionId,
+        )
+      ) releaseCoachEditDraft();
+      if (mountedRef.current) setMessage(error instanceof Error ? error.message : 'Coach edit failed.');
     } finally {
-      setApplying(false);
+      coachEditCommitRef.current = false;
+      if (mountedRef.current) setApplying(false);
     }
   };
 
@@ -498,42 +552,78 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     }
   };
 
-  const chooseLook = (look: SavedStyleProfile) => {
+  const chooseLook = async (look: SavedStyleProfile) => {
+    if (lookCommitRef.current) return;
+    const sameLook = appliedLookLayer?.styleProfileId === look.id;
+    const nextStrength = sameLook ? appliedLookLayer.strength : 0.75;
+    const nextLayerId = appliedLookLayer?.id ?? randomUUID();
     setSelectedLookId(look.id);
-    setLookStrength(appliedLookLayer?.styleProfileId === look.id ? appliedLookLayer.strength : 0.75);
-    if (appliedLookLayer?.styleProfileId !== look.id) setLookDraftLayerId(randomUUID());
+    setLookStrength(nextStrength);
+    setLookDraftLayerId(nextLayerId);
+    if (sameLook && styleLayerCount === 1) return;
+    lookCommitRef.current = true;
+    setLookBusy(true);
+    try {
+      const changed = await commit(
+        applyStyleLayer(
+          version.stack,
+          look,
+          nextStrength,
+          nextLayerId,
+          appliedLookLayer?.createdAt ?? new Date().toISOString(),
+        ),
+        `Look: ${look.name}`,
+        version.id,
+      );
+      if (!changed) {
+        setSelectedLookId(appliedLookLayer?.styleProfileId);
+        setLookStrength(appliedLookLayer?.strength ?? 0.75);
+        setLookDraftLayerId(appliedLookLayer?.id ?? randomUUID());
+      }
+    } finally {
+      lookCommitRef.current = false;
+      setLookBusy(false);
+    }
   };
 
-  const applyLook = async () => {
-    if (!selectedLook || !lookChanged) return;
+  const commitLookStrength = async (strength: number) => {
+    setLookStrength(strength);
+    if (!selectedLook || lookCommitRef.current) return;
+    if (
+      styleLayerCount === 1
+      && appliedLookLayer?.styleProfileId === selectedLook.id
+      && Math.abs(appliedLookLayer.strength - strength) <= 0.001
+    ) return;
+    lookCommitRef.current = true;
     setLookBusy(true);
     try {
       const changed = await commit(
         applyStyleLayer(
           version.stack,
           selectedLook,
-          lookStrength,
+          strength,
           appliedLookLayer?.id ?? lookDraftLayerId,
           appliedLookLayer?.createdAt ?? new Date().toISOString(),
         ),
-        `Look: ${selectedLook.name}`,
+        `Look strength: ${selectedLook.name}`,
+        version.id,
       );
-      if (!changed) {
-        setSelectedLookId(appliedLookLayer?.styleProfileId);
-        setLookStrength(appliedLookLayer?.strength ?? 0.75);
-      }
+      if (!changed) setLookStrength(appliedLookLayer?.strength ?? 0.75);
     } finally {
+      lookCommitRef.current = false;
       setLookBusy(false);
     }
   };
 
   const restoreLook = async () => {
+    if (lookCommitRef.current) return;
     if (!appliedLookLayer) {
       setSelectedLookId(undefined);
       setLookStrength(0.75);
       setLookDraftLayerId(randomUUID());
       return;
     }
+    lookCommitRef.current = true;
     setLookBusy(true);
     try {
       const changed = await commit(removeStyleLayers(version.stack), 'Restore look');
@@ -543,6 +633,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
         setLookDraftLayerId(randomUUID());
       }
     } finally {
+      lookCommitRef.current = false;
       setLookBusy(false);
     }
   };
@@ -683,7 +774,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
           analysis={analysis}
           target={tool === 'ai' && generativeOperation !== 'expand' ? generativeTarget : undefined}
           onTargetChange={tool === 'ai' && generativeOperation !== 'expand' ? updateGenerativeTarget : undefined}
-          showIssues={tool === 'coach'}
+          showIssues={tool === 'coach' && !coachEditDraft}
           editingCrop={tool === 'adjust' && adjustmentSection === 'crop'}
           cropRegion={draftTransform.crop}
           cropAspect={cropAspect}
@@ -701,23 +792,34 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
           showsVerticalScrollIndicator={false}
         >
           {tool === 'coach' ? (
-            <CoachPanel
-              analysis={analysis}
-              analyzing={analyzing}
-              selectedIssue={selectedIssue}
-              response={coachResponse}
-              question={coachQuestion}
-              coachBusy={coachBusy}
-              applying={applying}
-              onAnalyze={analyze}
-              onSelectIssue={selectIssue}
-              issues={visibleIssues}
-              onDismissIssue={(issue) => void dismissRecommendation(issue)}
-              onQuestionChange={setCoachQuestion}
-              onAsk={ask}
-              onApplyIssue={applyIssue}
-              onApplyAction={applyCoachAction}
-            />
+            coachEditDraft ? (
+              <CoachEditPreviewPanel
+                label={coachEditDraft.label}
+                comparison={coachPreviewComparison}
+                busy={applying}
+                onComparisonChange={setCoachPreviewComparison}
+                onDiscard={releaseCoachEditDraft}
+                onAccept={() => void acceptCoachEditDraft()}
+              />
+            ) : (
+              <CoachPanel
+                analysis={analysis}
+                analyzing={analyzing}
+                selectedIssue={selectedIssue}
+                response={coachResponse}
+                question={coachQuestion}
+                coachBusy={coachBusy}
+                applying={applying}
+                onAnalyze={analyze}
+                onSelectIssue={selectIssue}
+                issues={visibleIssues}
+                onDismissIssue={(issue) => void dismissRecommendation(issue)}
+                onQuestionChange={setCoachQuestion}
+                onAsk={ask}
+                onApplyIssue={applyIssue}
+                onApplyAction={applyCoachAction}
+              />
+            )
           ) : null}
 
           {tool === 'adjust' ? (
@@ -756,11 +858,10 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
               strength={lookStrength}
               loading={looksLoading}
               busy={lookBusy}
-              canApply={lookChanged}
-              canRestore={Boolean(appliedLookLayer || selectedLookId)}
-              onSelect={chooseLook}
+              canRestore={Boolean(appliedLookLayer)}
+              onSelect={(look) => void chooseLook(look)}
               onStrengthChange={setLookStrength}
-              onApply={() => void applyLook()}
+              onStrengthCommit={(strength) => void commitLookStrength(strength)}
               onRestore={() => void restoreLook()}
             />
           ) : null}
@@ -816,7 +917,9 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
         <StudioToolRail
           active={tool}
           onChange={(nextTool) => {
+            if (coachEditCommitRef.current) return;
             if (tool === 'adjust' && nextTool !== 'adjust') setDraftTransform(version.stack.canvasTransform);
+            if (coachEditDraft && nextTool !== 'coach') releaseCoachEditDraft();
             if (nextTool === 'ai') setGenerativeRecommendationId(undefined);
             setTool(nextTool);
           }}
@@ -825,6 +928,65 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     </SafeAreaView>
   );
 };
+
+const CoachEditPreviewPanel = ({
+  label,
+  comparison,
+  busy,
+  onComparisonChange,
+  onDiscard,
+  onAccept,
+}: {
+  label: string;
+  comparison: PreviewComparison;
+  busy: boolean;
+  onComparisonChange: (comparison: PreviewComparison) => void;
+  onDiscard: () => void;
+  onAccept: () => void;
+}) => (
+  <View accessibilityLabel={`${label} preview`}>
+    <Text numberOfLines={2} style={styles.previewTitle}>{label}</Text>
+    <View accessibilityRole="tablist" style={styles.segmented}>
+      {(['before', 'after'] as PreviewComparison[]).map((option) => {
+        const selected = comparison === option;
+        return (
+          <Pressable
+            key={option}
+            accessibilityRole="tab"
+            accessibilityState={{ selected, disabled: busy }}
+            disabled={busy}
+            onPress={() => onComparisonChange(option)}
+            style={({ pressed }) => [styles.segment, selected && styles.segmentActive, pressed && styles.pressed]}
+          >
+            <Text style={[styles.segmentText, selected && styles.segmentTextActive]}>
+              {option === 'before' ? 'Before' : 'After'}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
+    <View style={styles.previewActions}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ disabled: busy }}
+        disabled={busy}
+        style={({ pressed }) => [styles.previewDiscard, busy && styles.disabled, pressed && styles.pressed]}
+        onPress={onDiscard}
+      >
+        <Text style={styles.previewDiscardText}>Discard</Text>
+      </Pressable>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ disabled: busy }}
+        disabled={busy}
+        style={({ pressed }) => [styles.previewAccept, busy && styles.disabled, pressed && styles.pressed]}
+        onPress={onAccept}
+      >
+        {busy ? <ActivityIndicator color={colors.onPrimary} /> : <Text style={styles.previewAcceptText}>Accept</Text>}
+      </Pressable>
+    </View>
+  </View>
+);
 
 const CoachPanel = ({
   analysis,
@@ -1166,6 +1328,7 @@ const styles = StyleSheet.create({
   centerAction: { minHeight: 100, justifyContent: 'center' },
   primary: { backgroundColor: colors.lime, minHeight: 48, alignItems: 'center', justifyContent: 'center', borderRadius: 8, paddingHorizontal: 16 },
   primaryText: { color: colors.limeInk, fontWeight: '800', fontSize: 13 },
+  previewTitle: { color: colors.text, fontSize: 15, lineHeight: 20, fontWeight: '800', marginBottom: 12 },
   previewActions: { flexDirection: 'row', gap: 12, minHeight: 52 },
   previewDiscard: { flex: 1, minHeight: 52, borderRadius: 8, backgroundColor: colors.surfaceStrong, borderWidth: 1, borderColor: colors.outlineStrong, alignItems: 'center', justifyContent: 'center' },
   previewDiscardText: { color: colors.text, fontSize: 14, fontWeight: '800' },
@@ -1209,6 +1372,7 @@ const styles = StyleSheet.create({
   segmentText: { color: colors.muted, fontSize: 13, fontWeight: '700' },
   segmentTextActive: { color: colors.ink },
   promptInput: { minHeight: 76, color: colors.ink, backgroundColor: colors.canvas, borderWidth: 1, borderColor: colors.line, borderRadius: 8, padding: 12, textAlignVertical: 'top', marginBottom: 12, fontSize: 13 },
+  pressed: { opacity: 0.72 },
   disabled: { opacity: 0.45 },
   placeholder: { color: colors.muted, fontSize: 13, textAlign: 'center', paddingVertical: 24 },
   layerBlock: { paddingBottom: 8, borderBottomColor: colors.line, borderBottomWidth: StyleSheet.hairlineWidth },

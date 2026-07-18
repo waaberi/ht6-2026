@@ -1,4 +1,4 @@
-import { collectiveAdjustmentValues, setCollectiveAdjustments } from './layers';
+import { appendLayer, collectiveAdjustmentValues, setCollectiveAdjustments } from './layers';
 import type { AdjustmentValues, CanvasTransform, CoachAction, LayerStack, Region } from './types';
 
 export type CoachActionPlan =
@@ -8,6 +8,21 @@ export type CoachActionPlan =
   | { kind: 'generative'; operation: 'remove' | 'add'; target: Region; prompt: string }
   | { kind: 'expand'; direction: 'top' | 'right' | 'bottom' | 'left'; fraction: number; prompt: string }
   | { kind: 'camera' };
+
+export type PreviewableCoachActionPlan = Extract<
+  CoachActionPlan,
+  { kind: 'collective-adjustment' | 'masked-adjustment' | 'canvas-transform' }
+>;
+
+export type CoachEditPreview = {
+  kind: PreviewableCoachActionPlan['kind'];
+  stack: LayerStack;
+};
+
+export type CoachEditSource = {
+  sourcePhotoId: string;
+  sourceVersionId: string;
+};
 
 const incomplete = (tool: CoachAction['tool']): never => {
   throw new Error(`Coach returned an incomplete ${tool} action.`);
@@ -21,6 +36,50 @@ export const applyCoachAdjustmentTargets = (
   ...collectiveAdjustmentValues(stack),
   ...targets,
 });
+
+export const isPreviewableCoachActionPlan = (
+  plan: CoachActionPlan,
+): plan is PreviewableCoachActionPlan => (
+  plan.kind === 'collective-adjustment'
+  || plan.kind === 'masked-adjustment'
+  || plan.kind === 'canvas-transform'
+);
+
+export const isCoachEditPreviewCurrent = (
+  source: CoachEditSource,
+  photoId: string | undefined,
+  versionId: string | undefined,
+) => source.sourcePhotoId === photoId && source.sourceVersionId === versionId;
+
+/** Builds the same reversible stack that manual controls commit, without mutating the current version. */
+export const buildCoachEditPreview = (
+  stack: LayerStack,
+  plan: PreviewableCoachActionPlan,
+  identity: { id: string; name: string; createdAt: string },
+): CoachEditPreview => {
+  if (plan.kind === 'collective-adjustment') {
+    return { kind: plan.kind, stack: applyCoachAdjustmentTargets(stack, plan.adjustments) };
+  }
+  if (plan.kind === 'masked-adjustment') {
+    return {
+      kind: plan.kind,
+      stack: appendLayer(stack, {
+        id: identity.id,
+        type: 'masked-adjustment',
+        name: identity.name,
+        enabled: true,
+        opacity: 1,
+        createdAt: identity.createdAt,
+        adjustments: plan.adjustments,
+        mask: { type: 'polygon', region: plan.target },
+      }),
+    };
+  }
+  return {
+    kind: plan.kind,
+    stack: { ...stack, canvasTransform: plan.transform },
+  };
+};
 
 export const planCoachAction = (action: CoachAction, currentTransform: CanvasTransform): CoachActionPlan => {
   switch (action.tool) {
