@@ -62,7 +62,71 @@ const env = {
   ].join(delimiter),
 };
 const adb = join(sdkRoot, 'platform-tools', process.platform === 'win32' ? 'adb.exe' : 'adb');
+const emulator = join(sdkRoot, 'emulator', process.platform === 'win32' ? 'emulator.exe' : 'emulator');
 const packageName = 'com.ht62026.exposure';
+const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+const listedDevices = () => {
+  const result = spawnSync(adb, ['devices'], { env, encoding: 'utf8' });
+  if (result.status !== 0) return [];
+  return result.stdout
+    .split('\n')
+    .slice(1)
+    .map((line) => line.trim().split(/\s+/))
+    .filter(([serial, state]) => serial && state)
+    .map(([serial, state]) => ({ serial, state }));
+};
+
+const onlineDevices = () => listedDevices()
+  .filter(({ state }) => state === 'device')
+  .map(({ serial }) => serial);
+
+const waitForBoot = async () => {
+  for (let attempt = 0; attempt < 180; attempt += 1) {
+    const devices = onlineDevices();
+    const serial = devices.find((candidate) => candidate.startsWith('emulator-')) ?? devices[0];
+    if (serial) {
+      env.ANDROID_SERIAL = serial;
+      const result = spawnSync(adb, ['shell', 'getprop', 'sys.boot_completed'], { env, encoding: 'utf8' });
+      if (result.status === 0 && result.stdout.trim() === '1') return;
+    }
+    await delay(1000);
+  }
+
+  console.error('Android emulator did not finish booting within 3 minutes.');
+  process.exit(1);
+};
+
+const ensureAndroidDevice = async () => {
+  const devices = listedDevices();
+  const deviceIsAvailableOrBooting = devices.some(({ serial, state }) => (
+    serial.startsWith('emulator-') || state === 'device'
+  ));
+  if (!deviceIsAvailableOrBooting) {
+    const result = spawnSync(emulator, ['-list-avds'], { env, encoding: 'utf8' });
+    const avds = result.stdout.split('\n').map((name) => name.trim()).filter(Boolean);
+    const requestedAvd = process.env.EXPOSURE_ANDROID_AVD;
+    const avd = requestedAvd
+      ? avds.find((candidate) => candidate === requestedAvd)
+      : avds.find((candidate) => candidate === 'Exposure_Pixel_8_API_35') ?? avds[0];
+
+    if (!avd) {
+      console.error('No Android emulator is configured. Create one in Android Studio Device Manager.');
+      process.exit(1);
+    }
+
+    console.log(`Starting Android emulator: ${avd}`);
+    const emulatorProcess = spawn(emulator, ['-avd', avd], {
+      env,
+      detached: true,
+      stdio: 'ignore',
+    });
+    emulatorProcess.unref();
+  }
+
+  console.log('Waiting for Android to finish booting...');
+  await waitForBoot();
+};
 
 const runAdb = (args, description) => {
   const result = spawnSync(adb, args, { env, encoding: 'utf8' });
@@ -89,6 +153,8 @@ if (!(mode in commands)) {
 
 console.log(`Android SDK: ${sdkRoot}`);
 console.log(`Android JDK: ${javaHome}`);
+
+await ensureAndroidDevice();
 
 if (mode === 'dev') {
   runAdb(['shell', 'am', 'force-stop', packageName], 'Stopping the stale development session');

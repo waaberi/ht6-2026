@@ -24,9 +24,9 @@ pnpm dev
 
 `pnpm bootstrap` is the one-time workspace setup. It installs JavaScript and Python dependencies and creates missing local environment files without overwriting existing ones.
 
-Start an Android emulator from Android Studio's Device Manager before `pnpm android`. That command automatically finds Android Studio's SDK and bundled JDK 17/21, builds the development client, installs it, and exits. The first native build is slow.
+`pnpm android` automatically starts the configured Android emulator when needed, finds Android Studio's SDK and bundled JDK 17/21, builds the development client, installs it, and exits. The first native build is slow.
 
-Use `pnpm dev` every day. It starts Metro, opens Exposure, and applies JavaScript/TypeScript edits with Fast Refresh without rebuilding with Gradle. Run `pnpm android` again only after changing `app.json`, native dependencies, or files under `apps/mobile/plugins/`.
+Use `pnpm dev` every day. It starts the emulator when needed, starts Metro, opens Exposure, and applies JavaScript/TypeScript edits with Fast Refresh without rebuilding with Gradle. Run `pnpm android` again only after changing `app.json`, native dependencies, or files under `apps/mobile/plugins/`.
 
 The first development launch shows Expo's one-time developer-menu introduction. Press **Continue**, then close the menu to reveal Exposure. Fast Refresh is enabled by default.
 
