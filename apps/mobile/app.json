@@ -41,7 +41,6 @@
           "photosPermission": "Allow Exposure to import photographs"
         }
       ],
-      "expo-sharing",
       "./plugins/withAndroidCleartextTraffic"
     ]
   }
