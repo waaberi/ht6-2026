@@ -191,6 +191,13 @@ const handleMarkerStyles: Record<CropCorner, ViewStyle> = {
   'bottom-right': { right: 14, bottom: 14, borderRightWidth: 3, borderBottomWidth: 3 },
 };
 
+const handleMarkerShadowStyles: Record<CropCorner, ViewStyle> = {
+  'top-left': { left: 12, top: 12, borderLeftWidth: 7, borderTopWidth: 7 },
+  'top-right': { right: 12, top: 12, borderRightWidth: 7, borderTopWidth: 7 },
+  'bottom-left': { left: 12, bottom: 12, borderLeftWidth: 7, borderBottomWidth: 7 },
+  'bottom-right': { right: 12, bottom: 12, borderRightWidth: 7, borderBottomWidth: 7 },
+};
+
 const cornerLabels: Record<CropCorner, string> = {
   'top-left': 'Top left crop handle',
   'top-right': 'Top right crop handle',
@@ -370,6 +377,7 @@ export const CropOverlay = ({
         onAccessibilityAction={moveFrameWithAccessibility}
         {...moveResponder.panHandlers}
       >
+        <View pointerEvents="none" style={styles.frameHighlight} />
         {showGrid ? (
           <View pointerEvents="none" style={StyleSheet.absoluteFill}>
             <View style={[styles.verticalGuide, { left: '33.333%' }]} />
@@ -391,6 +399,7 @@ export const CropOverlay = ({
             onAccessibilityAction={(event) => adjustCornerWithAccessibility(corner, event)}
             {...cornerResponders[corner].panHandlers}
           >
+            <View pointerEvents="none" style={[styles.handleMarkerShadow, handleMarkerShadowStyles[corner]]} />
             <View pointerEvents="none" style={[styles.handleMarker, handleMarkerStyles[corner]]} />
           </View>
         ))}
@@ -406,6 +415,12 @@ const styles = StyleSheet.create({
   },
   frame: {
     position: 'absolute',
+    borderWidth: 3,
+    borderColor: 'rgba(34,26,27,0.82)',
+  },
+  frameHighlight: {
+    ...StyleSheet.absoluteFillObject,
+    margin: -2,
     borderWidth: 1,
     borderColor: colors.text,
   },
@@ -436,5 +451,11 @@ const styles = StyleSheet.create({
     width: 20,
     height: 20,
     borderColor: colors.primary,
+  },
+  handleMarkerShadow: {
+    position: 'absolute',
+    width: 20,
+    height: 20,
+    borderColor: 'rgba(34,26,27,0.9)',
   },
 });
