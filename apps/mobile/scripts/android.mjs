@@ -2,11 +2,12 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { createRequire } from 'node:module';
 import { delimiter, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import process from 'node:process';
 
 const mode = process.argv[2];
-const projectRoot = new URL('..', import.meta.url).pathname;
+const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const require = createRequire(import.meta.url);
 
 const executable = (root, name) => root && existsSync(join(root, 'bin', name));
@@ -15,6 +16,9 @@ const firstDirectory = (candidates, requiredPath) => candidates.find((candidate)
 const sdkRoot = firstDirectory([
   process.env.ANDROID_HOME,
   process.env.ANDROID_SDK_ROOT,
+  process.platform === 'win32' && process.env.LOCALAPPDATA
+    ? join(process.env.LOCALAPPDATA, 'Android', 'Sdk')
+    : undefined,
   join(homedir(), 'Android', 'Sdk'),
   join(homedir(), 'Library', 'Android', 'sdk'),
 ], join('platform-tools', process.platform === 'win32' ? 'adb.exe' : 'adb'));
@@ -25,7 +29,16 @@ if (!sdkRoot) {
 }
 
 const javaName = process.platform === 'win32' ? 'java.exe' : 'java';
-const androidStudioJdks = process.platform === 'darwin'
+const androidStudioJdks = process.platform === 'win32'
+  ? [
+      process.env.ProgramFiles
+        ? join(process.env.ProgramFiles, 'Android', 'Android Studio', 'jbr')
+        : undefined,
+      process.env.LOCALAPPDATA
+        ? join(process.env.LOCALAPPDATA, 'Programs', 'Android Studio', 'jbr')
+        : undefined,
+    ]
+  : process.platform === 'darwin'
   ? [
       '/Applications/Android Studio.app/Contents/jbr/Contents/Home',
       join(homedir(), 'Applications', 'Android Studio.app', 'Contents', 'jbr', 'Contents', 'Home'),
@@ -36,7 +49,7 @@ const androidStudioJdks = process.platform === 'darwin'
       '/opt/android-studio/jbr',
     ];
 
-const javaCandidates = [...androidStudioJdks, process.env.JAVA_HOME].filter(Boolean);
+const javaCandidates = [process.env.JAVA_HOME, ...androidStudioJdks].filter(Boolean);
 const javaHome = javaCandidates.find((candidate) => {
   if (!executable(candidate, javaName)) return false;
   const result = spawnSync(join(candidate, 'bin', javaName), ['-version'], { encoding: 'utf8' });

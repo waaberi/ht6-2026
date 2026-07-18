@@ -20,8 +20,14 @@ const ensureEnvironmentFile = (example, destination) => {
 };
 
 const run = (command, args) => {
-  const executable = process.platform === 'win32' ? `${command}.cmd` : command;
-  const result = spawnSync(executable, args, {
+  const usesWindowsCommandShim = process.platform === 'win32' && command === 'pnpm';
+  const executable = usesWindowsCommandShim
+    ? (process.env.ComSpec ?? 'cmd.exe')
+    : (process.platform === 'win32' ? `${command}.exe` : command);
+  const commandArgs = usesWindowsCommandShim
+    ? ['/d', '/s', '/c', 'pnpm.cmd', ...args]
+    : args;
+  const result = spawnSync(executable, commandArgs, {
     cwd: workspaceRoot,
     stdio: 'inherit',
   });
