@@ -31,28 +31,21 @@ import {
 import { persistPortfolioReview, persistStyleProfile } from '../services/sync';
 import { useExposure } from '../state/ExposureContext';
 
-type LibraryMode = 'photos' | 'portfolio' | 'looks';
+type LibraryView = 'browse' | 'select' | 'portfolio-result' | 'look-result';
 
 type LibraryScreenProps = {
   onOpenStudio: () => void;
   onOpenCamera?: () => void;
 };
 
-const modes: Array<{ id: LibraryMode; label: string }> = [
-  { id: 'photos', label: 'Photos' },
-  { id: 'portfolio', label: 'Portfolio' },
-  { id: 'looks', label: 'Looks' },
-];
-
 export const LibraryScreen = ({ onOpenStudio, onOpenCamera }: LibraryScreenProps) => {
   const { width } = useWindowDimensions();
-  const { photos, selectPhoto, syncing, syncError, ingest } = useExposure();
-  const [mode, setMode] = useState<LibraryMode>('photos');
-  const [portfolioSelection, setPortfolioSelection] = useState<string[]>([]);
-  const [lookSelection, setLookSelection] = useState<string[]>([]);
+  const { photos, selectPhoto, syncing, syncError, ingest, deletePhotos } = useExposure();
+  const [view, setView] = useState<LibraryView>('browse');
+  const [selection, setSelection] = useState<string[]>([]);
   const [portfolioReview, setPortfolioReview] = useState<PortfolioReview>();
   const [activeStyle, setActiveStyle] = useState<StyleProfileResult>();
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<'portfolio' | 'look' | 'delete'>();
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
@@ -119,16 +112,24 @@ export const LibraryScreen = ({ onOpenStudio, onOpenCamera }: LibraryScreenProps
     { text: 'Cancel', style: 'cancel' },
   ]);
 
-  const changeMode = (nextMode: LibraryMode) => {
-    setMode(nextMode);
+  const enterSelection = () => {
+    setView('select');
+    setSelection([]);
     setError(undefined);
     setNotice(undefined);
   };
 
-  const togglePortfolio = (id: string) => {
+  const leaveSelection = () => {
+    setView('browse');
+    setSelection([]);
     setPortfolioReview(undefined);
+    setActiveStyle(undefined);
+    setError(undefined);
     setNotice(undefined);
-    setPortfolioSelection((current) => {
+  };
+
+  const toggleSelection = (id: string) => {
+    setSelection((current) => {
       if (current.includes(id)) return current.filter((item) => item !== id);
       if (current.length < 20) return [...current, id];
       const message = 'Maximum 20 photos.';
@@ -138,109 +139,122 @@ export const LibraryScreen = ({ onOpenStudio, onOpenCamera }: LibraryScreenProps
     });
   };
 
-  const toggleLook = (id: string) => {
-    setActiveStyle(undefined);
-    setNotice(undefined);
-    setLookSelection((current) => {
-      if (current.includes(id)) return current.filter((item) => item !== id);
-      if (current.length < 8) return [...current, id];
-      const message = 'Maximum 8 references.';
-      setNotice(message);
-      AccessibilityInfo.announceForAccessibility(message);
-      return current;
-    });
-  };
-
   const runPortfolioReview = async () => {
-    setBusy(true);
+    setBusy('portfolio');
     setError(undefined);
     try {
-      const result = await reviewPortfolio(photos.filter((photo) => portfolioSelection.includes(photo.id)));
+      const result = await reviewPortfolio(photos.filter((photo) => selection.includes(photo.id)));
       setPortfolioReview(result);
-      await persistPortfolioReview(result, portfolioSelection);
+      setView('portfolio-result');
+      await persistPortfolioReview(result, selection);
       AccessibilityInfo.announceForAccessibility('Portfolio review ready.');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Portfolio review failed.');
     } finally {
-      setBusy(false);
+      setBusy(undefined);
     }
   };
 
   const createLook = async () => {
-    setBusy(true);
+    setBusy('look');
     setError(undefined);
     try {
-      const created = await createStyleProfile(photos.filter((photo) => lookSelection.includes(photo.id)));
-      await saveStyleProfile(created, lookSelection);
+      const references = selection.slice(0, 8);
+      const created = await createStyleProfile(photos.filter((photo) => references.includes(photo.id)));
+      await saveStyleProfile(created, references);
       setActiveStyle(created);
-      await persistStyleProfile(created, lookSelection);
+      setView('look-result');
+      await persistStyleProfile(created, references);
       AccessibilityInfo.announceForAccessibility(`${created.name} is ready.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Look creation failed.');
     } finally {
-      setBusy(false);
+      setBusy(undefined);
     }
   };
 
-  const headerDetail = mode === 'photos'
-    ? syncing ? 'Syncing…' : syncError ? 'Sync issue' : undefined
-    : mode === 'portfolio'
-      ? `${portfolioSelection.length}/20`
-      : `${lookSelection.length}/8`;
+  const confirmDelete = () => {
+    if (selection.length === 0 || busy) return;
+    const count = selection.length;
+    Alert.alert(`Delete ${count === 1 ? 'photo' : `${count} photos`}?`, undefined, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: () => void (async () => {
+          setBusy('delete');
+          setError(undefined);
+          try {
+            await deletePhotos(selection);
+            leaveSelection();
+          } catch (caught) {
+            setError(caught instanceof Error ? caught.message : 'Photos could not be deleted.');
+          } finally {
+            setBusy(undefined);
+          }
+        })(),
+      },
+    ]);
+  };
 
-  const selection = mode === 'portfolio' ? portfolioSelection : lookSelection;
-  const hasSelectionSurface = mode === 'portfolio' ? !portfolioReview : mode === 'looks' ? !activeStyle : false;
+  const headerDetail = view === 'select'
+    ? String(selection.length)
+    : syncing ? 'Syncing…' : syncError ? 'Sync issue' : undefined;
 
   return (
     <View style={styles.screen}>
       <ScreenHeader
-        title="Library"
+        title={view === 'select' ? 'Select' : 'Library'}
         detail={headerDetail}
-        action={photos.length ? { label: 'Import photo', icon: 'add', onPress: showImportMenu, busy: importing } : undefined}
+        actions={photos.length ? view === 'select' ? [
+          { label: 'Cancel selection', icon: 'close', onPress: leaveSelection },
+        ] : [
+          { label: 'Select photos', icon: 'checkmark-circle-outline', onPress: enterSelection },
+          { label: 'Import photo', icon: 'add', onPress: showImportMenu, busy: importing, tone: 'primary' as const },
+        ] : undefined}
       />
-      {photos.length ? <LibraryModeTabs active={mode} onChange={changeMode} /> : null}
 
       {photos.length === 0 ? (
         <EmptyState icon="images-outline" title="No photos yet">
           {onOpenCamera ? <ActionButton label="Take a photo" icon="camera-outline" onPress={onOpenCamera} /> : null}
-          <ActionButton label="Import" icon="download-outline" variant="outlined" onPress={showImportMenu} />
+          <ActionButton label="Import" icon="download-outline" variant="tonal" onPress={showImportMenu} />
         </EmptyState>
-      ) : mode === 'portfolio' && portfolioReview ? (
+      ) : view === 'portfolio-result' && portfolioReview ? (
         <PortfolioResult
           review={portfolioReview}
           photoById={photoById}
           onReset={() => {
             setPortfolioReview(undefined);
-            setPortfolioSelection([]);
+            setSelection([]);
+            setView('select');
           }}
         />
-      ) : mode === 'looks' && activeStyle ? (
+      ) : view === 'look-result' && activeStyle ? (
         <LookResult
           style={activeStyle}
           onUse={() => {
             setActiveStyle(undefined);
-            setLookSelection([]);
+            setSelection([]);
             setError(undefined);
-            setMode('photos');
+            setView('browse');
           }}
           onReset={() => {
             setActiveStyle(undefined);
-            setLookSelection([]);
+            setSelection([]);
             setError(undefined);
+            setView('select');
           }}
         />
       ) : (
         <View style={styles.browser}>
-          {mode !== 'photos' ? (
+          {view === 'select' ? (
             <View style={styles.selectionHeader}>
-              <Text style={styles.instruction}>
-                {mode === 'portfolio' ? 'Choose 2–20 photos' : 'Choose 3–8 references'}
-              </Text>
+              <Text style={styles.instruction}>Choose photos</Text>
               {selection.length ? (
                 <Pressable
                   accessibilityRole="button"
                   accessibilityLabel="Clear selection"
-                  onPress={() => mode === 'portfolio' ? setPortfolioSelection([]) : setLookSelection([])}
+                  onPress={() => setSelection([])}
                   style={({ pressed }) => [styles.clearButton, pressed && styles.pressed]}
                 >
                   <Text style={styles.clearLabel}>Clear</Text>
@@ -251,57 +265,46 @@ export const LibraryScreen = ({ onOpenStudio, onOpenCamera }: LibraryScreenProps
           {notice ? <Text accessibilityLiveRegion="polite" style={styles.notice}>{notice}</Text> : null}
           {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
           <FlashList
-            key={`library-${mode}-${columnCount}`}
+            key={`library-${view}-${columnCount}`}
             data={photos}
             extraData={selection}
             numColumns={columnCount}
-            contentContainerStyle={[styles.grid, mode !== 'photos' && styles.selectionGrid]}
+            contentContainerStyle={[styles.grid, view === 'select' && styles.selectionGrid]}
             keyExtractor={(item) => item.id}
             renderItem={({ item }) => (
               <PhotoTile
                 photo={item}
                 selected={selection.includes(item.id)}
-                order={mode === 'portfolio' ? selection.indexOf(item.id) + 1 : undefined}
-                selectionMode={mode !== 'photos'}
-                onPress={() => mode === 'photos' ? open(item) : mode === 'portfolio' ? togglePortfolio(item.id) : toggleLook(item.id)}
+                order={view === 'select' ? selection.indexOf(item.id) + 1 : undefined}
+                selectionMode={view === 'select'}
+                onPress={() => view === 'select' ? toggleSelection(item.id) : open(item)}
               />
             )}
           />
         </View>
       )}
 
-      {photos.length && hasSelectionSurface ? (
+      {photos.length > 0 && view === 'select' ? (
         <StickyActionBar>
-          <ActionButton
-            label={mode === 'portfolio' ? 'Review portfolio' : 'Create look'}
-            onPress={() => mode === 'portfolio' ? void runPortfolioReview() : void createLook()}
-            disabled={mode === 'portfolio' ? portfolioSelection.length < 2 : lookSelection.length < 3}
-            loading={busy}
-          />
+          <View style={styles.taskActions}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Delete selected photos"
+              accessibilityState={{ disabled: selection.length === 0 || Boolean(busy), busy: busy === 'delete' }}
+              disabled={selection.length === 0 || Boolean(busy)}
+              onPress={confirmDelete}
+              style={({ pressed }) => [styles.deleteAction, pressed && styles.pressed, (selection.length === 0 || busy) && styles.disabled]}
+            >
+              <Ionicons name="trash-outline" size={22} color={colors.danger} />
+            </Pressable>
+            <ActionButton label="Portfolio" icon="albums-outline" style={styles.taskAction} onPress={() => void runPortfolioReview()} disabled={selection.length < 2 || Boolean(busy)} loading={busy === 'portfolio'} />
+            <ActionButton label="Look" icon="color-palette-outline" variant="tonal" style={styles.taskAction} onPress={() => void createLook()} disabled={selection.length < 3 || selection.length > 8 || Boolean(busy)} loading={busy === 'look'} />
+          </View>
         </StickyActionBar>
       ) : null}
     </View>
   );
 };
-
-const LibraryModeTabs = ({ active, onChange }: { active: LibraryMode; onChange: (mode: LibraryMode) => void }) => (
-  <View accessibilityRole="tablist" style={styles.modeTabs}>
-    {modes.map((mode) => {
-      const selected = mode.id === active;
-      return (
-        <Pressable
-          key={mode.id}
-          accessibilityRole="tab"
-          accessibilityState={{ selected }}
-          onPress={() => onChange(mode.id)}
-          style={({ pressed }) => [styles.modeTab, selected && styles.modeTabSelected, pressed && styles.pressed]}
-        >
-          <Text style={[styles.modeLabel, selected && styles.modeLabelSelected]}>{mode.label}</Text>
-        </Pressable>
-      );
-    })}
-  </View>
-);
 
 const PhotoTile = ({ photo, selected, order, selectionMode, onPress }: {
   photo: PhotoRecord;
@@ -387,25 +390,6 @@ const LookResult = ({
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.background },
   browser: { flex: 1 },
-  modeTabs: {
-    minHeight: layout.minTouchTarget,
-    flexDirection: 'row',
-    marginHorizontal: layout.screenPadding,
-    marginBottom: spacing.sm,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.outline,
-  },
-  modeTab: {
-    flex: 1,
-    minHeight: layout.minTouchTarget,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderBottomWidth: 2,
-    borderBottomColor: 'transparent',
-  },
-  modeTabSelected: { borderBottomColor: colors.text },
-  modeLabel: { color: colors.textSecondary, ...typography.label, fontWeight: '600' },
-  modeLabelSelected: { color: colors.text, fontWeight: '700' },
   selectionHeader: {
     minHeight: layout.minTouchTarget,
     paddingLeft: layout.screenPadding,
@@ -476,25 +460,6 @@ const styles = StyleSheet.create({
   },
   selectionBadgeSelected: { backgroundColor: colors.text, borderColor: colors.text },
   order: { color: colors.onPrimary, ...typography.label, fontWeight: '800' },
-  savedSection: { marginBottom: spacing.sm },
-  sectionLabel: {
-    color: colors.text,
-    ...typography.label,
-    fontWeight: '700',
-    marginHorizontal: layout.screenPadding,
-    marginBottom: spacing.sm,
-  },
-  savedRow: { gap: spacing.sm, paddingHorizontal: layout.screenPadding },
-  savedLook: {
-    width: 124,
-    minHeight: 64,
-    padding: spacing.sm,
-    borderRadius: radii.sm,
-    backgroundColor: colors.surface,
-  },
-  savedPalette: { height: 22, flexDirection: 'row', borderRadius: 4, overflow: 'hidden' },
-  savedSwatch: { flex: 1 },
-  savedName: { color: colors.text, ...typography.caption, fontWeight: '700', marginTop: spacing.xs },
   resultContent: {
     paddingHorizontal: layout.screenPadding,
     paddingTop: spacing.md,
@@ -517,10 +482,16 @@ const styles = StyleSheet.create({
   rankText: { flex: 1, color: colors.text, ...typography.label },
   palette: { height: 48, flexDirection: 'row', marginTop: spacing.lg, borderRadius: radii.sm, overflow: 'hidden' },
   swatch: { flex: 1 },
-  strengthHeader: { flexDirection: 'row', justifyContent: 'space-between', marginTop: spacing.lg },
-  strengthLabel: { color: colors.text, ...typography.label, fontWeight: '700' },
-  strengthValue: { color: colors.textSecondary, ...typography.label },
-  slider: { width: '100%', height: 48, marginTop: spacing.xxs },
-  target: { color: colors.textSecondary, ...typography.caption, marginTop: spacing.sm, marginBottom: spacing.md },
+  taskActions: { flexDirection: 'row', gap: spacing.sm },
+  deleteAction: {
+    width: layout.minTouchTarget,
+    minHeight: layout.minTouchTarget,
+    borderRadius: radii.md,
+    backgroundColor: colors.surfaceStrong,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  taskAction: { flex: 1 },
+  disabled: { opacity: 0.42 },
   resultActions: { gap: spacing.sm, marginTop: spacing.sm },
 });

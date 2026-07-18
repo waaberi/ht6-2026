@@ -41,6 +41,7 @@ const styles = StyleSheet.create({
     ...typography.body,
     textAlign: 'center',
     marginTop: spacing.xs,
+    maxWidth: 440,
   },
   actions: {
     width: '100%',

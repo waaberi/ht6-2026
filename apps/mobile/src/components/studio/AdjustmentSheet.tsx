@@ -49,7 +49,7 @@ export const AdjustmentSheet = ({
           style={({ pressed }) => [styles.restore, (!hasChanges || busy) && styles.disabled, pressed && styles.pressed]}
           onPress={onRestore}
         >
-          <MaterialCommunityIcons name="restore" size={19} color={hasChanges ? colors.ink : colors.muted} />
+          <MaterialCommunityIcons name="restore" size={19} color={hasChanges ? colors.text : colors.textSecondary} />
           <Text style={[styles.restoreText, !hasChanges && styles.disabledText]}>Restore</Text>
         </Pressable>
       </View>
@@ -67,11 +67,10 @@ export const AdjustmentSheet = ({
                   accessibilityLabel={`Reset ${control.label}`}
                   accessibilityState={{ disabled: !changed || busy }}
                   disabled={!changed || busy}
-                  hitSlop={4}
                   style={({ pressed }) => [styles.resetControl, !changed && styles.resetControlIdle, pressed && styles.pressed]}
                   onPress={() => onResetControl(control.key)}
                 >
-                  <MaterialCommunityIcons name="restore" size={17} color={changed ? colors.ink : colors.muted} />
+                  <MaterialCommunityIcons name="restore" size={17} color={changed ? colors.text : colors.textSecondary} />
                 </Pressable>
               </View>
             </View>
@@ -85,9 +84,9 @@ export const AdjustmentSheet = ({
               disabled={busy}
               onValueChange={(next) => onChange(control.key, next)}
               onSlidingComplete={(next) => onCommit(control.key, next)}
-              minimumTrackTintColor={colors.lime}
-              maximumTrackTintColor={colors.line}
-              thumbTintColor={colors.ink}
+              minimumTrackTintColor={colors.primary}
+              maximumTrackTintColor={colors.outline}
+              thumbTintColor={colors.text}
             />
           </View>
         );
@@ -97,17 +96,17 @@ export const AdjustmentSheet = ({
 };
 
 const styles = StyleSheet.create({
-  toolbar: { minHeight: 44, flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', marginBottom: 2 },
-  restore: { minWidth: 96, minHeight: 44, borderRadius: 22, borderWidth: 1, borderColor: colors.line, paddingHorizontal: 12, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center' },
-  restoreText: { color: colors.ink, fontSize: 13, fontWeight: '700' },
+  toolbar: { minHeight: 48, flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', marginBottom: 2 },
+  restore: { minWidth: 96, minHeight: 48, borderRadius: 24, borderWidth: 1, borderColor: colors.outline, paddingHorizontal: 12, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center' },
+  restoreText: { color: colors.text, fontSize: 13, fontWeight: '700' },
   control: { marginBottom: 8 },
-  controlHeading: { minHeight: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingLeft: 4 },
-  label: { color: colors.ink, fontSize: 13, fontWeight: '700' },
-  value: { color: colors.muted, fontSize: 12, fontVariant: ['tabular-nums'] },
-  valueGroup: { minWidth: 94, minHeight: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 4 },
-  resetControl: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
+  controlHeading: { minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingLeft: 4 },
+  label: { color: colors.text, fontSize: 13, fontWeight: '700' },
+  value: { color: colors.textSecondary, fontSize: 12, fontVariant: ['tabular-nums'] },
+  valueGroup: { minWidth: 98, minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 4 },
+  resetControl: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center' },
   resetControlIdle: { opacity: 0.28 },
   disabled: { opacity: 0.42 },
-  disabledText: { color: colors.muted },
+  disabledText: { color: colors.textSecondary },
   pressed: { opacity: 0.68 },
 });

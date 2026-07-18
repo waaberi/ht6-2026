@@ -1,6 +1,7 @@
 import { randomUUID } from 'expo-crypto';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import Slider from '@react-native-community/slider';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -8,13 +9,16 @@ import { PhotoCanvas } from '../components/PhotoCanvas';
 import { AdjustmentSheet } from '../components/studio/AdjustmentSheet';
 import { LooksPanel } from '../components/studio/LooksPanel';
 import { StudioToolRail, type StudioTool } from '../components/studio/StudioToolRail';
+import { TransformSheet } from '../components/studio/TransformSheet';
 import { colors } from '../components/theme';
 import { saveGeneratedLayerAsset } from '../data/photoRepository';
 import { recordRecommendationFeedback } from '../data/preferences';
 import { loadStyleProfiles, type SavedStyleProfile } from '../data/styleRepository';
-import { collectiveAdjustmentValues, currentVersion, removeLayer, reorderLayer, setCollectiveAdjustments, toggleLayer } from '../domain/layers';
+import { centeredCrop, restoreManualTransform, rotateClockwise, withStraighten } from '../domain/canvasTransforms';
+import { collectiveAdjustmentValues, currentVersion, removeLayer, reorderLayer, setCollectiveAdjustments, setLayerOpacity, toggleLayer } from '../domain/layers';
 import type {
   AdjustmentValues,
+  CanvasTransform,
   CoachAction,
   CoachResponse,
   GenerativeOperation,
@@ -27,6 +31,7 @@ import { ApiUnavailableError, askCoach, createGenerativePatch } from '../service
 import { exportAndShare } from '../services/export';
 import { persistPreferences } from '../services/sync';
 import { useExposure } from '../state/ExposureContext';
+import { identityCanvasTransform } from '../domain/types';
 
 const CENTER_TARGET: Region = { x: 0.3, y: 0.3, width: 0.4, height: 0.4 };
 const UPPER_TARGET: Region = { x: 0.2, y: 0.08, width: 0.6, height: 0.34 };
@@ -44,11 +49,13 @@ const applyStyleLayer = (
   strength: number,
   layerId: string,
   createdAt: string,
-): LayerStack => ({
-  ...removeStyleLayers(stack),
-  layers: [
-    ...stack.layers.filter((layer) => layer.type !== 'style'),
-    {
+): LayerStack => {
+  const withoutStyle = removeStyleLayers(stack);
+  return {
+    ...withoutStyle,
+    layers: [
+      ...withoutStyle.layers,
+      {
       id: layerId,
       type: 'style',
       name: look.name,
@@ -58,9 +65,10 @@ const applyStyleLayer = (
       styleProfileId: look.id,
       adjustments: look.adjustments,
       strength,
-    },
-  ],
-});
+      },
+    ],
+  };
+};
 
 export const StudioScreen = ({ onClose }: { onClose: () => void }) => {
   const {
@@ -94,6 +102,10 @@ export const StudioScreen = ({ onClose }: { onClose: () => void }) => {
   const [selectedLookId, setSelectedLookId] = useState<string>();
   const [lookStrength, setLookStrength] = useState(0.75);
   const [lookDraftLayerId, setLookDraftLayerId] = useState(() => randomUUID());
+  const [draftTransform, setDraftTransform] = useState<CanvasTransform>(() => identityCanvasTransform());
+  const [draftLayerOpacities, setDraftLayerOpacities] = useState<Record<string, number>>({});
+  const [layerBusyId, setLayerBusyId] = useState<string>();
+  const transformCommitRef = useRef(false);
 
   const version = selectedPhoto ? currentVersion(selectedPhoto) : undefined;
   const savedAdjustments = useMemo(
@@ -135,9 +147,23 @@ export const StudioScreen = ({ onClose }: { onClose: () => void }) => {
     setLookDraftLayerId(appliedLookLayer?.id ?? randomUUID());
   }, [appliedLookLayer?.id, appliedLookLayer?.strength, appliedLookLayer?.styleProfileId, version?.id]);
 
+  useEffect(() => {
+    if (!version) return;
+    setDraftTransform(version.stack.canvasTransform);
+    setDraftLayerOpacities(Object.fromEntries(version.stack.layers.map((layer) => [layer.id, layer.opacity])));
+  }, [version?.id]);
+
   const previewStack = useMemo<LayerStack | undefined>(() => {
     if (!version) return undefined;
-    const adjustedStack = setCollectiveAdjustments(version.stack, draftAdjustments);
+    const collectiveStack = setCollectiveAdjustments(version.stack, draftAdjustments);
+    const adjustedStack: LayerStack = {
+      ...collectiveStack,
+      canvasTransform: tool === 'transform' ? draftTransform : collectiveStack.canvasTransform,
+      layers: collectiveStack.layers.map((layer) => ({
+        ...layer,
+        opacity: draftLayerOpacities[layer.id] ?? layer.opacity,
+      })),
+    };
     if (tool !== 'looks' || !selectedLook) return adjustedStack;
     return applyStyleLayer(
       adjustedStack,
@@ -146,7 +172,12 @@ export const StudioScreen = ({ onClose }: { onClose: () => void }) => {
       appliedLookLayer?.id ?? lookDraftLayerId,
       appliedLookLayer?.createdAt ?? new Date().toISOString(),
     );
-  }, [appliedLookLayer?.createdAt, appliedLookLayer?.id, draftAdjustments, lookDraftLayerId, lookStrength, selectedLook, tool, version]);
+  }, [appliedLookLayer?.createdAt, appliedLookLayer?.id, draftAdjustments, draftLayerOpacities, draftTransform, lookDraftLayerId, lookStrength, selectedLook, tool, version]);
+
+  const updateGenerativeTarget = useCallback((target: Region) => {
+    setGenerativeTarget(target);
+    setSelectedIssueId(undefined);
+  }, []);
 
   if (!selectedPhoto || !version || !previewStack) {
     return (
@@ -323,6 +354,49 @@ export const StudioScreen = ({ onClose }: { onClose: () => void }) => {
     }
   };
 
+  const commitTransform = async (next: CanvasTransform, label: string) => {
+    if (transformCommitRef.current) return;
+    if (JSON.stringify(next) === JSON.stringify(version.stack.canvasTransform)) {
+      setDraftTransform(version.stack.canvasTransform);
+      return;
+    }
+    transformCommitRef.current = true;
+    setDraftTransform(next);
+    setApplying(true);
+    try {
+      const changed = await commit({ ...version.stack, canvasTransform: next }, label);
+      if (!changed) setDraftTransform(version.stack.canvasTransform);
+    } finally {
+      transformCommitRef.current = false;
+      setApplying(false);
+    }
+  };
+
+  const cropPhoto = (aspect: number | undefined) => {
+    const next: CanvasTransform = { ...draftTransform };
+    if (aspect === undefined) delete next.crop;
+    else next.crop = centeredCrop(selectedPhoto.width, selectedPhoto.height, aspect);
+    void commitTransform(next, aspect === undefined ? 'Original crop' : `Crop ${aspect === 1 ? '1:1' : Math.abs(aspect - 4 / 3) < 0.01 ? '4:3' : '16:9'}`);
+  };
+
+  const commitLayerOpacity = async (layerId: string, value: number) => {
+    if (layerBusyId) return;
+    const layer = version.stack.layers.find((candidate) => candidate.id === layerId);
+    if (!layer) return;
+    if (Math.abs(layer.opacity - value) < 0.001) {
+      setDraftLayerOpacities((current) => ({ ...current, [layerId]: layer.opacity }));
+      return;
+    }
+    setDraftLayerOpacities((current) => ({ ...current, [layerId]: value }));
+    setLayerBusyId(layerId);
+    try {
+      const changed = await commit(setLayerOpacity(version.stack, layerId, value), `Opacity: ${layer.name}`);
+      if (!changed) setDraftLayerOpacities((current) => ({ ...current, [layerId]: layer.opacity }));
+    } finally {
+      setLayerBusyId(undefined);
+    }
+  };
+
   const chooseLook = (look: SavedStyleProfile) => {
     setSelectedLookId(look.id);
     setLookStrength(appliedLookLayer?.styleProfileId === look.id ? appliedLookLayer.strength : 0.75);
@@ -454,10 +528,11 @@ export const StudioScreen = ({ onClose }: { onClose: () => void }) => {
 
       <View style={styles.canvas}>
         <PhotoCanvas
-          uri={selectedPhoto.originalUri}
+          uri={selectedPhoto.analysisProxyUri}
           stack={previewStack}
           analysis={analysis}
           target={tool === 'ai' && generativeOperation !== 'expand' ? generativeTarget : undefined}
+          onTargetChange={tool === 'ai' && generativeOperation !== 'expand' ? updateGenerativeTarget : undefined}
           showIssues={tool === 'coach'}
         />
       </View>
@@ -496,6 +571,20 @@ export const StudioScreen = ({ onClose }: { onClose: () => void }) => {
               onResetControl={(key) => void commitAdjustment(key, 0)}
               onRestore={() => void restoreAdjustments()}
               busy={applying}
+            />
+          ) : null}
+
+          {tool === 'transform' ? (
+            <TransformSheet
+              transform={draftTransform}
+              width={selectedPhoto.width}
+              height={selectedPhoto.height}
+              busy={applying}
+              onStraightenChange={(degrees) => setDraftTransform((current) => withStraighten(current, degrees))}
+              onStraightenCommit={(degrees) => void commitTransform(withStraighten(draftTransform, degrees), 'Straighten')}
+              onCrop={cropPhoto}
+              onRotate={() => void commitTransform(rotateClockwise(draftTransform), 'Rotate 90°')}
+              onRestore={() => void commitTransform(restoreManualTransform(draftTransform), 'Restore crop and rotation')}
             />
           ) : null}
 
@@ -544,6 +633,10 @@ export const StudioScreen = ({ onClose }: { onClose: () => void }) => {
           {tool === 'layers' ? (
             <LayersPanel
               stack={version.stack}
+              opacities={draftLayerOpacities}
+              busyLayerId={layerBusyId}
+              onOpacityChange={(layerId, opacity) => setDraftLayerOpacities((current) => ({ ...current, [layerId]: opacity }))}
+              onOpacityCommit={(layerId, opacity) => void commitLayerOpacity(layerId, opacity)}
               onCommit={commit}
             />
           ) : null}
@@ -552,7 +645,13 @@ export const StudioScreen = ({ onClose }: { onClose: () => void }) => {
             <HistoryPanel photo={selectedPhoto} onRestore={restore} />
           ) : null}
         </ScrollView>
-        <StudioToolRail active={tool} onChange={setTool} />
+        <StudioToolRail
+          active={tool}
+          onChange={(nextTool) => {
+            if (tool === 'transform' && nextTool !== 'transform') setDraftTransform(version.stack.canvasTransform);
+            setTool(nextTool);
+          }}
+        />
       </View>
     </SafeAreaView>
   );
@@ -718,7 +817,7 @@ const AiPanel = ({
         ))}
       </View>
 
-      <Text style={styles.sectionTitle}>{operation === 'expand' ? 'Expand edge' : 'Select area'}</Text>
+      <Text style={styles.sectionTitle}>{operation === 'expand' ? 'Expand edge' : 'Drag on photo'}</Text>
       {operation === 'expand' ? (
         <View style={styles.directionGrid}>
           {(['left', 'top', 'bottom', 'right'] as ExpansionDirection[]).map((direction) => (
@@ -768,20 +867,56 @@ const AiPanel = ({
   );
 };
 
-const LayersPanel = ({ stack, onCommit }: { stack: LayerStack; onCommit: (stack: LayerStack, label: string) => Promise<boolean> }) => (
+const LayersPanel = ({
+  stack,
+  opacities,
+  busyLayerId,
+  onOpacityChange,
+  onOpacityCommit,
+  onCommit,
+}: {
+  stack: LayerStack;
+  opacities: Record<string, number>;
+  busyLayerId?: string;
+  onOpacityChange: (layerId: string, opacity: number) => void;
+  onOpacityCommit: (layerId: string, opacity: number) => void;
+  onCommit: (stack: LayerStack, label: string) => Promise<boolean>;
+}) => (
   <>
     {stack.layers.length === 0 ? <Text style={styles.placeholder}>No edits yet</Text> : null}
     {[...stack.layers].reverse().map((layer, reverseIndex) => {
       const index = stack.layers.length - 1 - reverseIndex;
+      const opacity = opacities[layer.id] ?? layer.opacity;
+      const busy = Boolean(busyLayerId);
       return (
-        <View key={layer.id} style={[styles.layerRow, !layer.enabled && styles.layerDisabled]}>
-          <Pressable accessibilityRole="switch" accessibilityState={{ checked: layer.enabled }} accessibilityLabel={`${layer.enabled ? 'Hide' : 'Show'} ${layer.name}`} style={styles.layerControl} onPress={() => onCommit(toggleLayer(stack, layer.id), `${layer.enabled ? 'Hide' : 'Show'} ${layer.name}`)}>
-            <MaterialCommunityIcons name={layer.enabled ? 'eye' : 'eye-off-outline'} size={20} color={colors.lime} />
-          </Pressable>
-          <View style={styles.layerInfo}><Text numberOfLines={1} style={styles.layerName}>{layer.name}</Text><Text style={styles.caption}>{Math.round(layer.opacity * 100)}%</Text></View>
-          <Pressable accessibilityRole="button" accessibilityLabel={`Move ${layer.name} up`} style={styles.layerControl} onPress={() => onCommit(reorderLayer(stack, layer.id, 1), `Move ${layer.name}`)} disabled={index === stack.layers.length - 1}><MaterialCommunityIcons name="arrow-up" size={20} color={colors.ink} /></Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel={`Move ${layer.name} down`} style={styles.layerControl} onPress={() => onCommit(reorderLayer(stack, layer.id, -1), `Move ${layer.name}`)} disabled={index === 0}><MaterialCommunityIcons name="arrow-down" size={20} color={colors.ink} /></Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${layer.name}`} style={styles.layerControl} onPress={() => onCommit(removeLayer(stack, layer.id), `Remove ${layer.name}`)}><MaterialCommunityIcons name="close" size={22} color={colors.danger} /></Pressable>
+        <View key={layer.id} style={styles.layerBlock}>
+          <View style={[styles.layerRow, !layer.enabled && styles.layerDisabled]}>
+            <Pressable accessibilityRole="switch" accessibilityState={{ checked: layer.enabled }} accessibilityLabel={`${layer.enabled ? 'Hide' : 'Show'} ${layer.name}`} style={styles.layerControl} disabled={busy} onPress={() => onCommit(toggleLayer(stack, layer.id), `${layer.enabled ? 'Hide' : 'Show'} ${layer.name}`)}>
+              <MaterialCommunityIcons name={layer.enabled ? 'eye' : 'eye-off-outline'} size={20} color={colors.lime} />
+            </Pressable>
+            <View style={styles.layerInfo}><Text numberOfLines={1} style={styles.layerName}>{layer.name}</Text></View>
+            <Pressable accessibilityRole="button" accessibilityLabel={`Move ${layer.name} up`} style={styles.layerControl} onPress={() => onCommit(reorderLayer(stack, layer.id, 1), `Move ${layer.name}`)} disabled={index === stack.layers.length - 1 || busy}><MaterialCommunityIcons name="arrow-up" size={20} color={colors.ink} /></Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel={`Move ${layer.name} down`} style={styles.layerControl} onPress={() => onCommit(reorderLayer(stack, layer.id, -1), `Move ${layer.name}`)} disabled={index === 0 || busy}><MaterialCommunityIcons name="arrow-down" size={20} color={colors.ink} /></Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${layer.name}`} style={styles.layerControl} onPress={() => onCommit(removeLayer(stack, layer.id), `Remove ${layer.name}`)} disabled={busy}><MaterialCommunityIcons name="close" size={22} color={colors.danger} /></Pressable>
+          </View>
+          <View style={styles.opacityRow}>
+            <Text style={styles.opacityValue}>{Math.round(opacity * 100)}%</Text>
+            <Slider
+              style={styles.opacitySlider}
+              accessibilityLabel={`${layer.name} opacity`}
+              accessibilityHint="Changes apply when you release the slider"
+              minimumValue={0}
+              maximumValue={1}
+              step={0.01}
+              value={opacity}
+              disabled={busy}
+              onValueChange={(value) => onOpacityChange(layer.id, value)}
+              onSlidingComplete={(value) => onOpacityCommit(layer.id, value)}
+              minimumTrackTintColor={colors.lime}
+              maximumTrackTintColor={colors.line}
+              thumbTintColor={colors.ink}
+            />
+          </View>
         </View>
       );
     })}
@@ -824,7 +959,7 @@ const styles = StyleSheet.create({
   body: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 4 },
   caption: { color: colors.muted, fontSize: 12, lineHeight: 17 },
   chips: { gap: 8, paddingVertical: 12 },
-  chip: { minHeight: 40, maxWidth: 180, borderRadius: 20, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.line },
+  chip: { minHeight: 48, maxWidth: 180, borderRadius: 24, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.line },
   chipActive: { backgroundColor: colors.lime, borderColor: colors.lime },
   chipText: { color: colors.muted, fontSize: 12, fontWeight: '700' },
   chipTextActive: { color: colors.limeInk },
@@ -851,18 +986,22 @@ const styles = StyleSheet.create({
   askButton: { minWidth: 64, minHeight: 48, borderRadius: 8, backgroundColor: colors.lime, alignItems: 'center', justifyContent: 'center' },
   askButtonText: { color: colors.limeInk, fontSize: 12, fontWeight: '800' },
   segmented: { flexDirection: 'row', minHeight: 48, borderRadius: 9, padding: 3, backgroundColor: colors.canvas, marginBottom: 16 },
-  segment: { flex: 1, minHeight: 42, borderRadius: 7, alignItems: 'center', justifyContent: 'center' },
+  segment: { flex: 1, minHeight: 48, borderRadius: 7, alignItems: 'center', justifyContent: 'center' },
   segmentActive: { backgroundColor: colors.panelRaised },
   segmentText: { color: colors.muted, fontSize: 13, fontWeight: '700' },
   segmentTextActive: { color: colors.ink },
   promptInput: { minHeight: 76, color: colors.ink, backgroundColor: colors.canvas, borderWidth: 1, borderColor: colors.line, borderRadius: 8, padding: 12, textAlignVertical: 'top', marginBottom: 12, fontSize: 13 },
   disabled: { opacity: 0.45 },
   placeholder: { color: colors.muted, fontSize: 13, textAlign: 'center', paddingVertical: 24 },
-  layerRow: { minHeight: 58, flexDirection: 'row', gap: 2, alignItems: 'center', borderBottomColor: colors.line, borderBottomWidth: StyleSheet.hairlineWidth },
+  layerBlock: { paddingBottom: 8, borderBottomColor: colors.line, borderBottomWidth: StyleSheet.hairlineWidth },
+  layerRow: { minHeight: 54, flexDirection: 'row', gap: 2, alignItems: 'center' },
   layerDisabled: { opacity: 0.48 },
-  layerControl: { width: 44, height: 48, alignItems: 'center', justifyContent: 'center' },
+  layerControl: { width: 48, height: 48, alignItems: 'center', justifyContent: 'center' },
   layerInfo: { flex: 1 },
   layerName: { color: colors.ink, fontSize: 13, fontWeight: '700' },
+  opacityRow: { minHeight: 48, flexDirection: 'row', alignItems: 'center', paddingLeft: 48, paddingRight: 4 },
+  opacityValue: { width: 42, color: colors.muted, fontSize: 11, fontVariant: ['tabular-nums'] },
+  opacitySlider: { flex: 1, height: 48 },
   historyRow: { minHeight: 62, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomColor: colors.line, borderBottomWidth: StyleSheet.hairlineWidth },
   timelineDot: { width: 10, height: 10, borderRadius: 5, borderWidth: 2, borderColor: colors.muted },
   timelineDotActive: { borderColor: colors.lime, backgroundColor: colors.lime },

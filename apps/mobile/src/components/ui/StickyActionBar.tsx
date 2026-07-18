@@ -5,7 +5,9 @@ import { StyleSheet, View } from 'react-native';
 import { colors, layout, spacing } from '../theme';
 
 export const StickyActionBar = ({ children }: PropsWithChildren) => (
-  <View style={styles.bar}>{children}</View>
+  <View style={styles.bar}>
+    <View style={styles.content}>{children}</View>
+  </View>
 );
 
 const styles = StyleSheet.create({
@@ -22,5 +24,10 @@ const styles = StyleSheet.create({
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: colors.outline,
     zIndex: 10,
+  },
+  content: {
+    width: '100%',
+    maxWidth: layout.readingMaxWidth,
+    alignSelf: 'center',
   },
 });

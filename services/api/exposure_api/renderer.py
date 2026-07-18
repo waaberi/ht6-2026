@@ -153,9 +153,6 @@ def _apply_canvas_transform(image: Image.Image, transform: dict[str, Any]) -> Im
             result = result.transform(result.size, Image.Transform.PERSPECTIVE, coefficients, resample=Image.Resampling.BICUBIC)
         except np.linalg.LinAlgError:
             pass
-    rotation = float(transform.get("rotationDegrees", 0))
-    if rotation:
-        result = result.rotate(-rotation, resample=Image.Resampling.BICUBIC, expand=False)
     crop = transform.get("crop")
     if crop:
         left = max(0, min(result.width - 1, round(float(crop.get("x", 0)) * result.width)))
@@ -163,6 +160,27 @@ def _apply_canvas_transform(image: Image.Image, transform: dict[str, Any]) -> Im
         right = max(left + 1, min(result.width, round((float(crop.get("x", 0)) + float(crop.get("width", 1))) * result.width)))
         bottom = max(top + 1, min(result.height, round((float(crop.get("y", 0)) + float(crop.get("height", 1))) * result.height)))
         result = result.crop((left, top, right, bottom))
+    rotation = float(transform.get("rotationDegrees", 0))
+    if rotation:
+        quarter_turns = round(rotation / 90)
+        quarter_degrees = quarter_turns * 90
+        straighten = rotation - quarter_degrees
+        if quarter_turns % 4:
+            result = result.rotate(-quarter_degrees, resample=Image.Resampling.BICUBIC, expand=True)
+        if abs(straighten) > 0.001:
+            width, height = result.size
+            radians = np.deg2rad(abs(straighten))
+            cosine, sine = abs(np.cos(radians)), abs(np.sin(radians))
+            scale = max(
+                (width * cosine + height * sine) / max(1, width),
+                (width * sine + height * cosine) / max(1, height),
+            )
+            scaled_size = (max(width, round(width * scale)), max(height, round(height * scale)))
+            enlarged = result.resize(scaled_size, Image.Resampling.LANCZOS)
+            rotated = enlarged.rotate(-straighten, resample=Image.Resampling.BICUBIC, expand=False)
+            left = max(0, (rotated.width - width) // 2)
+            top = max(0, (rotated.height - height) // 2)
+            result = rotated.crop((left, top, left + width, top + height))
     expansion = transform.get("expansion")
     if expansion:
         result = ImageOps.expand(result, border=(int(expansion.get("left", 0)), int(expansion.get("top", 0)), int(expansion.get("right", 0)), int(expansion.get("bottom", 0))), fill="black")

@@ -9,8 +9,8 @@ import {
   Rect,
   useImage,
 } from '@shopify/react-native-skia';
-import React, { useMemo, useState } from 'react';
-import { StyleSheet, View } from 'react-native';
+import React, { useMemo, useRef, useState } from 'react';
+import { PanResponder, StyleSheet, View } from 'react-native';
 
 import type { AdjustmentValues, AnalysisResult, LayerStack, Region } from '../domain/types';
 import { colors } from './theme';
@@ -62,12 +62,14 @@ export const PhotoCanvas = ({
   stack,
   analysis,
   target,
+  onTargetChange,
   showIssues = true,
 }: {
   uri: string;
   stack: LayerStack;
   analysis?: AnalysisResult;
   target?: Region;
+  onTargetChange?: (target: Region) => void;
   showIssues?: boolean;
 }) => {
   const image = useImage(uri);
@@ -77,6 +79,11 @@ export const PhotoCanvas = ({
   const denoise = Math.max(0, adjustments.denoise ?? 0);
   const grain = Math.max(0, adjustments.grain ?? 0);
   const vignette = Math.max(-1, Math.min(1, adjustments.vignette ?? 0));
+  const rotationDegrees = stack.canvasTransform.rotationDegrees;
+  const quarterTurns = Math.round(rotationDegrees / 90);
+  const swapsDimensions = Math.abs(quarterTurns) % 2 === 1;
+  const straightenDegrees = rotationDegrees - quarterTurns * 90;
+  const rotation = -rotationDegrees * Math.PI / 180;
   const geometry = useMemo(() => {
     const imageWidth = image?.width() ?? 1;
     const imageHeight = image?.height() ?? 1;
@@ -84,71 +91,156 @@ export const PhotoCanvas = ({
     const expansion = stack.canvasTransform.expansion ?? { top: 0, right: 0, bottom: 0, left: 0 };
     const croppedWidth = imageWidth * crop.width;
     const croppedHeight = imageHeight * crop.height;
-    const expandedWidth = croppedWidth + expansion.left + expansion.right;
-    const expandedHeight = croppedHeight + expansion.top + expansion.bottom;
+    const contentWidth = swapsDimensions ? croppedHeight : croppedWidth;
+    const contentHeight = swapsDimensions ? croppedWidth : croppedHeight;
+    const expandedWidth = contentWidth + expansion.left + expansion.right;
+    const expandedHeight = contentHeight + expansion.top + expansion.bottom;
     const scale = Math.min(size.width / expandedWidth, size.height / expandedHeight);
     const displayWidth = expandedWidth * scale;
     const displayHeight = expandedHeight * scale;
     const display = { x: (size.width - displayWidth) / 2, y: (size.height - displayHeight) / 2, width: displayWidth, height: displayHeight };
     const fullWidth = imageWidth * scale;
     const fullHeight = imageHeight * scale;
-    const cropped = {
+    const content = {
       x: display.x + expansion.left * scale,
       y: display.y + expansion.top * scale,
+      width: contentWidth * scale,
+      height: contentHeight * scale,
+    };
+    const center = { x: content.x + content.width / 2, y: content.y + content.height / 2 };
+    const cropped = {
+      x: center.x - croppedWidth * scale / 2,
+      y: center.y - croppedHeight * scale / 2,
       width: croppedWidth * scale,
       height: croppedHeight * scale,
     };
+    const straightenRadians = Math.abs(straightenDegrees) * Math.PI / 180;
+    const cosine = Math.abs(Math.cos(straightenRadians));
+    const sine = Math.abs(Math.sin(straightenRadians));
+    const straightenScale = Math.max(
+      (contentWidth * cosine + contentHeight * sine) / Math.max(1, contentWidth),
+      (contentWidth * sine + contentHeight * cosine) / Math.max(1, contentHeight),
+    );
     return {
       crop,
       expansion,
       scale,
       croppedWidth,
       croppedHeight,
+      contentWidth,
+      contentHeight,
       display,
+      content,
+      center,
+      straightenScale,
       full: { x: cropped.x - crop.x * fullWidth, y: cropped.y - crop.y * fullHeight, width: fullWidth, height: fullHeight },
     };
-  }, [image, size, stack.canvasTransform.crop, stack.canvasTransform.expansion]);
-  const rotation = -stack.canvasTransform.rotationDegrees * Math.PI / 180;
+  }, [image, size, stack.canvasTransform.crop, stack.canvasTransform.expansion, straightenDegrees, swapsDimensions]);
+  const selectionStart = useRef<{ x: number; y: number } | null>(null);
+  const selectionResponder = useMemo(() => {
+    const display = geometry.display;
+    const normalize = (x: number, y: number) => ({
+      x: Math.max(0, Math.min(1, (x - display.x) / Math.max(1, display.width))),
+      y: Math.max(0, Math.min(1, (y - display.y) / Math.max(1, display.height))),
+    });
+    const isInside = (x: number, y: number) => (
+      x >= display.x
+      && x <= display.x + display.width
+      && y >= display.y
+      && y <= display.y + display.height
+    );
+    const updateSelection = (x: number, y: number, final = false) => {
+      if (!onTargetChange || !selectionStart.current) return;
+      const end = normalize(x, y);
+      const start = selectionStart.current;
+      let left = Math.min(start.x, end.x);
+      let top = Math.min(start.y, end.y);
+      let width = Math.abs(end.x - start.x);
+      let height = Math.abs(end.y - start.y);
+      if (final && width < 0.025 && height < 0.025) {
+        width = 0.18;
+        height = 0.18;
+        left = Math.max(0, Math.min(1 - width, end.x - width / 2));
+        top = Math.max(0, Math.min(1 - height, end.y - height / 2));
+      } else {
+        width = Math.max(0.005, width);
+        height = Math.max(0.005, height);
+      }
+      onTargetChange({ x: left, y: top, width: Math.min(1 - left, width), height: Math.min(1 - top, height) });
+    };
+    return PanResponder.create({
+      onStartShouldSetPanResponderCapture: (event) => Boolean(
+        onTargetChange
+        && event.nativeEvent.touches.length === 1
+        && isInside(event.nativeEvent.locationX, event.nativeEvent.locationY),
+      ),
+      onMoveShouldSetPanResponderCapture: (event) => Boolean(
+        onTargetChange
+        && event.nativeEvent.touches.length === 1
+        && isInside(event.nativeEvent.locationX, event.nativeEvent.locationY),
+      ),
+      onPanResponderGrant: (event) => {
+        selectionStart.current = normalize(event.nativeEvent.locationX, event.nativeEvent.locationY);
+      },
+      onPanResponderMove: (event) => updateSelection(event.nativeEvent.locationX, event.nativeEvent.locationY),
+      onPanResponderRelease: (event) => {
+        updateSelection(event.nativeEvent.locationX, event.nativeEvent.locationY, true);
+        selectionStart.current = null;
+      },
+      onPanResponderTerminate: () => { selectionStart.current = null; },
+      onPanResponderTerminationRequest: () => false,
+    });
+  }, [geometry.display, onTargetChange]);
+  const targetRect = target ? {
+    x: geometry.display.x + target.x * geometry.display.width,
+    y: geometry.display.y + target.y * geometry.display.height,
+    width: target.width * geometry.display.width,
+    height: target.height * geometry.display.height,
+  } : undefined;
 
   return (
     <View
       style={styles.frame}
       onLayout={(event) => setSize(event.nativeEvent.layout)}
-      accessibilityLabel="Non-destructive photo preview"
+      accessibilityLabel={onTargetChange ? 'Photo preview. Drag to select an area.' : 'Non-destructive photo preview'}
+      accessibilityHint={onTargetChange ? 'Drag a rectangle over the area for the AI edit.' : undefined}
+      {...selectionResponder.panHandlers}
     >
       <Canvas style={StyleSheet.absoluteFill}>
         <Group clip={geometry.display}>
-          <Group origin={{ x: size.width / 2, y: size.height / 2 }} transform={[{ rotate: rotation }]}>
-            <SkiaImage image={image} {...geometry.full} fit="fill">
-              <ColorMatrix matrix={matrix} />
-              {denoise > 0 ? <Blur blur={denoise * 1.5} /> : null}
-            </SkiaImage>
-            {stack.layers.map((layer) => {
-              if (!layer.enabled || layer.type !== 'masked-adjustment' || !layer.mask.region) return null;
-              const maskedValues = { ...adjustments };
-              addAdjustments(maskedValues, layer.adjustments, layer.opacity);
-              const region = layer.mask.region;
-              const clip = {
-                x: geometry.full.x + region.x * geometry.full.width,
-                y: geometry.full.y + region.y * geometry.full.height,
-                width: region.width * geometry.full.width,
-                height: region.height * geometry.full.height,
-              };
-              return (
-                <Group key={layer.id} clip={clip}>
-                  <SkiaImage image={image} {...geometry.full} fit="fill">
-                    <ColorMatrix matrix={adjustmentMatrix(maskedValues)} />
-                  </SkiaImage>
-                </Group>
-              );
-            })}
-            {stack.layers.map((layer) => {
-              if (!layer.enabled) return null;
-              if (layer.type === 'image') return <OverlayImage key={layer.id} uri={layer.uri} opacity={layer.opacity} rect={geometry.full} />;
-              if (layer.type === 'retouch') return <OverlayImage key={layer.id} uri={layer.patchUri} opacity={layer.opacity} rect={geometry.full} />;
-              if (layer.type === 'generative-patch' && !layer.canvasSpace) return <OverlayImage key={layer.id} uri={layer.patchUri} opacity={layer.opacity} rect={geometry.full} />;
-              return null;
-            })}
+          <Group clip={geometry.content}>
+            <Group origin={geometry.center} transform={[{ scale: geometry.straightenScale }, { rotate: rotation }]}>
+              <SkiaImage image={image} {...geometry.full} fit="fill">
+                <ColorMatrix matrix={matrix} />
+                {denoise > 0 ? <Blur blur={denoise * 1.5} /> : null}
+              </SkiaImage>
+              {stack.layers.map((layer) => {
+                if (!layer.enabled || layer.type !== 'masked-adjustment' || !layer.mask.region) return null;
+                const maskedValues = { ...adjustments };
+                addAdjustments(maskedValues, layer.adjustments, layer.opacity);
+                const region = layer.mask.region;
+                const clip = {
+                  x: geometry.full.x + region.x * geometry.full.width,
+                  y: geometry.full.y + region.y * geometry.full.height,
+                  width: region.width * geometry.full.width,
+                  height: region.height * geometry.full.height,
+                };
+                return (
+                  <Group key={layer.id} clip={clip}>
+                    <SkiaImage image={image} {...geometry.full} fit="fill">
+                      <ColorMatrix matrix={adjustmentMatrix(maskedValues)} />
+                    </SkiaImage>
+                  </Group>
+                );
+              })}
+              {stack.layers.map((layer) => {
+                if (!layer.enabled) return null;
+                if (layer.type === 'image') return <OverlayImage key={layer.id} uri={layer.uri} opacity={layer.opacity} rect={geometry.full} />;
+                if (layer.type === 'retouch') return <OverlayImage key={layer.id} uri={layer.patchUri} opacity={layer.opacity} rect={geometry.full} />;
+                if (layer.type === 'generative-patch' && !layer.canvasSpace) return <OverlayImage key={layer.id} uri={layer.patchUri} opacity={layer.opacity} rect={geometry.full} />;
+                return null;
+              })}
+            </Group>
           </Group>
           {grain > 0 ? (
             <Group opacity={grain * 0.16} blendMode="overlay">
@@ -175,8 +267,8 @@ export const PhotoCanvas = ({
             const rect = {
               x: geometry.display.x + (geometry.expansion.left - snapshot.left) * geometry.scale,
               y: geometry.display.y + (geometry.expansion.top - snapshot.top) * geometry.scale,
-              width: (geometry.croppedWidth + snapshot.left + snapshot.right) * geometry.scale,
-              height: (geometry.croppedHeight + snapshot.top + snapshot.bottom) * geometry.scale,
+              width: (geometry.contentWidth + snapshot.left + snapshot.right) * geometry.scale,
+              height: (geometry.contentHeight + snapshot.top + snapshot.bottom) * geometry.scale,
             };
             return <OverlayImage key={layer.id} uri={layer.patchUri} opacity={layer.opacity} rect={rect} />;
           })}
@@ -192,16 +284,14 @@ export const PhotoCanvas = ({
               strokeWidth={1.5}
             />
           )) : null}
-          {target ? (
-            <Rect
-              x={geometry.display.x + target.x * geometry.display.width}
-              y={geometry.display.y + target.y * geometry.display.height}
-              width={target.width * geometry.display.width}
-              height={target.height * geometry.display.height}
-              color={colors.lime}
-              style="stroke"
-              strokeWidth={3}
-            />
+          {targetRect ? (
+            <Group>
+              <Rect x={geometry.display.x} y={geometry.display.y} width={geometry.display.width} height={Math.max(0, targetRect.y - geometry.display.y)} color="rgba(34,26,27,0.44)" />
+              <Rect x={geometry.display.x} y={targetRect.y + targetRect.height} width={geometry.display.width} height={Math.max(0, geometry.display.y + geometry.display.height - targetRect.y - targetRect.height)} color="rgba(34,26,27,0.44)" />
+              <Rect x={geometry.display.x} y={targetRect.y} width={Math.max(0, targetRect.x - geometry.display.x)} height={targetRect.height} color="rgba(34,26,27,0.44)" />
+              <Rect x={targetRect.x + targetRect.width} y={targetRect.y} width={Math.max(0, geometry.display.x + geometry.display.width - targetRect.x - targetRect.width)} height={targetRect.height} color="rgba(34,26,27,0.44)" />
+              <Rect {...targetRect} color={colors.lime} style="stroke" strokeWidth={3} />
+            </Group>
           ) : null}
         </Group>
       </Canvas>

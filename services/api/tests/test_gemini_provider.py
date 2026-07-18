@@ -1,9 +1,10 @@
 import asyncio
 import base64
+import json
 from importlib.metadata import version
 from types import SimpleNamespace
 
-from exposure_api.models import Region
+from exposure_api.models import AnalysisResult, CoachRequest, Region
 from exposure_api.providers import GeminiProvider
 
 
@@ -56,3 +57,80 @@ def test_expand_prompt_requests_scene_continuation() -> None:
     prompt = captured["input"][0]["text"]  # type: ignore[index]
     assert "operation: expand" in prompt
     assert "Fill the black target band" in prompt
+
+
+def test_coach_prompt_exposes_only_enabled_tools_and_photography_contract() -> None:
+    captured: dict[str, object] = {}
+
+    class Interactions:
+        def create(self, **kwargs: object) -> SimpleNamespace:
+            captured.update(kwargs)
+            return SimpleNamespace(output_text=json.dumps({
+                "headline": "Protect the subject",
+                "reason": "The crop should preserve the subject hierarchy.",
+                "evidence": [
+                    {"path": "metrics.meanLuminance", "value": 0.48, "meaning": "Measured luminance."},
+                    {"path": "invented.focusScore", "value": 1, "meaning": "Not supplied."},
+                ],
+                "captureAdvice": [
+                    {"setting": "stability", "value": "Brace the phone", "basedOn": ["metrics.meanLuminance"]},
+                    {"setting": "iso", "value": "ISO 100", "tradeoff": "Less noise", "basedOn": ["EXIF.ISO"]},
+                ],
+                "actions": [],
+            }))
+
+    analysis = AnalysisResult(
+        version_id="version",
+        checksum="checksum",
+        metrics={"meanLuminance": 0.48},
+        lighting={
+            "exposure": 0,
+            "contrast": 0.2,
+            "clippedShadows": 0,
+            "clippedHighlights": 0,
+            "colorCast": {"red": 0, "green": 0, "blue": 0},
+        },
+        issues=[],
+        camera_recommendations=[],
+        summary="Balanced exposure.",
+    )
+    request = CoachRequest(
+        analysis=analysis,
+        question="Can I tighten the frame?",
+        available_tools=["crop"],
+    )
+    provider = GeminiProvider()
+    provider._client = SimpleNamespace(interactions=Interactions())  # type: ignore[assignment]
+
+    result = asyncio.run(provider.coach(request))
+
+    assert result is not None
+    assert [item.path for item in result.evidence] == ["metrics.meanLuminance"]
+    assert [item.setting for item in result.capture_advice] == ["stability"]
+    prompt = captured["input"]
+    assert "- crop:" in prompt
+    assert "- remove:" not in prompt
+    assert "shutter speed, aperture, and ISO as linked exposure tradeoffs" in prompt
+    assert "Return the supplied JSON schema only" in prompt
+    schema = captured["response_format"]["schema"]  # type: ignore[index]
+    assert {"headline", "reason"}.issubset(schema["required"])
+
+
+def test_coach_request_defaults_to_full_tool_contract_but_respects_explicit_empty_list() -> None:
+    analysis = AnalysisResult(
+        version_id="version",
+        checksum="checksum",
+        metrics={},
+        lighting={
+            "exposure": 0,
+            "contrast": 0,
+            "clippedShadows": 0,
+            "clippedHighlights": 0,
+            "colorCast": {"red": 0, "green": 0, "blue": 0},
+        },
+        issues=[],
+        camera_recommendations=[],
+        summary="Fixture",
+    )
+    assert len(CoachRequest(analysis=analysis, question="Help").available_tools) == 8
+    assert CoachRequest(analysis=analysis, question="Help", available_tools=[]).available_tools == []

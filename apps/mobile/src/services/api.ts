@@ -3,6 +3,7 @@ import { File } from 'expo-file-system';
 
 import { exifForRemoteAnalysis } from '../data/photoRepository';
 import { loadPreferences } from '../data/preferences';
+import { ensureLocalOriginal } from './cloudOriginal';
 import { resolveApiUrl } from '../domain/apiConfiguration';
 import { layerAssetsForStack } from '../domain/assets';
 import { currentVersion } from '../domain/layers';
@@ -104,7 +105,7 @@ export const requestRender = async (
   options: { includeMetadata: boolean; includeGps: boolean },
 ) => {
   const form = new FormData();
-  const original = new File(photo.originalUri);
+  const original = await ensureLocalOriginal(photo);
   form.append('image', original as unknown as Blob, original.name);
   form.append('layer_stack_json', JSON.stringify(stack));
   form.append('include_metadata', String(options.includeMetadata));
@@ -139,7 +140,7 @@ export const createGenerativePatch = async (
   expansionDirection: 'top' | 'right' | 'bottom' | 'left' = 'right',
 ): Promise<GenerativePatchResult> => {
   const form = new FormData();
-  const original = new File(photo.originalUri);
+  const original = await ensureLocalOriginal(photo);
   form.append('image', original as unknown as Blob, original.name);
   form.append('target_json', JSON.stringify(target));
   form.append('prompt', prompt);

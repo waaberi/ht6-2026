@@ -2,6 +2,7 @@ import { Directory, File, Paths } from 'expo-file-system';
 
 import { layerAssetsForStacks } from '../domain/assets';
 import { mergeStyleProfiles, type SavedStyleProfile } from '../data/styleRepository';
+import { clearPhotoDeletionId } from '../data/photoRepository';
 import { loadPreferences, savePreferences, type ExposurePreferences } from '../data/preferences';
 import type { AnalysisResult, Layer, PhotoRecord, PhotoVersion } from '../domain/types';
 import type { PortfolioReview, StyleProfileResult } from './api';
@@ -12,6 +13,45 @@ const uploadOnce = async (bucket: string, path: string, uri: string, contentType
   const bytes = await new File(uri).arrayBuffer();
   const { error } = await supabase.storage.from(bucket).upload(path, bytes, { contentType, upsert: false });
   if (error && !/already exists|duplicate/i.test(error.message)) throw error;
+};
+
+export const syncPhotoDeletions = async (photoIds: string[]): Promise<string[]> => {
+  if (!supabase || photoIds.length === 0) return [];
+  const { data: sessionData } = await supabase.auth.getSession();
+  const userId = sessionData.session?.user.id;
+  if (!userId) return [];
+
+  const completed: string[] = [];
+  for (const photoId of photoIds) {
+    const [{ data: photo, error: photoError }, { data: assets, error: assetsError }] = await Promise.all([
+      supabase.from('photos').select('original_path').eq('id', photoId).eq('owner_id', userId).maybeSingle(),
+      supabase.from('layer_assets').select('storage_path').eq('photo_id', photoId).eq('owner_id', userId),
+    ]);
+    if (photoError) throw photoError;
+    if (assetsError) throw assetsError;
+
+    const originalPath = photo?.original_path as string | undefined;
+    if (originalPath) {
+      const base = originalPath.replace(/\/original\.[^/]+$/, '');
+      const { error } = await supabase.storage.from('originals').remove([originalPath]);
+      if (error) throw error;
+      const { error: derivedError } = await supabase.storage.from('derived').remove([
+        `${base}/analysis-proxy.jpg`,
+        `${base}/thumbnail.jpg`,
+      ]);
+      if (derivedError) throw derivedError;
+    }
+    const assetPaths = (assets ?? []).map((asset) => asset.storage_path as string);
+    if (assetPaths.length) {
+      const { error } = await supabase.storage.from('layer-assets').remove(assetPaths);
+      if (error) throw error;
+    }
+    const { error: deleteError } = await supabase.from('photos').delete().eq('id', photoId).eq('owner_id', userId);
+    if (deleteError) throw deleteError;
+    await clearPhotoDeletionId(photoId);
+    completed.push(photoId);
+  }
+  return completed;
 };
 
 export const syncQueuedPhotos = async (
@@ -155,6 +195,20 @@ const downloadPrivateObject = async (bucket: string, path: string, destination: 
   await File.downloadFileAsync(data.signedUrl, destination, { idempotent: true });
 };
 
+const mapWithConcurrency = async <T, R>(items: T[], limit: number, work: (item: T) => Promise<R>) => {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await work(items[index]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+};
+
 const withLocalAssetUris = (layer: Layer, assetUris: Map<string, string>): Layer => {
   if (layer.type === 'image') {
     return { ...layer, uri: assetUris.get(layer.assetId) ?? layer.uri };
@@ -184,7 +238,7 @@ const hydrateRemotePhoto = async (
   const currentVersion = versions.find((version) => version.id === photo.current_version_id) ?? versions.at(-1);
 
   await Promise.all([
-    downloadPrivateObject('originals', photo.original_path, original),
+    currentVersion?.analysis_proxy_path ? Promise.resolve() : downloadPrivateObject('originals', photo.original_path, original),
     currentVersion?.analysis_proxy_path
       ? downloadPrivateObject('derived', currentVersion.analysis_proxy_path, proxy)
       : Promise.resolve(),
@@ -194,11 +248,11 @@ const hydrateRemotePhoto = async (
   ]);
 
   const assetUris = new Map<string, string>();
-  await Promise.all(assets.map(async (asset) => {
+  await mapWithConcurrency(assets, 4, async (asset) => {
     const local = new File(layerAssetsDirectory, `${asset.id}.${extensionForPath(asset.storage_path, asset.mime_type === 'image/png' ? 'png' : 'jpg')}`);
     await downloadPrivateObject('layer-assets', asset.storage_path, local);
     assetUris.set(asset.id, local.uri);
-  }));
+  });
 
   const hydratedVersions: PhotoVersion[] = versions
     .sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at))
@@ -221,6 +275,7 @@ const hydrateRemotePhoto = async (
     createdAt: photo.created_at,
     captureSource: photo.capture_source,
     originalUri: original.uri,
+    remoteOriginalPath: photo.original_path,
     originalName: photo.original_name,
     originalMimeType: photo.original_mime_type,
     originalByteSize: Number(photo.original_byte_size),
@@ -240,7 +295,7 @@ const hydrateRemotePhoto = async (
  * Pulls the private cloud library after sign-in so another device can rebuild
  * the same originals, version stacks, and generated/imported layer assets.
  */
-export const pullRemotePhotos = async (localPhotos: PhotoRecord[]): Promise<PhotoRecord[]> => {
+export const pullRemotePhotos = async (localPhotos: PhotoRecord[], excludedPhotoIds: string[] = []): Promise<PhotoRecord[]> => {
   if (!supabase) return localPhotos;
   const { data: sessionData } = await supabase.auth.getSession();
   const userId = sessionData.session?.user.id;
@@ -252,9 +307,11 @@ export const pullRemotePhotos = async (localPhotos: PhotoRecord[]): Promise<Phot
     .eq('owner_id', userId)
     .order('created_at', { ascending: false });
   if (photoError) throw photoError;
-  if (!photoRows?.length) return localPhotos;
+  const excluded = new Set(excludedPhotoIds);
+  const visibleRows = (photoRows ?? []).filter((row) => !excluded.has(row.id as string));
+  if (!visibleRows.length) return localPhotos;
 
-  const photoIds = photoRows.map((row) => row.id as string);
+  const photoIds = visibleRows.map((row) => row.id as string);
   const [{ data: versionRows, error: versionError }, { data: assetRows, error: assetError }] = await Promise.all([
     supabase.from('photo_versions').select('*').in('photo_id', photoIds),
     supabase.from('layer_assets').select('*').in('photo_id', photoIds),
@@ -262,11 +319,11 @@ export const pullRemotePhotos = async (localPhotos: PhotoRecord[]): Promise<Phot
   if (versionError) throw versionError;
   if (assetError) throw assetError;
 
-  const remote = await Promise.all((photoRows as RemotePhotoRow[]).map((photo) => hydrateRemotePhoto(
+  const remote = await mapWithConcurrency(visibleRows as RemotePhotoRow[], 3, (photo) => hydrateRemotePhoto(
     photo,
     (versionRows as RemoteVersionRow[]).filter((version) => version.photo_id === photo.id),
     (assetRows as RemoteLayerAssetRow[]).filter((asset) => asset.photo_id === photo.id),
-  )));
+  ));
 
   const merged = new Map(localPhotos.map((photo) => [photo.id, photo]));
   for (const photo of remote) {

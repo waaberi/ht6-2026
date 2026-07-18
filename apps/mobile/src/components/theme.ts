@@ -8,30 +8,37 @@ export const palette = {
 
 export const colors = {
   background: palette.oxblood,
-  surface: 'rgba(73, 56, 67, 0.52)',
-  surfaceStrong: palette.plum,
+  surface: palette.plum,
+  surfaceStrong: '#58434F',
+  surfaceRaised: '#624A58',
   primary: palette.blush,
   onPrimary: palette.oxblood,
   text: palette.blush,
   textSecondary: palette.sage,
   success: palette.teal,
-  outline: 'rgba(160, 178, 166, 0.34)',
+  onSuccess: palette.oxblood,
+  info: palette.sage,
+  warning: '#E6C978',
+  onWarning: palette.oxblood,
+  error: '#FFB4AB',
+  onError: palette.oxblood,
+  outline: 'rgba(160, 178, 166, 0.52)',
   outlineStrong: palette.sage,
   overlay: 'rgba(34, 26, 27, 0.78)',
   pressed: 'rgba(160, 178, 166, 0.14)',
   disabled: 'rgba(160, 178, 166, 0.38)',
 
-  // Compatibility aliases while the remaining screens migrate to semantic roles.
+  // Deprecated compatibility aliases. New UI must use the semantic roles above.
   ink: palette.blush,
   muted: palette.sage,
-  panel: 'rgba(73, 56, 67, 0.52)',
-  panelRaised: 'rgba(73, 56, 67, 0.72)',
+  panel: palette.plum,
+  panelRaised: '#58434F',
   canvas: palette.oxblood,
   line: 'rgba(160, 178, 166, 0.34)',
   lime: palette.blush,
   limeInk: palette.oxblood,
-  amber: palette.blush,
-  danger: palette.blush,
+  amber: '#E6C978',
+  danger: '#FFB4AB',
   white: '#FFFFFF',
 } as const;
 
@@ -66,4 +73,7 @@ export const layout = {
   screenPadding: 20,
   minTouchTarget: 48,
   stickyActionHeight: 76,
+  formMaxWidth: 480,
+  readingMaxWidth: 720,
+  screenMaxWidth: 1200,
 } as const;

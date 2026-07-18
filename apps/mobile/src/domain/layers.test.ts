@@ -9,6 +9,7 @@ import {
   mergeCollectiveAdjustments,
   restoreVersion,
   setCollectiveAdjustments,
+  setLayerOpacity,
 } from './layers';
 import type { PhotoRecord } from './types';
 
@@ -90,4 +91,16 @@ test('collective edits stay on one photo stack and do not become defaults', () =
   assert.deepEqual(revised.adjustments, { exposure: 0.15, saturation: 0.2 });
   assert.deepEqual(emptyLayerStack().adjustments, {});
   assert.equal(revised.layers.length, 0);
+});
+
+test('layer opacity is immutable and clamped to the supported range', () => {
+  const stack = emptyLayerStack();
+  stack.layers.push(makeAdjustmentLayer('adjustment', { exposure: 0.3 }));
+
+  const faded = setLayerOpacity(stack, 'adjustment', 0.35);
+  const clamped = setLayerOpacity(faded, 'adjustment', 2);
+
+  assert.equal(stack.layers[0].opacity, 1);
+  assert.equal(faded.layers[0].opacity, 0.35);
+  assert.equal(clamped.layers[0].opacity, 1);
 });

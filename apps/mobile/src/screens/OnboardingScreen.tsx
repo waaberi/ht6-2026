@@ -5,6 +5,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -12,7 +13,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { colors } from '../components/theme';
+import { colors, layout, spacing, typography } from '../components/theme';
 import { listenForAuthLinks, sendMagicLink } from '../services/auth';
 import { supabase } from '../services/supabase';
 
@@ -30,7 +31,7 @@ export const resetOnboarding = () =>
 export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => {
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState<string>();
+  const [message, setMessage] = useState<{ text: string; tone: 'info' | 'error' }>();
   const completedRef = useRef(false);
 
   const finish = async () => {
@@ -41,7 +42,7 @@ export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => 
   };
 
   useEffect(() => {
-    const stopLinks = listenForAuthLinks((error) => setMessage(error.message));
+    const stopLinks = listenForAuthLinks((error) => setMessage({ text: error.message, tone: 'error' }));
     void supabase?.auth.getSession().then(({ data }) => {
       if (data.session) void finish();
     });
@@ -59,9 +60,12 @@ export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => 
     setMessage(undefined);
     try {
       await sendMagicLink(email);
-      setMessage('Open the link in your email to continue.');
+      setMessage({ text: 'Check your email to continue.', tone: 'info' });
     } catch (caught) {
-      setMessage(caught instanceof Error ? caught.message : 'Sign-in failed.');
+      setMessage({
+        text: caught instanceof Error ? caught.message : 'Sign-in failed.',
+        tone: 'error',
+      });
     } finally {
       setBusy(false);
     }
@@ -73,87 +77,115 @@ export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => 
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={styles.keyboard}
       >
-        <View style={styles.content}>
-          <Text style={styles.wordmark}>Exposure</Text>
-          <View style={styles.intro}>
-            <Text style={styles.title}>Your photos, everywhere.</Text>
-            <Text style={styles.body}>Sign in to sync originals and edits, or keep shooting offline.</Text>
-          </View>
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={styles.content}>
+            <Text accessibilityRole="header" style={styles.wordmark}>Exposure</Text>
+            <View style={styles.intro}>
+              <Text style={styles.title}>Keep your photos in sync.</Text>
+            </View>
 
-          <View style={styles.form}>
-            <TextInput
-              value={email}
-              onChangeText={setEmail}
-              keyboardType="email-address"
-              autoCapitalize="none"
-              autoCorrect={false}
-              autoComplete="email"
-              returnKeyType="send"
-              onSubmitEditing={signIn}
-              placeholder="Email address"
-              placeholderTextColor={colors.muted}
-              style={styles.input}
-              accessibilityLabel="Email address"
-            />
+            <View style={styles.form}>
+              <TextInput
+                value={email}
+                onChangeText={setEmail}
+                keyboardType="email-address"
+                autoCapitalize="none"
+                autoCorrect={false}
+                autoComplete="email"
+                returnKeyType="send"
+                onSubmitEditing={signIn}
+                placeholder="Email address"
+                placeholderTextColor={colors.textSecondary}
+                style={[styles.input, message?.tone === 'error' && styles.inputError]}
+                accessibilityLabel="Email address"
+                accessibilityHint="A sign-in link will be sent to this address"
+              />
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ disabled: busy, busy }}
+                style={({ pressed }) => [
+                  styles.primary,
+                  busy && styles.disabled,
+                  pressed && styles.pressed,
+                ]}
+                onPress={signIn}
+                disabled={busy}
+              >
+                {busy ? (
+                  <ActivityIndicator color={colors.onPrimary} />
+                ) : (
+                  <Text style={styles.primaryText}>Continue with email</Text>
+                )}
+              </Pressable>
+              {message ? (
+                <Text
+                  accessibilityLiveRegion="polite"
+                  style={[styles.message, message.tone === 'error' && styles.errorMessage]}
+                >
+                  {message.text}
+                </Text>
+              ) : null}
+            </View>
+
             <Pressable
               accessibilityRole="button"
-              style={({ pressed }) => [styles.primary, pressed && styles.pressed]}
-              onPress={signIn}
-              disabled={busy}
+              accessibilityHint="Use Exposure without cloud sync"
+              style={({ pressed }) => [styles.offline, pressed && styles.pressed]}
+              onPress={finish}
             >
-              {busy ? (
-                <ActivityIndicator color={colors.limeInk} />
-              ) : (
-                <Text style={styles.primaryText}>Continue with email</Text>
-              )}
+              <Text style={styles.offlineText}>Continue offline</Text>
             </Pressable>
-            {message ? (
-              <Text accessibilityLiveRegion="polite" style={styles.message}>{message}</Text>
-            ) : null}
           </View>
-
-          <Pressable
-            accessibilityRole="button"
-            style={({ pressed }) => [styles.offline, pressed && styles.pressed]}
-            onPress={finish}
-          >
-            <Text style={styles.offlineText}>Continue offline</Text>
-          </Pressable>
-        </View>
+        </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: colors.canvas },
+  safeArea: { flex: 1, backgroundColor: colors.background },
   keyboard: { flex: 1 },
-  content: { flex: 1, paddingHorizontal: 24, paddingTop: 16, paddingBottom: 16 },
-  wordmark: { color: colors.ink, fontFamily: 'ZenOldMincho_700Bold', fontSize: 22 },
-  intro: { flex: 1, justifyContent: 'center' },
-  title: { color: colors.ink, fontFamily: 'ZenOldMincho_700Bold', fontSize: 36, lineHeight: 44 },
-  body: { color: colors.muted, fontSize: 16, lineHeight: 23, marginTop: 12, maxWidth: 360 },
-  form: { gap: 10 },
+  scrollContent: { flexGrow: 1 },
+  content: {
+    flex: 1,
+    width: '100%',
+    maxWidth: layout.formMaxWidth,
+    alignSelf: 'center',
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.md,
+  },
+  wordmark: { color: colors.text, fontFamily: typography.displayFamily, ...typography.title },
+  intro: { flex: 1, minHeight: 180, justifyContent: 'center' },
+  title: { color: colors.text, fontFamily: typography.displayFamily, fontSize: 36, lineHeight: 44 },
+  form: { gap: spacing.sm },
   input: {
     minHeight: 52,
-    borderRadius: 12,
-    backgroundColor: colors.panel,
-    color: colors.ink,
+    borderRadius: 10,
+    backgroundColor: colors.surface,
+    color: colors.text,
     fontSize: 16,
     paddingHorizontal: 16,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line,
+    borderWidth: 1,
+    borderColor: colors.outline,
   },
+  inputError: { borderColor: colors.error },
   primary: {
     minHeight: 52,
-    borderRadius: 12,
-    backgroundColor: colors.lime,
+    borderRadius: 10,
+    backgroundColor: colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  primaryText: { color: colors.limeInk, fontSize: 15, fontWeight: '800' },
-  message: { color: colors.ink, fontSize: 13, lineHeight: 18, textAlign: 'center' },
+  primaryText: { color: colors.onPrimary, fontSize: 15, fontWeight: '800' },
+  message: { color: colors.info, ...typography.label, textAlign: 'center' },
+  errorMessage: { color: colors.error },
   offline: { minHeight: 52, alignItems: 'center', justifyContent: 'center', marginTop: 6 },
-  offlineText: { color: colors.ink, fontSize: 15, fontWeight: '700' },
-  pressed: { opacity: 0.72 },
+  offlineText: { color: colors.text, fontSize: 15, fontWeight: '700' },
+  pressed: { opacity: 0.78 },
+  disabled: { opacity: 0.42 },
 });

@@ -104,6 +104,16 @@ CoachTool = Literal[
     "expand",
     "retake",
 ]
+DEFAULT_COACH_TOOLS: tuple[CoachTool, ...] = (
+    "adjust_global",
+    "adjust_masked",
+    "crop",
+    "straighten",
+    "remove",
+    "add",
+    "expand",
+    "retake",
+)
 
 
 class CoachPreferences(ApiModel):
@@ -118,7 +128,7 @@ class CoachRequest(ApiModel):
     preferences: CoachPreferences = Field(default_factory=CoachPreferences)
     layer_stack: LayerStack | None = None
     selected_issue_id: str | None = None
-    available_tools: list[CoachTool] = Field(default_factory=list, max_length=8)
+    available_tools: list[CoachTool] = Field(default_factory=lambda: list(DEFAULT_COACH_TOOLS), max_length=8)
 
 
 class CoachEvidence(ApiModel):

@@ -124,6 +124,7 @@ export type PhotoRecord = {
   createdAt: string;
   captureSource: 'camera' | 'library' | 'document' | 'usb';
   originalUri: string;
+  remoteOriginalPath?: string;
   originalName: string;
   originalMimeType: string;
   originalByteSize: number;

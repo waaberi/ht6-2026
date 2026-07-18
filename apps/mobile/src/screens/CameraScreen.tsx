@@ -101,12 +101,12 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
     if (data.session) await persistPreferencesToCloud(await loadPreferences());
   }, []);
 
-  const updateCamera = useCallback((changes: Partial<CameraPreferences>, alwaysPersist = false) => {
+  const updateCamera = useCallback((changes: Partial<CameraPreferences>) => {
     setCameraPreferences((current) => {
       const next = { ...current, ...changes };
       preferencesRef.current = next;
       if (changes.zoom !== undefined) zoomRef.current = changes.zoom;
-      if (alwaysPersist || current.preserveCaptureSettings || changes.preserveCaptureSettings !== undefined) {
+      if (current.preserveCaptureSettings) {
         void persistCamera(changes).catch(() => undefined);
       }
       return next;
@@ -172,22 +172,6 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
     onPanResponderRelease: () => finishZoom(zoomRef.current),
     onPanResponderTerminate: () => finishZoom(zoomRef.current),
   }), [finishZoom, updateZoom]);
-
-  const toggleLevel = async () => {
-    if (preferencesRef.current.showLevel) {
-      updateCamera({ showLevel: false }, true);
-      return;
-    }
-    setError(undefined);
-    try {
-      if (!await DeviceMotion.isAvailableAsync()) throw new Error('Level is not available on this device.');
-      const permission = await DeviceMotion.requestPermissionsAsync();
-      if (!permission.granted) throw new Error('Motion access is needed for the level.');
-      updateCamera({ showLevel: true }, true);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Level is unavailable.');
-    }
-  };
 
   const run = async (work: () => Promise<void>) => {
     if (busyRef.current) return;
@@ -384,18 +368,6 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
                 label={cameraPreferences.photoRatio}
                 onPress={() => updateCamera({ photoRatio: nextValue(ratioOptions, cameraPreferences.photoRatio) })}
               />
-              <ControlButton
-                icon="grid"
-                label="Grid"
-                selected={cameraPreferences.showGrid}
-                onPress={() => updateCamera({ showGrid: !cameraPreferences.showGrid }, true)}
-              />
-              <ControlButton
-                icon="format-align-middle"
-                label="Level"
-                selected={cameraPreferences.showLevel}
-                onPress={() => void toggleLevel()}
-              />
             </View>
           </View>
         ) : null}
@@ -440,16 +412,15 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
   );
 };
 
-const ControlButton = ({ icon, label, selected, onPress }: { icon: IconName; label: string; selected?: boolean; onPress: () => void }) => (
+const ControlButton = ({ icon, label, onPress }: { icon: IconName; label: string; onPress: () => void }) => (
   <Pressable
     accessibilityRole="button"
     accessibilityLabel={label}
-    accessibilityState={selected === undefined ? undefined : { selected }}
-    style={({ pressed }) => [styles.controlButton, selected && styles.controlButtonSelected, pressed && styles.pressed]}
+    style={({ pressed }) => [styles.controlButton, pressed && styles.pressed]}
     onPress={onPress}
   >
-    <MaterialCommunityIcons name={icon} size={22} color={selected ? colors.limeInk : colors.ink} />
-    <Text numberOfLines={1} style={[styles.controlLabel, selected && styles.controlLabelSelected]}>{label}</Text>
+    <MaterialCommunityIcons name={icon} size={22} color={colors.ink} />
+    <Text numberOfLines={1} style={styles.controlLabel}>{label}</Text>
   </Pressable>
 );
 
@@ -464,25 +435,23 @@ const styles = StyleSheet.create({
   levelMark: { width: 7, height: 7, borderRadius: 4, borderWidth: 2 },
   countdown: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(34,26,27,0.2)' },
   countdownText: { color: colors.ink, fontSize: 76, fontWeight: '300' },
-  bottomPanel: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 16, paddingTop: 8, backgroundColor: 'rgba(34,26,27,0.94)' },
+  bottomPanel: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 16, paddingTop: 8, backgroundColor: colors.background },
   error: { color: colors.danger, textAlign: 'center', fontSize: 13, lineHeight: 18, marginBottom: 6 },
   zoomRow: { minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 7 },
   zoomSlider: { flex: 1, height: 40 },
-  trayButton: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.panelRaised },
+  trayButton: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceStrong },
   trayButtonActive: { backgroundColor: colors.lime },
   controlTray: { gap: 8, paddingBottom: 8 },
   controlRow: { flexDirection: 'row', gap: 6 },
-  controlButton: { flex: 1, minHeight: 60, minWidth: 0, borderRadius: 10, backgroundColor: colors.panelRaised, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 2, gap: 4 },
-  controlButtonSelected: { backgroundColor: colors.lime },
+  controlButton: { flex: 1, minHeight: 60, minWidth: 0, borderRadius: 10, backgroundColor: colors.surfaceStrong, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 2, gap: 4 },
   controlLabel: { color: colors.ink, fontSize: 11, textAlign: 'center' },
-  controlLabelSelected: { color: colors.limeInk, fontWeight: '700' },
   captureRow: { minHeight: 100, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 6 },
-  recentButton: { width: 58, height: 58, borderRadius: 12, overflow: 'hidden', borderWidth: 2, borderColor: colors.ink, backgroundColor: colors.panelRaised, alignItems: 'center', justifyContent: 'center' },
+  recentButton: { width: 58, height: 58, borderRadius: 12, overflow: 'hidden', borderWidth: 2, borderColor: colors.text, backgroundColor: colors.surfaceStrong, alignItems: 'center', justifyContent: 'center' },
   recentImage: { width: '100%', height: '100%' },
   shutter: { width: 82, height: 82, borderRadius: 41, borderWidth: 3, borderColor: colors.ink, padding: 6, alignItems: 'center', justifyContent: 'center' },
   shutterCore: { width: '100%', height: '100%', borderRadius: 34, backgroundColor: colors.ink },
   shutterPressed: { transform: [{ scale: 0.95 }] },
-  flipButton: { width: 58, height: 58, borderRadius: 29, backgroundColor: colors.panelRaised, alignItems: 'center', justifyContent: 'center' },
+  flipButton: { width: 58, height: 58, borderRadius: 29, backgroundColor: colors.surfaceStrong, alignItems: 'center', justifyContent: 'center' },
   disabled: { opacity: 0.45 },
   pressed: { opacity: 0.7 },
   permission: { flex: 1, paddingHorizontal: 28, backgroundColor: colors.canvas, justifyContent: 'center' },

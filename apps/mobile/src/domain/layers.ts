@@ -76,6 +76,14 @@ export const toggleLayer = (stack: LayerStack, layerId: string): LayerStack => (
   ),
 });
 
+export const setLayerOpacity = (stack: LayerStack, layerId: string, opacity: number): LayerStack => ({
+  ...stack,
+  canvasTransform: { ...stack.canvasTransform },
+  layers: stack.layers.map((layer) =>
+    layer.id === layerId ? { ...layer, opacity: Math.max(0, Math.min(1, opacity)) } : layer,
+  ),
+});
+
 export const reorderLayer = (stack: LayerStack, layerId: string, direction: -1 | 1): LayerStack => {
   const currentIndex = stack.layers.findIndex((layer) => layer.id === layerId);
   const nextIndex = currentIndex + direction;

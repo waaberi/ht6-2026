@@ -1,7 +1,7 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import type { Session } from '@supabase/supabase-js';
 import { DeviceMotion } from 'expo-sensors';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -31,34 +31,52 @@ export const SettingsScreen = () => {
   const [email, setEmail] = useState('');
   const [preferences, setPreferences] = useState<ExposurePreferences>(defaultPreferences);
   const [message, setMessage] = useState<string>();
+  const [cameraMessage, setCameraMessage] = useState<string>();
+  const preferencesRef = useRef(defaultPreferences);
+  const sessionRef = useRef<Session | null>(null);
+  const preferenceWriteQueue = useRef(Promise.resolve());
 
   useEffect(() => {
-    void loadPreferences().then(setPreferences);
+    void loadPreferences().then((stored) => {
+      preferencesRef.current = stored;
+      setPreferences(stored);
+    });
     if (!supabase) return;
-    void supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data } = supabase.auth.onAuthStateChange((_event, next) => setSession(next));
+    const updateSession = (next: Session | null) => {
+      sessionRef.current = next;
+      setSession(next);
+    };
+    void supabase.auth.getSession().then(({ data }) => updateSession(data.session));
+    const { data } = supabase.auth.onAuthStateChange((_event, next) => updateSession(next));
     return () => data.subscription.unsubscribe();
   }, []);
 
-  const savePreferences = async (next: ExposurePreferences) => {
+  const savePreferences = (next: ExposurePreferences) => {
+    preferencesRef.current = next;
     setPreferences(next);
-    await persistPreferences(next);
-    if (session) {
-      await persistPreferencesToCloud(next).catch((caught: unknown) => {
-        setMessage(caught instanceof Error ? caught.message : 'Preference sync failed.');
-      });
-    }
+    preferenceWriteQueue.current = preferenceWriteQueue.current.then(async () => {
+      await persistPreferences(next);
+      if (sessionRef.current) await persistPreferencesToCloud(next);
+    }).catch((caught: unknown) => {
+      setMessage(caught instanceof Error ? caught.message : 'Preference sync failed.');
+    });
   };
 
   const updatePreferences = (changes: Partial<ExposurePreferences>) => {
-    void savePreferences({ ...preferences, ...changes });
+    savePreferences({ ...preferencesRef.current, ...changes });
   };
 
   const updateCamera = (changes: Partial<CameraPreferences>) => {
-    void savePreferences({
-      ...preferences,
-      camera: { ...preferences.camera, ...changes },
+    savePreferences({
+      ...preferencesRef.current,
+      camera: { ...preferencesRef.current.camera, ...changes },
     });
+  };
+
+  const updateDraft = (changes: Partial<ExposurePreferences>) => {
+    const next = { ...preferencesRef.current, ...changes };
+    preferencesRef.current = next;
+    setPreferences(next);
   };
 
   const updateLevel = (showLevel: boolean) => {
@@ -66,14 +84,14 @@ export const SettingsScreen = () => {
       updateCamera({ showLevel: false });
       return;
     }
-    setMessage(undefined);
+    setCameraMessage(undefined);
     void (async () => {
       if (!await DeviceMotion.isAvailableAsync()) throw new Error('Level is not available on this device.');
       const permission = await DeviceMotion.requestPermissionsAsync();
       if (!permission.granted) throw new Error('Motion access is needed for the level.');
       updateCamera({ showLevel: true });
     })().catch((caught: unknown) => {
-      setMessage(caught instanceof Error ? caught.message : 'Level is unavailable.');
+      setCameraMessage(caught instanceof Error ? caught.message : 'Level is unavailable.');
     });
   };
 
@@ -170,28 +188,11 @@ export const SettingsScreen = () => {
       </Section>
 
       <Section title="Camera">
-        <ChoiceRow
-          label="Default flash"
-          value={preferences.camera.defaultFlash}
-          options={[{ label: 'Off', value: 'off' }, { label: 'Auto', value: 'auto' }, { label: 'On', value: 'on' }]}
-          onChange={(defaultFlash) => updateCamera({ defaultFlash: defaultFlash as CameraPreferences['defaultFlash'] })}
-        />
-        <ChoiceRow
-          label="Timer"
-          value={String(preferences.camera.timerSeconds)}
-          options={[{ label: 'Off', value: '0' }, { label: '3 sec', value: '3' }, { label: '10 sec', value: '10' }]}
-          onChange={(timerSeconds) => updateCamera({ timerSeconds: Number(timerSeconds) as CameraPreferences['timerSeconds'] })}
-        />
-        <ChoiceRow
-          label="Photo ratio"
-          value={preferences.camera.photoRatio}
-          options={[{ label: '4:3', value: '4:3' }, { label: '16:9', value: '16:9' }]}
-          onChange={(photoRatio) => updateCamera({ photoRatio: photoRatio as CameraPreferences['photoRatio'] })}
-        />
         <SettingRow label="Grid" value={preferences.camera.showGrid} onChange={(showGrid) => updateCamera({ showGrid })} />
         <SettingRow label="Level guide" value={preferences.camera.showLevel} onChange={updateLevel} />
         <SettingRow label="Mirror selfies" value={preferences.camera.mirrorSelfies} onChange={(mirrorSelfies) => updateCamera({ mirrorSelfies })} />
         <SettingRow label="Preserve capture controls" value={preferences.camera.preserveCaptureSettings} onChange={(preserveCaptureSettings) => updateCamera({ preserveCaptureSettings })} last />
+        {cameraMessage ? <Text accessibilityRole="alert" style={styles.message}>{cameraMessage}</Text> : null}
       </Section>
 
       <Section title="Coach">
@@ -229,8 +230,8 @@ export const SettingsScreen = () => {
         <Section title="Developer">
           <TextInput
             value={preferences.apiUrl}
-            onChangeText={(apiUrl) => setPreferences((current) => ({ ...current, apiUrl }))}
-            onEndEditing={() => updatePreferences({ apiUrl: preferences.apiUrl })}
+            onChangeText={(apiUrl) => updateDraft({ apiUrl })}
+            onEndEditing={() => savePreferences(preferencesRef.current)}
             autoCapitalize="none"
             autoCorrect={false}
             keyboardType="url"
@@ -295,8 +296,8 @@ const SettingRow = ({ label, detail, value, onChange, last = false }: {
     <Switch
       value={value}
       onValueChange={onChange}
-      trackColor={{ false: colors.line, true: colors.lime }}
-      thumbColor={value ? colors.limeInk : colors.ink}
+      trackColor={{ false: colors.outline, true: colors.primary }}
+      thumbColor={value ? colors.onPrimary : colors.textSecondary}
       accessibilityLabel={label}
     />
   </View>
@@ -304,20 +305,20 @@ const SettingRow = ({ label, detail, value, onChange, last = false }: {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.canvas },
-  content: { paddingHorizontal: 18 },
+  content: { width: '100%', maxWidth: 720, alignSelf: 'center', paddingHorizontal: 18 },
   title: { color: colors.ink, fontFamily: 'ZenOldMincho_700Bold', fontSize: 32, lineHeight: 40, marginBottom: 22 },
   sectionGroup: { marginBottom: 20 },
   sectionTitle: { color: colors.muted, fontSize: 13, fontWeight: '700', marginLeft: 4, marginBottom: 8 },
-  section: { borderTopWidth: StyleSheet.hairlineWidth, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: colors.line },
+  section: { borderRadius: 14, backgroundColor: colors.surface, overflow: 'hidden' },
   accountRow: { minHeight: 68, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, gap: 12 },
   statusIcon: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.panelRaised },
   statusIconReady: { backgroundColor: 'rgba(97, 152, 142, 0.14)' },
   accountText: { flex: 1 },
   accountEmail: { color: colors.ink, fontSize: 15, fontWeight: '700' },
   accountStatus: { color: colors.muted, fontSize: 12, marginTop: 3 },
-  input: { minHeight: 52, borderRadius: 10, color: colors.ink, backgroundColor: 'transparent', fontSize: 15, paddingHorizontal: 14, marginTop: 12, borderWidth: 1, borderColor: colors.line },
-  primaryButton: { minHeight: 52, borderRadius: 10, borderWidth: 1, borderColor: colors.primary, alignItems: 'center', justifyContent: 'center', marginTop: 10, marginBottom: 12 },
-  primaryButtonText: { color: colors.primary, fontSize: 14, fontWeight: '800' },
+  input: { minHeight: 52, borderRadius: 10, color: colors.text, backgroundColor: colors.background, fontSize: 15, paddingHorizontal: 14, marginHorizontal: 12, marginTop: 12, borderWidth: 1, borderColor: colors.outline },
+  primaryButton: { minHeight: 52, borderRadius: 10, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center', marginHorizontal: 12, marginTop: 10, marginBottom: 12 },
+  primaryButtonText: { color: colors.onPrimary, fontSize: 14, fontWeight: '800' },
   textButton: { minHeight: 48, alignItems: 'center', justifyContent: 'center', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
   accountActions: { flexDirection: 'row' },
   accountActionsButton: { flex: 1 },
@@ -326,11 +327,11 @@ const styles = StyleSheet.create({
   choiceBlock: { paddingHorizontal: 12, paddingTop: 11, paddingBottom: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
   rowLabel: { color: colors.ink, fontSize: 14, fontWeight: '600' },
   rowDetail: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 2 },
-  segmented: { minHeight: 48, flexDirection: 'row', borderRadius: 10, backgroundColor: colors.canvas, padding: 3, marginTop: 9 },
-  segment: { flex: 1, minHeight: 42, borderRadius: 8, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
-  segmentSelected: { backgroundColor: colors.surfaceStrong },
+  segmented: { minHeight: 52, flexDirection: 'row', borderRadius: 10, backgroundColor: colors.background, padding: 4, marginTop: 9 },
+  segment: { flex: 1, minHeight: 44, borderRadius: 8, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
+  segmentSelected: { backgroundColor: colors.primary },
   segmentLabel: { color: colors.muted, fontSize: 12, fontWeight: '700', textAlign: 'center' },
-  segmentLabelSelected: { color: colors.primary },
+  segmentLabelSelected: { color: colors.onPrimary },
   settingRow: { minHeight: 60, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
   settingCopy: { flex: 1, paddingRight: 14 },
   lastRow: { borderBottomWidth: 0 },

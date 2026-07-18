@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+from collections import OrderedDict
 from typing import Annotated
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -33,6 +34,7 @@ from .providers import GeminiProvider
 from .renderer import encode_image, export_exif, render_layer_stack
 
 MAX_UPLOAD_BYTES = int(os.getenv("EXPOSURE_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+ANALYSIS_CACHE_MAX_ENTRIES = max(1, int(os.getenv("EXPOSURE_ANALYSIS_CACHE_MAX_ENTRIES", "128")))
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/heic", "image/heif", "image/webp"}
 GPS_KEY = re.compile(r"gps|latitude|longitude|location", re.IGNORECASE)
 SCHEMA_VERSION = "analysis-1"
@@ -46,7 +48,22 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 provider = GeminiProvider()
-analysis_cache: dict[tuple[str, str, str, str], AnalysisResult] = {}
+AnalysisCacheKey = tuple[str, str, str, str]
+analysis_cache: OrderedDict[AnalysisCacheKey, AnalysisResult] = OrderedDict()
+
+
+def _cached_analysis(key: AnalysisCacheKey) -> AnalysisResult | None:
+    cached = analysis_cache.get(key)
+    if cached is not None:
+        analysis_cache.move_to_end(key)
+    return cached
+
+
+def _store_analysis(key: AnalysisCacheKey, result: AnalysisResult) -> None:
+    analysis_cache[key] = result
+    analysis_cache.move_to_end(key)
+    while len(analysis_cache) > ANALYSIS_CACHE_MAX_ENTRIES:
+        analysis_cache.popitem(last=False)
 
 
 async def _read_image(upload: UploadFile) -> bytes:
@@ -136,7 +153,7 @@ async def analyze(
         checksum = checksum or hashlib.sha256(image_bytes).hexdigest()
     coaching_fingerprint = hashlib.sha256(json.dumps(coaching, sort_keys=True).encode()).hexdigest()[:12]
     cache_key = (checksum, SCHEMA_VERSION, provider.semantic_model if provider.configured else "local", coaching_fingerprint)
-    cached = analysis_cache.get(cache_key)
+    cached = _cached_analysis(cache_key)
     if cached:
         return cached.model_copy(update={"version_id": version_id})
     deterministic = await asyncio.to_thread(
@@ -161,7 +178,7 @@ async def analyze(
             logger.exception("Gemini semantic analysis failed")
             semantic = None
     result = merge_semantic(deterministic, semantic, provider.semantic_model if semantic else None)
-    analysis_cache[cache_key] = result
+    _store_analysis(cache_key, result)
     return result
 
 
@@ -305,8 +322,12 @@ async def coach(request: CoachRequest) -> CoachResponse:
                 return response
         except Exception:
             logger.exception("Gemini Coach request failed")
+    selected_issue = next(
+        (issue for issue in request.analysis.issues if issue.id == request.selected_issue_id),
+        None,
+    )
     if request.analysis.issues:
-        issue = request.analysis.issues[0]
+        issue = selected_issue or request.analysis.issues[0]
         evidence = [
             CoachEvidence(path=f"issues.{issue.id}.evidence.{key}", value=value, meaning=issue.explanation)
             for key, value in list(issue.evidence.items())[:1]

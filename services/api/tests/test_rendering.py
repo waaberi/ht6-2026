@@ -185,6 +185,26 @@ def test_every_collective_adjustment_changes_the_render() -> None:
         assert not np.array_equal(rendered, baseline), f"{control} did not change the render"
 
 
+def test_rotation_swaps_canvas_without_clipping_and_straighten_avoids_black_corners() -> None:
+    source = Image.new("RGB", (30, 10), "#d96b4f")
+    encoded = io.BytesIO()
+    source.save(encoded, format="PNG")
+
+    rotated = render_layer_stack(
+        encoded.getvalue(),
+        LayerStack.model_validate({"canvasTransform": {**IDENTITY, "rotationDegrees": 90}, "layers": []}),
+    )
+    assert rotated.size == (10, 30)
+    assert np.min(np.asarray(rotated)) > 0
+
+    straightened = render_layer_stack(
+        encoded.getvalue(),
+        LayerStack.model_validate({"canvasTransform": {**IDENTITY, "rotationDegrees": 8}, "layers": []}),
+    )
+    assert straightened.size == source.size
+    assert np.min(np.asarray(straightened)) > 0
+
+
 def test_gps_is_excluded_from_export_unless_explicitly_enabled(client: TestClient) -> None:
     source = Image.new("RGB", (20, 12), "#665544")
     metadata = Image.Exif()
