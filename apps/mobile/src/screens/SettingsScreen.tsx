@@ -27,21 +27,38 @@ export const SettingsScreen = () => {
     process.env.EXPO_PUBLIC_API_URL,
     undefined,
   );
-  const { photos, syncing, syncError, synchronize } = useExposure();
+  const { ownerId, photos, syncing, syncError, lastSyncedAt, synchronize } = useExposure();
   const [session, setSession] = useState<Session | null>(null);
   const [email, setEmail] = useState('');
   const [preferences, setPreferences] = useState<ExposurePreferences>(defaultPreferences);
   const [message, setMessage] = useState<string>();
   const [cameraMessage, setCameraMessage] = useState<string>();
   const preferencesRef = useRef(defaultPreferences);
+  const ownerIdRef = useRef(ownerId);
+  const loadedPreferencesOwnerIdRef = useRef<string | undefined>(undefined);
   const sessionRef = useRef<Session | null>(null);
   const preferenceWriteQueue = useRef(Promise.resolve());
 
+  ownerIdRef.current = ownerId;
+
   useEffect(() => {
-    void loadPreferences().then((stored) => {
+    let stale = false;
+    if (loadedPreferencesOwnerIdRef.current !== ownerId) {
+      preferencesRef.current = defaultPreferences;
+      setPreferences(defaultPreferences);
+    }
+    void loadPreferences(ownerId).then((stored) => {
+      if (stale || ownerIdRef.current !== ownerId) return;
+      loadedPreferencesOwnerIdRef.current = ownerId;
       preferencesRef.current = stored;
       setPreferences(stored);
     });
+    return () => {
+      stale = true;
+    };
+  }, [ownerId, lastSyncedAt]);
+
+  useEffect(() => {
     if (!supabase) return;
     const updateSession = (next: Session | null) => {
       sessionRef.current = next;
@@ -53,13 +70,18 @@ export const SettingsScreen = () => {
   }, []);
 
   const savePreferences = (next: ExposurePreferences) => {
+    const targetOwnerId = ownerIdRef.current;
     preferencesRef.current = next;
     setPreferences(next);
     preferenceWriteQueue.current = preferenceWriteQueue.current.then(async () => {
-      await persistPreferences(next);
-      if (sessionRef.current) await persistPreferencesToCloud(next);
+      await persistPreferences(next, targetOwnerId);
+      if (sessionRef.current?.user.id === targetOwnerId) {
+        await persistPreferencesToCloud(next, targetOwnerId);
+      }
     }).catch((caught: unknown) => {
-      setMessage(caught instanceof Error ? caught.message : 'Preference sync failed.');
+      if (ownerIdRef.current === targetOwnerId) {
+        setMessage(caught instanceof Error ? caught.message : 'Preference sync failed.');
+      }
     });
   };
 

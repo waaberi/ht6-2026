@@ -509,11 +509,13 @@ export const persistPortfolioReview = async (review: PortfolioReview, selectedPh
   if (error) throw error;
 };
 
-export const persistPreferences = async (preferences: ExposurePreferences) => {
+export const persistPreferences = async (
+  preferences: ExposurePreferences,
+  expectedOwnerId: OwnerId = getActiveOwnerId(),
+) => {
   if (!supabase) return;
-  const activeOwnerId = getActiveOwnerId();
-  if (activeOwnerId === GUEST_OWNER_ID) return;
-  const userId = await requireSessionOwner(activeOwnerId);
+  if (expectedOwnerId === GUEST_OWNER_ID) return;
+  const userId = await requireSessionOwner(expectedOwnerId);
   const { error } = await supabase.from('profiles').upsert({
     id: userId,
     skill_level: preferences.skillLevel,
