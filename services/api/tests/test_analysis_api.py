@@ -148,7 +148,7 @@ def test_tilt_fixture_produces_a_reversible_transform_fix(client: TestClient) ->
     assert response.status_code == 200, response.text
     payload = response.json()
     assert abs(float(payload["metrics"]["estimatedTiltDegrees"])) > 3
-    assert any((issue.get("fix") or {}).get("kind") == "transform" for issue in payload["issues"])
+    assert any((signal.get("fix") or {}).get("kind") == "transform" for signal in payload["signals"])
 
 
 def test_uneven_lighting_fixture_is_localized(client: TestClient) -> None:
@@ -162,9 +162,9 @@ def test_uneven_lighting_fixture_is_localized(client: TestClient) -> None:
         data={"version_id": "lighting-fixture"},
     )
     assert response.status_code == 200, response.text
-    findings = [issue for issue in response.json()["issues"] if issue["title"] == "Illumination is uneven"]
-    assert findings and findings[0]["fix"]["kind"] == "masked-adjustment"
-    assert findings[0]["location"]["width"] == 0.5
+    signals = [signal for signal in response.json()["signals"] if signal["signalKey"] == "lighting.quadrant-unevenness"]
+    assert signals and signals[0]["fix"]["kind"] == "masked-adjustment"
+    assert signals[0]["location"]["width"] == 0.5
 
 
 def test_heic_import_is_decoded(client: TestClient) -> None:

@@ -4,13 +4,77 @@ import json
 from importlib.metadata import version
 from types import SimpleNamespace
 
-from exposure_api.models import AnalysisResult, CoachRequest, CoachResponse, Region
+from exposure_api.models import AnalysisResult, AnalysisSignal, CoachRequest, CoachResponse, Region
 from exposure_api.providers import GeminiImageQuotaError, GeminiProvider, _ground_coach_response
 
 
 def test_google_genai_uses_current_interactions_schema() -> None:
     major = int(version("google-genai").split(".", 1)[0])
     assert major >= 2
+
+
+def test_semantic_prompt_exposes_grounded_signals_and_concise_contract() -> None:
+    captured: dict[str, object] = {}
+
+    class Interactions:
+        def create(self, **kwargs: object) -> SimpleNamespace:
+            captured.update(kwargs)
+            return SimpleNamespace(output_text=json.dumps({
+                "summary": "Side light leaves the face visibly subdued.",
+                "apparentIntent": "A low-key portrait beside a bright window.",
+                "assessments": [{
+                    "signalId": "signal-light",
+                    "disposition": "support",
+                    "reason": "The visible face is dim beside the window.",
+                    "confidence": 0.9,
+                    "basedOn": ["signals.signal-light", "metrics.meanLuminance"],
+                    "interpretation": {
+                        "category": "lighting",
+                        "title": "Window Subdues the Face",
+                        "explanation": "Mean luminance is 0.2, and the visible window dominates the face.",
+                        "recommendedAction": "Lift the face slightly; preserve the window mood.",
+                    },
+                }],
+                "issues": [],
+            }))
+
+    analysis = AnalysisResult(
+        version_id="version",
+        checksum="checksum",
+        metrics={"meanLuminance": 0.2},
+        lighting={
+            "exposure": -0.3,
+            "contrast": 0.2,
+            "clippedShadows": 0,
+            "clippedHighlights": 0,
+            "colorCast": {"red": 0, "green": 0, "blue": 0},
+        },
+        signals=[AnalysisSignal(
+            id="signal-light",
+            signal_key="luminance.below-threshold",
+            category="lighting",
+            evidence={"meanLuminance": 0.2, "threshold": 0.28},
+            severity=0.5,
+            confidence=0.94,
+            location=Region(x=0, y=0, width=1, height=1),
+        )],
+        issues=[],
+        camera_recommendations=[],
+        summary="AI interpretation unavailable. Measurements are still ready.",
+    )
+    provider = GeminiProvider()
+    provider._client = SimpleNamespace(interactions=Interactions())  # type: ignore[assignment]
+
+    result = asyncio.run(provider.analyze_semantics(b"image", "image/png", analysis, {}, {}))
+
+    assert result is not None
+    assert result.assessments[0].signal_id == "signal-light"
+    prompt = captured["input"][0]["text"]  # type: ignore[index]
+    assert '"id":"signal-light"' in prompt
+    assert "signals.signal-light" in prompt
+    assert "Present 1-3 total findings" in prompt
+    assert "Summary: at most 24 words" in prompt
+    assert "Unknown references are discarded" in prompt
 
 
 def test_generative_prompt_includes_operation_and_target() -> None:

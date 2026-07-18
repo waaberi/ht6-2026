@@ -66,6 +66,17 @@ class CameraRecommendation(ApiModel):
     based_on: list[str]
 
 
+class AnalysisSignal(ApiModel):
+    id: str
+    signal_key: str
+    category: Literal["composition", "focus", "color", "lighting", "distraction", "metadata"]
+    evidence: dict[str, float | str | bool | None]
+    severity: float = Field(ge=0, le=1)
+    confidence: float = Field(ge=0, le=1)
+    location: Region
+    fix: Fix | None = None
+
+
 class AnalysisResult(ApiModel):
     version_id: str
     checksum: str
@@ -74,25 +85,93 @@ class AnalysisResult(ApiModel):
     semantic_model: str | None = None
     metrics: dict[str, float | str | bool | None]
     lighting: LightingAnalysis
+    signals: list[AnalysisSignal] = Field(default_factory=list)
     issues: list[Issue]
     camera_recommendations: list[CameraRecommendation]
     summary: str
 
 
+class SemanticInterpretation(ApiModel):
+    category: Literal["composition", "focus", "color", "lighting", "distraction", "intent"]
+    title: str = Field(min_length=1, max_length=80)
+    explanation: str = Field(min_length=1, max_length=240)
+    recommended_action: str = Field(min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_concise_copy(self) -> "SemanticInterpretation":
+        if len(self.title.split()) > 7:
+            raise ValueError("semantic titles must be at most 7 words")
+        if len(self.explanation.split()) > 24:
+            raise ValueError("semantic explanations must be at most 24 words")
+        if len(self.recommended_action.split()) > 14:
+            raise ValueError("semantic actions must be at most 14 words")
+        return self
+
+
+class SemanticAssessment(ApiModel):
+    signal_id: str = Field(min_length=1, max_length=80)
+    disposition: Literal["support", "reinterpret", "suppress"]
+    reason: str = Field(min_length=1, max_length=200)
+    confidence: float = Field(ge=0, le=1)
+    based_on: list[str] = Field(default_factory=list, max_length=8)
+    interpretation: SemanticInterpretation | None = None
+
+    @model_validator(mode="after")
+    def validate_interpretation(self) -> "SemanticAssessment":
+        if self.disposition in {"support", "reinterpret"} and self.interpretation is None:
+            raise ValueError("support and reinterpret assessments require an interpretation")
+        if self.disposition in {"support", "reinterpret"} and not self.based_on:
+            raise ValueError("support and reinterpret assessments require evidence references")
+        if self.disposition == "suppress" and self.interpretation is not None:
+            raise ValueError("suppress assessments cannot include an interpretation")
+        return self
+
+
 class SemanticIssue(ApiModel):
     category: Literal["composition", "focus", "color", "lighting", "distraction", "intent"]
-    title: str
-    explanation: str
+    title: str = Field(min_length=1, max_length=80)
+    explanation: str = Field(min_length=1, max_length=240)
     severity: float = Field(ge=0, le=1)
     confidence: float = Field(ge=0, le=1)
     box_2d: list[int] = Field(min_length=4, max_length=4)
-    recommended_action: str
+    recommended_action: str = Field(min_length=1, max_length=160)
+    based_on: list[str] = Field(min_length=1, max_length=8)
+
+    @model_validator(mode="after")
+    def validate_box(self) -> "SemanticIssue":
+        ymin, xmin, ymax, xmax = self.box_2d
+        if any(value < 0 or value > 1000 for value in self.box_2d):
+            raise ValueError("box_2d coordinates must be between 0 and 1000")
+        if ymax <= ymin or xmax <= xmin:
+            raise ValueError("box_2d must have positive width and height")
+        if len(self.title.split()) > 7:
+            raise ValueError("semantic titles must be at most 7 words")
+        if len(self.explanation.split()) > 24:
+            raise ValueError("semantic explanations must be at most 24 words")
+        if len(self.recommended_action.split()) > 14:
+            raise ValueError("semantic actions must be at most 14 words")
+        return self
 
 
 class SemanticAnalysis(ApiModel):
-    summary: str
-    apparent_intent: str
-    issues: list[SemanticIssue] = Field(default_factory=list, max_length=6)
+    summary: str = Field(min_length=1, max_length=280)
+    apparent_intent: str = Field(min_length=1, max_length=160)
+    assessments: list[SemanticAssessment] = Field(default_factory=list, max_length=12)
+    issues: list[SemanticIssue] = Field(default_factory=list, max_length=4)
+
+    @model_validator(mode="after")
+    def validate_unique_assessments(self) -> "SemanticAnalysis":
+        signal_ids = [assessment.signal_id for assessment in self.assessments]
+        if len(signal_ids) != len(set(signal_ids)):
+            raise ValueError("semantic assessments must reference each signal at most once")
+        if len(self.summary.split()) > 24:
+            raise ValueError("semantic summaries must be at most 24 words")
+        presented_assessments = sum(
+            assessment.disposition != "suppress" for assessment in self.assessments
+        )
+        if presented_assessments + len(self.issues) > 3:
+            raise ValueError("semantic analysis may present at most 3 findings")
+        return self
 
 
 class LayerStack(ApiModel):

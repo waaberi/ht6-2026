@@ -160,12 +160,26 @@ class GeminiProvider:
     ) -> SemanticAnalysis | None:
         if not self._client:
             return None
+        signals = [signal.model_dump(mode="json", by_alias=True) for signal in deterministic.signals]
+        evidence_references = [
+            *(f"metrics.{key}" for key in deterministic.metrics),
+            *(f"signals.{signal.id}" for signal in deterministic.signals),
+        ]
         prompt = (
-            "You are Exposure, a rigorous photography coach. Interpret intent and composition using the image and "
-            "measured evidence below. Do not contradict hard measurements, invent EXIF, or penalize an intentional "
-            "choice merely for breaking a convention. Return at most 4 high-confidence semantic findings. Bounding "
-            "boxes use [ymin,xmin,ymax,xmax] on a 0..1000 scale. Never request or infer GPS.\n\n"
+            "You are Exposure, a rigorous photography editor. Convert measured signals into concise, image-specific "
+            "judgments; the deterministic layer intentionally supplies no diagnosis copy. Assess a signal only by its "
+            "exact signalId. Use support when the visible photograph confirms its contextual significance, reinterpret "
+            "when the measurement is real but its photographic meaning differs, and suppress when it is irrelevant or "
+            "intentional. Every assessment needs a concrete reason. Support and reinterpret must include the matching "
+            "signals.<id> in basedOn. New issues must cite only supplied basedOn references; image-only observations still "
+            "need one related measured reference. Unknown references are discarded. Do not contradict measurements, "
+            "invent EXIF, infer GPS, apply generic rules, or duplicate a signal. Present 1-3 total findings, ordered by "
+            "impact. Summary: at most 24 words. Title: at most 7 words. Explanation: one sentence, at most 24 words. "
+            "Action: at most 14 words. Every statement must name evidence or visible context specific to this image. "
+            "Bounding boxes use [ymin,xmin,ymax,xmax] on a 0..1000 scale. Return JSON matching the schema only.\n\n"
             f"Measurements: {json.dumps(deterministic.metrics, separators=(',', ':'))}\n"
+            f"Measured signals: {json.dumps(signals, separators=(',', ':'))}\n"
+            f"Valid basedOn references: {json.dumps(evidence_references, separators=(',', ':'))}\n"
             f"Local EXIF without GPS: {json.dumps(exif, separators=(',', ':'), default=str)}\n"
             f"User coaching preferences: {json.dumps(coaching, separators=(',', ':'))}"
         )
