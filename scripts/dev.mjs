@@ -1,15 +1,27 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import process from 'node:process';
 
+const isWindows = process.platform === 'win32';
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-const executable = (name) => process.platform === 'win32' ? `${name}.cmd` : name;
 const children = [];
 let stopping = false;
+
+// Node refuses to spawn a Windows batch shim such as pnpm.cmd directly (it throws
+// `spawn EINVAL`), so route those through cmd.exe the way scripts/setup.mjs does.
+// Native binaries like uv.exe can still be spawned directly.
+const spawnTool = (command, args, options) => {
+  if (isWindows && command === 'pnpm') {
+    return spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', 'pnpm.cmd', ...args], options);
+  }
+  return spawn(isWindows ? `${command}.exe` : command, args, options);
+};
 
 const stopGroup = (child, signal) => {
   if (!child?.pid) return;
   try {
-    if (process.platform === 'win32') child.kill(signal);
+    // On Windows there are no POSIX process groups; taskkill /t tears down the whole
+    // subtree (cmd.exe -> pnpm -> metro, or uv -> uvicorn) so nothing is orphaned.
+    if (isWindows) spawnSync('taskkill', ['/pid', String(child.pid), '/t', '/f'], { stdio: 'ignore' });
     else process.kill(-child.pid, signal);
   } catch (error) {
     if (error.code !== 'ESRCH') throw error;
@@ -45,10 +57,10 @@ process.on('SIGINT', () => stop(0, 'SIGINT'));
 process.on('SIGTERM', () => stop(0, 'SIGTERM'));
 
 if (!await apiIsReady()) {
-  const api = spawn(executable('uv'), [
+  const api = spawnTool('uv', [
     '--directory', 'services/api', 'run', 'uvicorn', 'exposure_api.main:app',
     '--reload', '--env-file', '.env.local', '--host', '127.0.0.1', '--port', '8000',
-  ], { detached: process.platform !== 'win32', stdio: 'inherit' });
+  ], { detached: !isWindows, stdio: 'inherit' });
   children.push(api);
   api.once('error', (error) => {
     console.error(`Exposure API failed to start: ${error.message}`);
@@ -65,8 +77,8 @@ if (!await apiIsReady()) {
   console.log('Using the Exposure API already running on port 8000.');
 }
 
-const mobile = spawn(executable('pnpm'), ['--filter', 'exposure', 'run', 'dev:android'], {
-  detached: process.platform !== 'win32',
+const mobile = spawnTool('pnpm', ['--filter', 'exposure', 'run', 'dev:android'], {
+  detached: !isWindows,
   stdio: 'inherit',
 });
 children.push(mobile);
