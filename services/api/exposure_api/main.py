@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 from typing import Annotated
@@ -32,6 +33,7 @@ MAX_UPLOAD_BYTES = int(os.getenv("EXPOSURE_MAX_UPLOAD_BYTES", str(25 * 1024 * 10
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/heic", "image/heif", "image/webp"}
 GPS_KEY = re.compile(r"gps|latitude|longitude|location", re.IGNORECASE)
 SCHEMA_VERSION = "analysis-1"
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Exposure API", version="0.1.0", docs_url="/docs")
 app.add_middleware(
@@ -136,6 +138,7 @@ async def analyze(
             )
         except Exception:
             # Deterministic results remain useful and truthful during provider outages.
+            logger.exception("Gemini semantic analysis failed")
             semantic = None
     result = merge_semantic(deterministic, semantic, provider.semantic_model if semantic else None)
     analysis_cache[cache_key] = result
@@ -248,7 +251,7 @@ async def coach(request: CoachRequest) -> CoachResponse:
             if response:
                 return CoachResponse(answer=response[0], model=response[1])
         except Exception:
-            pass
+            logger.exception("Gemini Coach request failed")
     if request.analysis.issues:
         issue = request.analysis.issues[0]
         answer = f"Start with {issue.title.lower()}. {issue.recommended_action} This is the highest-confidence change supported by the current measurements."
