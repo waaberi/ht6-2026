@@ -1,0 +1,53 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import { commitVersion, emptyLayerStack, makeAdjustmentLayer, restoreVersion } from './layers';
+import type { PhotoRecord } from './types';
+
+const photoFixture = (): PhotoRecord => ({
+  id: 'photo',
+  createdAt: '2026-01-01T00:00:00.000Z',
+  captureSource: 'camera',
+  originalUri: 'file:///original.jpg',
+  originalName: 'original.jpg',
+  originalMimeType: 'image/jpeg',
+  originalByteSize: 10,
+  originalChecksum: 'checksum',
+  analysisProxyUri: 'file:///proxy.jpg',
+  thumbnailUri: 'file:///thumb.jpg',
+  exif: {},
+  currentVersionId: 'original',
+  versions: [
+    {
+      id: 'original',
+      photoId: 'photo',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      label: 'Original',
+      stack: emptyLayerStack(),
+    },
+  ],
+  syncState: 'local',
+});
+
+test('commits immutable snapshots without changing the original metadata', () => {
+  const photo = photoFixture();
+  const stack = emptyLayerStack();
+  stack.layers.push(makeAdjustmentLayer('exposure', { exposure: 0.4 }));
+  const edited = commitVersion(photo, 'edit', stack, 'Exposure');
+  stack.layers.length = 0;
+
+  assert.equal(edited.originalChecksum, photo.originalChecksum);
+  assert.equal(edited.versions[1].stack.layers.length, 1);
+  assert.equal(photo.versions.length, 1);
+});
+
+test('restoring history creates a new current version and keeps intervening history', () => {
+  const photo = photoFixture();
+  const edited = commitVersion(photo, 'edit', emptyLayerStack(), 'Edit');
+  const restored = restoreVersion(edited, 'original', 'restore');
+
+  assert.equal(restored.versions.length, 3);
+  assert.equal(restored.currentVersionId, 'restore');
+  assert.equal(restored.versions[2].restoredFromVersionId, 'original');
+  assert.equal(restored.versions[2].parentVersionId, 'edit');
+});

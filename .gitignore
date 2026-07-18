@@ -1,0 +1,32 @@
+# Local secrets and environment overrides
+overnight.env
+.env
+.env.*
+!.env.example
+
+# Workspace-local agent metadata
+.agents/
+.codex/
+
+# Dependencies and generated builds
+node_modules/
+.expo/
+dist/
+build/
+.venv/
+artifacts/
+
+# Python caches
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+
+# Supabase local state
+supabase/.branches/
+supabase/.temp/
+
+# Editor and operating-system files
+.DS_Store
+*.swp

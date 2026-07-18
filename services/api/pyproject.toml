@@ -1,0 +1,32 @@
+[project]
+name = "exposure-api"
+version = "0.1.0"
+description = "Deterministic photo analysis, Gemini orchestration, and non-destructive rendering for Exposure"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "google-genai>=1.60,<2",
+  "httpx>=0.28,<1",
+  "numpy>=2.2,<3",
+  "pillow>=12,<13",
+  "pillow-heif>=1.4.0",
+  "python-multipart>=0.0.20,<1",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[dependency-groups]
+dev = [
+  "httpx2>=1,<3",
+  "pytest>=8.4,<10",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["exposure_api"]
