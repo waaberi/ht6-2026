@@ -162,6 +162,20 @@ if (mode === 'dev') {
 }
 
 let activeChild;
+let shuttingDown = false;
+
+const stopActiveChild = (signal) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  if (!activeChild || activeChild.exitCode !== null) process.exit(0);
+  activeChild.kill(signal);
+  const forceStop = setTimeout(() => activeChild?.kill('SIGKILL'), 5000);
+  forceStop.unref();
+};
+
+process.on('SIGINT', () => stopActiveChild('SIGINT'));
+process.on('SIGTERM', () => stopActiveChild('SIGTERM'));
+
 const run = (index) => {
   if (index >= commands[mode].length) {
     if (mode === 'install') runAdb(['shell', 'am', 'force-stop', packageName], 'Stopping the unserved development session');
@@ -173,6 +187,7 @@ const run = (index) => {
     stdio: 'inherit',
   });
   activeChild.on('exit', (code, signal) => {
+    if (shuttingDown) process.exit(0);
     if (signal) process.exit(1);
     if (code) process.exit(code);
     run(index + 1);
