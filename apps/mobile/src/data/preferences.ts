@@ -1,9 +1,14 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const PREFERENCES_KEY = 'exposure.preferences.v4';
+import { GUEST_OWNER_ID, ownerStorageSegment, type OwnerId } from '../domain/ownership';
+import { getActiveOwnerId } from './ownerScope';
+
+const LEGACY_CURRENT_PREFERENCES_KEY = 'exposure.preferences.v4';
 const PREVIOUS_PREFERENCES_KEY = 'exposure.preferences.v3';
 const OLDER_PREFERENCES_KEY = 'exposure.preferences.v2';
 const LEGACY_PREFERENCES_KEY = 'exposure.preferences.v1';
+const preferencesKey = (ownerId: OwnerId) =>
+  `exposure.owner.${ownerStorageSegment(ownerId)}.preferences.v5`;
 
 export type CameraPreferences = {
   defaultFlash: 'off' | 'auto' | 'on';
@@ -61,10 +66,13 @@ const mergePreferences = (stored: Partial<ExposurePreferences>): ExposurePrefere
   },
 });
 
-export const loadPreferences = async (): Promise<ExposurePreferences> => {
-  const stored = await AsyncStorage.getItem(PREFERENCES_KEY);
+export const loadPreferences = async (ownerId: OwnerId = getActiveOwnerId()): Promise<ExposurePreferences> => {
+  const key = preferencesKey(ownerId);
+  const stored = await AsyncStorage.getItem(key);
   if (!stored) {
+    if (ownerId !== GUEST_OWNER_ID) return defaultPreferences;
     const legacy =
+      (await AsyncStorage.getItem(LEGACY_CURRENT_PREFERENCES_KEY)) ??
       (await AsyncStorage.getItem(PREVIOUS_PREFERENCES_KEY)) ??
       (await AsyncStorage.getItem(OLDER_PREFERENCES_KEY)) ??
       (await AsyncStorage.getItem(LEGACY_PREFERENCES_KEY));
@@ -81,7 +89,7 @@ export const loadPreferences = async (): Promise<ExposurePreferences> => {
           timerSeconds: 0,
         } as CameraPreferences,
       });
-      await AsyncStorage.setItem(PREFERENCES_KEY, JSON.stringify(migrated));
+      await AsyncStorage.setItem(key, JSON.stringify(migrated));
       return migrated;
     } catch {
       return defaultPreferences;
@@ -94,21 +102,25 @@ export const loadPreferences = async (): Promise<ExposurePreferences> => {
   }
 };
 
-export const savePreferences = (preferences: ExposurePreferences) =>
-  AsyncStorage.setItem(PREFERENCES_KEY, JSON.stringify(preferences));
+export const savePreferences = (
+  preferences: ExposurePreferences,
+  ownerId: OwnerId = getActiveOwnerId(),
+) => AsyncStorage.setItem(preferencesKey(ownerId), JSON.stringify(preferences));
 
 export const updateCameraPreferences = async (changes: Partial<CameraPreferences>) => {
-  const current = await loadPreferences();
+  const ownerId = getActiveOwnerId();
+  const current = await loadPreferences(ownerId);
   const next = mergePreferences({
     ...current,
     camera: { ...current.camera, ...changes },
   });
-  await savePreferences(next);
+  await savePreferences(next, ownerId);
   return next.camera;
 };
 
 export const recordRecommendationFeedback = async (issueId: string, accepted: boolean) => {
-  const preferences = await loadPreferences();
+  const ownerId = getActiveOwnerId();
+  const preferences = await loadPreferences(ownerId);
   const acceptedIds = preferences.recommendationFeedback.accepted.filter((id) => id !== issueId);
   const rejectedIds = preferences.recommendationFeedback.rejected.filter((id) => id !== issueId);
   if (accepted) acceptedIds.push(issueId);
@@ -117,6 +129,6 @@ export const recordRecommendationFeedback = async (issueId: string, accepted: bo
     ...preferences,
     recommendationFeedback: { accepted: acceptedIds, rejected: rejectedIds },
   };
-  await savePreferences(next);
+  await savePreferences(next, ownerId);
   return next;
 };

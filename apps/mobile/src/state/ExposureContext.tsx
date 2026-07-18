@@ -10,7 +10,9 @@ import {
   savePhotos,
   type IngestPhotoInput,
 } from '../data/photoRepository';
+import { setActiveOwnerId } from '../data/ownerScope';
 import { appendLayer, assertCurrentVersion, commitVersion, currentVersion, mergeCollectiveAdjustments, restoreVersion } from '../domain/layers';
+import { GUEST_OWNER_ID, assertOwnerMatches, normalizeOwnerId, type OwnerId } from '../domain/ownership';
 import { mergeHydratedPhotos, mergeSyncProgress } from '../domain/syncMerge';
 import type { AdjustmentValues, AnalysisResult, Layer, LayerStack, PhotoRecord } from '../domain/types';
 import { analyzePhoto } from '../services/api';
@@ -27,6 +29,7 @@ import {
 import NetInfo from '@react-native-community/netinfo';
 
 type ExposureState = {
+  ownerId: OwnerId;
   photos: PhotoRecord[];
   selectedPhoto?: PhotoRecord;
   analysis?: AnalysisResult;
@@ -50,6 +53,7 @@ type ExposureState = {
 const ExposureContext = createContext<ExposureState | null>(null);
 
 export const ExposureProvider = ({ children }: React.PropsWithChildren) => {
+  const [ownerId, setOwnerId] = useState<OwnerId>(GUEST_OWNER_ID);
   const [photos, setPhotos] = useState<PhotoRecord[]>([]);
   const [selectedPhotoId, setSelectedPhotoId] = useState<string>();
   const [analyses, setAnalyses] = useState<Record<string, AnalysisResult>>({});
@@ -59,33 +63,72 @@ export const ExposureProvider = ({ children }: React.PropsWithChildren) => {
   const [syncError, setSyncError] = useState<string>();
   const [lastSyncedAt, setLastSyncedAt] = useState<string>();
   const photosRef = useRef<PhotoRecord[]>([]);
+  const ownerIdRef = useRef<OwnerId>(GUEST_OWNER_ID);
+  const ownerEpochRef = useRef(0);
+  const ownerInitializedRef = useRef(false);
   const syncingRef = useRef(false);
   const syncAgainRef = useRef(false);
 
-  const publishPhotos = useCallback((updated: PhotoRecord[]) => {
+  const publishPhotos = useCallback((updated: PhotoRecord[], expectedOwnerId: OwnerId = ownerIdRef.current) => {
+    if (ownerIdRef.current !== expectedOwnerId) return;
+    updated.forEach((photo) => assertOwnerMatches(photo.ownerId, expectedOwnerId));
     photosRef.current = updated;
     setPhotos(updated);
-    void savePhotos(updated);
+    void savePhotos(updated, expectedOwnerId);
   }, []);
 
-  const showPhotos = useCallback((updated: PhotoRecord[]) => {
+  const showPhotos = useCallback((updated: PhotoRecord[], expectedOwnerId: OwnerId = ownerIdRef.current) => {
+    if (ownerIdRef.current !== expectedOwnerId) return;
+    updated.forEach((photo) => assertOwnerMatches(photo.ownerId, expectedOwnerId));
     photosRef.current = updated;
     setPhotos(updated);
   }, []);
 
-  const showSyncProgress = useCallback((progress: PhotoRecord[]) => {
-    showPhotos(mergeSyncProgress(photosRef.current, progress));
+  const showSyncProgress = useCallback((expectedOwnerId: OwnerId, progress: PhotoRecord[]) => {
+    if (ownerIdRef.current !== expectedOwnerId) return;
+    showPhotos(mergeSyncProgress(expectedOwnerId, photosRef.current, progress), expectedOwnerId);
   }, [showPhotos]);
 
-  useEffect(() => {
-    listPhotos()
-      .then((stored) => {
-        photosRef.current = stored;
-        setPhotos(stored);
-        setSelectedPhotoId(stored[0]?.id);
-      })
-      .finally(() => setLoading(false));
+  const activateOwner = useCallback(async (nextOwnerId: string | null | undefined) => {
+    const next = normalizeOwnerId(nextOwnerId);
+    if (ownerInitializedRef.current && ownerIdRef.current === next) return;
+    const epoch = ownerEpochRef.current + 1;
+    ownerEpochRef.current = epoch;
+    ownerIdRef.current = next;
+    setActiveOwnerId(next);
+    setLoading(true);
+    photosRef.current = [];
+    setPhotos([]);
+    setSelectedPhotoId(undefined);
+    setAnalyses({});
+    setAnalyzing(false);
+    setSyncError(undefined);
+    setLastSyncedAt(undefined);
+    syncingRef.current = false;
+    syncAgainRef.current = false;
+    setSyncing(false);
+
+    const stored = await listPhotos(next);
+    if (ownerEpochRef.current !== epoch) return;
+    ownerInitializedRef.current = true;
+    photosRef.current = stored;
+    setOwnerId(next);
+    setPhotos(stored);
+    setSelectedPhotoId(stored[0]?.id);
+    setLoading(false);
   }, []);
+
+  useEffect(() => {
+    if (!supabase) {
+      void activateOwner(GUEST_OWNER_ID);
+      return;
+    }
+    const subscription = supabase.auth.onAuthStateChange((_event, session) => {
+      void activateOwner(session?.user.id);
+    }).data.subscription;
+    void supabase.auth.getSession().then(({ data }) => activateOwner(data.session?.user.id));
+    return () => subscription.unsubscribe();
+  }, [activateOwner]);
 
   const synchronize = useCallback(async function runSync() {
     if (loading || !supabase) return;
@@ -94,22 +137,25 @@ export const ExposureProvider = ({ children }: React.PropsWithChildren) => {
       return;
     }
     const { data } = await supabase.auth.getSession();
-    if (!data.session) return;
+    const syncOwnerId = ownerIdRef.current;
+    const syncEpoch = ownerEpochRef.current;
+    if (!data.session || data.session.user.id !== syncOwnerId) return;
     syncingRef.current = true;
     setSyncing(true);
     setSyncError(undefined);
     try {
-      const pendingDeletions = await listPhotoDeletionIds();
-      await syncPhotoDeletions(pendingDeletions);
-      const uploaded = await syncQueuedPhotos(photosRef.current, showSyncProgress);
+      const pendingDeletions = await listPhotoDeletionIds(syncOwnerId);
+      await syncPhotoDeletions(syncOwnerId, pendingDeletions);
+      const uploaded = await syncQueuedPhotos(syncOwnerId, photosRef.current, (progress) => showSyncProgress(syncOwnerId, progress));
       const [hydrated, remoteAnalyses] = await Promise.all([
-        pullRemotePhotos(uploaded, pendingDeletions),
-        pullRemoteAnalyses(),
-        pullRemoteStyles(),
-        pullRemotePreferences(),
+        pullRemotePhotos(syncOwnerId, uploaded, pendingDeletions),
+        pullRemoteAnalyses(syncOwnerId),
+        pullRemoteStyles(syncOwnerId),
+        pullRemotePreferences(syncOwnerId),
       ]);
-      const merged = mergeHydratedPhotos(photosRef.current, hydrated, await listPhotoDeletionIds());
-      publishPhotos(merged);
+      if (ownerEpochRef.current !== syncEpoch || ownerIdRef.current !== syncOwnerId) return;
+      const merged = mergeHydratedPhotos(syncOwnerId, photosRef.current, hydrated, await listPhotoDeletionIds(syncOwnerId));
+      publishPhotos(merged, syncOwnerId);
       setAnalyses((current) => ({ ...remoteAnalyses, ...current }));
       setSelectedPhotoId((current) => current ?? merged[0]?.id);
       setLastSyncedAt(new Date().toISOString());
@@ -117,8 +163,11 @@ export const ExposureProvider = ({ children }: React.PropsWithChildren) => {
         setSyncError('Some photos could not sync. Your local copies are safe; try again.');
       }
     } catch (error) {
-      setSyncError(error instanceof Error ? error.message : 'Cloud sync failed.');
+      if (ownerEpochRef.current === syncEpoch) {
+        setSyncError(error instanceof Error ? error.message : 'Cloud sync failed.');
+      }
     } finally {
+      if (ownerEpochRef.current !== syncEpoch) return;
       syncingRef.current = false;
       setSyncing(false);
       if (syncAgainRef.current) {
@@ -132,15 +181,11 @@ export const ExposureProvider = ({ children }: React.PropsWithChildren) => {
     const unsubscribeNetwork = NetInfo.addEventListener((network) => {
       if (network.isConnected) void synchronize();
     });
-    const authSubscription = supabase?.auth.onAuthStateChange((event) => {
-      if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') void synchronize();
-    }).data.subscription;
     void NetInfo.fetch().then((network) => {
       if (network.isConnected) void synchronize();
     });
     return () => {
       unsubscribeNetwork();
-      authSubscription?.unsubscribe();
     };
   }, [synchronize]);
 
@@ -149,30 +194,38 @@ export const ExposureProvider = ({ children }: React.PropsWithChildren) => {
   const liveSelectedPhoto = useCallback((expectedVersionId?: string) => {
     const photo = photosRef.current.find((candidate) => candidate.id === selectedPhotoId);
     if (!photo) throw new Error('Choose a photo first');
+    assertOwnerMatches(photo.ownerId, ownerIdRef.current);
     assertCurrentVersion(photo, expectedVersionId);
     return photo;
   }, [selectedPhotoId]);
 
   const persistPhoto = useCallback(async (next: PhotoRecord) => {
-    showPhotos(photosRef.current.map((photo) => (photo.id === next.id ? next : photo)));
-    await savePhoto(next);
+    const expectedOwnerId = ownerIdRef.current;
+    assertOwnerMatches(next.ownerId, expectedOwnerId);
+    showPhotos(photosRef.current.map((photo) => (photo.id === next.id ? next : photo)), expectedOwnerId);
+    await savePhoto(next, expectedOwnerId);
   }, [showPhotos]);
 
   const ingest = useCallback(async (input: IngestPhotoInput) => {
-    const photo = await ingestPhoto(input);
-    showPhotos([photo, ...photosRef.current.filter((item) => item.id !== photo.id)]);
+    const expectedOwnerId = ownerIdRef.current;
+    const photo = await ingestPhoto(input, expectedOwnerId);
+    if (ownerIdRef.current !== expectedOwnerId) return photo;
+    showPhotos([photo, ...photosRef.current.filter((item) => item.id !== photo.id)], expectedOwnerId);
     setSelectedPhotoId(photo.id);
     void synchronize();
     return photo;
   }, [showPhotos, synchronize]);
 
   const deletePhotos = useCallback(async (photoIds: string[]) => {
+    const expectedOwnerId = ownerIdRef.current;
     const ids = new Set(photoIds);
     const targets = photosRef.current.filter((photo) => ids.has(photo.id));
     if (targets.length === 0) return;
-    await Promise.all(targets.map(deleteStoredPhoto));
+    targets.forEach((photo) => assertOwnerMatches(photo.ownerId, expectedOwnerId));
+    await Promise.all(targets.map((photo) => deleteStoredPhoto(photo, expectedOwnerId)));
+    if (ownerIdRef.current !== expectedOwnerId) return;
     const remaining = photosRef.current.filter((photo) => !ids.has(photo.id));
-    showPhotos(remaining);
+    showPhotos(remaining, expectedOwnerId);
     setSelectedPhotoId((current) => current && ids.has(current) ? remaining[0]?.id : current);
     void synchronize();
   }, [showPhotos, synchronize]);
@@ -236,6 +289,7 @@ export const ExposureProvider = ({ children }: React.PropsWithChildren) => {
 
   const value = useMemo<ExposureState>(
     () => ({
+      ownerId,
       photos,
       selectedPhoto,
       analysis: selectedPhoto ? analyses[selectedPhoto.currentVersionId] : undefined,
@@ -255,7 +309,7 @@ export const ExposureProvider = ({ children }: React.PropsWithChildren) => {
       runAnalysis,
       synchronize,
     }),
-    [photos, selectedPhoto, analyses, loading, analyzing, syncing, syncError, lastSyncedAt, ingest, deletePhotos, addAdjustment, addLayer, commitStack, restore, runAnalysis, synchronize],
+    [ownerId, photos, selectedPhoto, analyses, loading, analyzing, syncing, syncError, lastSyncedAt, ingest, deletePhotos, addAdjustment, addLayer, commitStack, restore, runAnalysis, synchronize],
   );
 
   return <ExposureContext.Provider value={value}>{children}</ExposureContext.Provider>;

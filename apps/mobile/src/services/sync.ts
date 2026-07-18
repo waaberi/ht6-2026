@@ -4,9 +4,23 @@ import { layerAssetsForStacks } from '../domain/assets';
 import { mergeStyleProfiles, type SavedStyleProfile } from '../data/styleRepository';
 import { clearPhotoDeletionId } from '../data/photoRepository';
 import { loadPreferences, savePreferences, type ExposurePreferences } from '../data/preferences';
+import { getActiveOwnerId } from '../data/ownerScope';
+import {
+  GUEST_OWNER_ID,
+  assertAuthenticatedOwner,
+  assertOwnerMatches,
+  ownerDirectorySegment,
+  type OwnerId,
+} from '../domain/ownership';
 import type { AnalysisResult, Layer, PhotoRecord, PhotoVersion } from '../domain/types';
 import type { PortfolioReview, StyleProfileResult } from './api';
 import { supabase } from './supabase';
+
+const requireSessionOwner = async (ownerId: OwnerId) => {
+  if (!supabase) throw new Error('Cloud sync is not configured.');
+  const { data } = await supabase.auth.getSession();
+  return assertAuthenticatedOwner(ownerId, data.session?.user.id);
+};
 
 const uploadOnce = async (bucket: string, path: string, uri: string, contentType: string) => {
   if (!supabase) return;
@@ -15,14 +29,13 @@ const uploadOnce = async (bucket: string, path: string, uri: string, contentType
   if (error && !/already exists|duplicate/i.test(error.message)) throw error;
 };
 
-export const syncPhotoDeletions = async (photoIds: string[]): Promise<string[]> => {
+export const syncPhotoDeletions = async (ownerId: OwnerId, photoIds: string[]): Promise<string[]> => {
   if (!supabase || photoIds.length === 0) return [];
-  const { data: sessionData } = await supabase.auth.getSession();
-  const userId = sessionData.session?.user.id;
-  if (!userId) return [];
+  const userId = await requireSessionOwner(ownerId);
 
   const completed: string[] = [];
   for (const photoId of photoIds) {
+    await requireSessionOwner(ownerId);
     const [{ data: photo, error: photoError }, { data: assets, error: assetsError }] = await Promise.all([
       supabase.from('photos').select('original_path').eq('id', photoId).eq('owner_id', userId).maybeSingle(),
       supabase.from('layer_assets').select('storage_path').eq('photo_id', photoId).eq('owner_id', userId),
@@ -32,6 +45,9 @@ export const syncPhotoDeletions = async (photoIds: string[]): Promise<string[]> 
 
     const originalPath = photo?.original_path as string | undefined;
     if (originalPath) {
+      if (!originalPath.startsWith(`${ownerId}/`)) {
+        throw new Error('The remote original belongs to a different account.');
+      }
       const base = originalPath.replace(/\/original\.[^/]+$/, '');
       const { error } = await supabase.storage.from('originals').remove([originalPath]);
       if (error) throw error;
@@ -42,26 +58,29 @@ export const syncPhotoDeletions = async (photoIds: string[]): Promise<string[]> 
       if (derivedError) throw derivedError;
     }
     const assetPaths = (assets ?? []).map((asset) => asset.storage_path as string);
+    if (assetPaths.some((path) => !path.startsWith(`${ownerId}/`))) {
+      throw new Error('A remote layer asset belongs to a different account.');
+    }
     if (assetPaths.length) {
       const { error } = await supabase.storage.from('layer-assets').remove(assetPaths);
       if (error) throw error;
     }
     const { error: deleteError } = await supabase.from('photos').delete().eq('id', photoId).eq('owner_id', userId);
     if (deleteError) throw deleteError;
-    await clearPhotoDeletionId(photoId);
+    await clearPhotoDeletionId(photoId, ownerId);
     completed.push(photoId);
   }
   return completed;
 };
 
 export const syncQueuedPhotos = async (
+  ownerId: OwnerId,
   photos: PhotoRecord[],
   onProgress?: (photos: PhotoRecord[]) => void,
 ): Promise<PhotoRecord[]> => {
   if (!supabase) return photos;
-  const { data } = await supabase.auth.getSession();
-  const userId = data.session?.user.id;
-  if (!userId) return photos;
+  const userId = await requireSessionOwner(ownerId);
+  photos.forEach((photo) => assertOwnerMatches(photo.ownerId, ownerId));
 
   const synced = [...photos];
   for (let index = 0; index < synced.length; index += 1) {
@@ -69,11 +88,15 @@ export const syncQueuedPhotos = async (
     if (photo.syncState === 'synced') continue;
     const base = `${userId}/${photo.id}`;
     try {
+      await requireSessionOwner(ownerId);
       synced[index] = { ...photo, syncState: 'syncing' };
       onProgress?.([...synced]);
       const localOriginal = new File(photo.originalUri);
       const originalPath = photo.remoteOriginalPath
         ?? `${base}/original.${localOriginal.extension.replace('.', '') || 'jpg'}`;
+      if (!originalPath.startsWith(`${ownerId}/`)) {
+        throw new Error('The remote original belongs to a different account.');
+      }
       if (localOriginal.exists) {
         await uploadOnce('originals', originalPath, photo.originalUri, photo.originalMimeType);
       } else if (!photo.remoteOriginalPath) {
@@ -180,17 +203,26 @@ type RemoteLayerAssetRow = {
 };
 
 const exposureDirectory = new Directory(Paths.document, 'exposure');
-const originalsDirectory = new Directory(exposureDirectory, 'originals');
-const proxiesDirectory = new Directory(exposureDirectory, 'proxies');
-const thumbnailsDirectory = new Directory(exposureDirectory, 'thumbnails');
-const layerAssetsDirectory = new Directory(exposureDirectory, 'layer-assets');
+const syncDirectoriesForOwner = (ownerId: OwnerId) => {
+  const ownerDirectory = new Directory(exposureDirectory, 'owners', ownerDirectorySegment(ownerId));
+  return {
+    ownerDirectory,
+    originalsDirectory: new Directory(ownerDirectory, 'originals'),
+    proxiesDirectory: new Directory(ownerDirectory, 'proxies'),
+    thumbnailsDirectory: new Directory(ownerDirectory, 'thumbnails'),
+    layerAssetsDirectory: new Directory(ownerDirectory, 'layer-assets'),
+  };
+};
 
-const ensureSyncDirectories = () => {
+const ensureSyncDirectories = (ownerId: OwnerId) => {
+  const directories = syncDirectoriesForOwner(ownerId);
   exposureDirectory.create({ intermediates: true, idempotent: true });
-  originalsDirectory.create({ intermediates: true, idempotent: true });
-  proxiesDirectory.create({ intermediates: true, idempotent: true });
-  thumbnailsDirectory.create({ intermediates: true, idempotent: true });
-  layerAssetsDirectory.create({ intermediates: true, idempotent: true });
+  directories.ownerDirectory.create({ intermediates: true, idempotent: true });
+  directories.originalsDirectory.create({ intermediates: true, idempotent: true });
+  directories.proxiesDirectory.create({ intermediates: true, idempotent: true });
+  directories.thumbnailsDirectory.create({ intermediates: true, idempotent: true });
+  directories.layerAssetsDirectory.create({ intermediates: true, idempotent: true });
+  return directories;
 };
 
 const extensionForPath = (path: string, fallback = 'jpg') => path.match(/\.([a-z0-9]+)$/i)?.[1] ?? fallback;
@@ -234,11 +266,12 @@ const withLocalAssetUris = (layer: Layer, assetUris: Map<string, string>): Layer
 };
 
 const hydrateRemotePhoto = async (
+  ownerId: OwnerId,
   photo: RemotePhotoRow,
   versions: RemoteVersionRow[],
   assets: RemoteLayerAssetRow[],
 ): Promise<PhotoRecord> => {
-  ensureSyncDirectories();
+  const { originalsDirectory, proxiesDirectory, thumbnailsDirectory, layerAssetsDirectory } = ensureSyncDirectories(ownerId);
   const original = new File(originalsDirectory, `${photo.id}.${extensionForPath(photo.original_path)}`);
   const proxy = new File(proxiesDirectory, `${photo.id}.jpg`);
   const thumbnail = new File(thumbnailsDirectory, `${photo.id}.jpg`);
@@ -279,6 +312,7 @@ const hydrateRemotePhoto = async (
 
   return {
     id: photo.id,
+    ownerId,
     createdAt: photo.created_at,
     captureSource: photo.capture_source,
     originalUri: original.uri,
@@ -302,11 +336,14 @@ const hydrateRemotePhoto = async (
  * Pulls the private cloud library after sign-in so another device can rebuild
  * the same originals, version stacks, and generated/imported layer assets.
  */
-export const pullRemotePhotos = async (localPhotos: PhotoRecord[], excludedPhotoIds: string[] = []): Promise<PhotoRecord[]> => {
+export const pullRemotePhotos = async (
+  ownerId: OwnerId,
+  localPhotos: PhotoRecord[],
+  excludedPhotoIds: string[] = [],
+): Promise<PhotoRecord[]> => {
   if (!supabase) return localPhotos;
-  const { data: sessionData } = await supabase.auth.getSession();
-  const userId = sessionData.session?.user.id;
-  if (!userId) return localPhotos;
+  localPhotos.forEach((photo) => assertOwnerMatches(photo.ownerId, ownerId));
+  const userId = await requireSessionOwner(ownerId);
 
   const { data: photoRows, error: photoError } = await supabase
     .from('photos')
@@ -327,6 +364,7 @@ export const pullRemotePhotos = async (localPhotos: PhotoRecord[], excludedPhoto
   if (assetError) throw assetError;
 
   const remote = await mapWithConcurrency(visibleRows as RemotePhotoRow[], 3, (photo) => hydrateRemotePhoto(
+    ownerId,
     photo,
     (versionRows as RemoteVersionRow[]).filter((version) => version.photo_id === photo.id),
     (assetRows as RemoteLayerAssetRow[]).filter((asset) => asset.photo_id === photo.id),
@@ -341,11 +379,9 @@ export const pullRemotePhotos = async (localPhotos: PhotoRecord[], excludedPhoto
   return [...merged.values()].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
 };
 
-export const pullRemoteAnalyses = async (): Promise<Record<string, AnalysisResult>> => {
+export const pullRemoteAnalyses = async (ownerId: OwnerId): Promise<Record<string, AnalysisResult>> => {
   if (!supabase) return {};
-  const { data: sessionData } = await supabase.auth.getSession();
-  const userId = sessionData.session?.user.id;
-  if (!userId) return {};
+  const userId = await requireSessionOwner(ownerId);
   const { data, error } = await supabase
     .from('analyses')
     .select('*')
@@ -375,11 +411,9 @@ export const pullRemoteAnalyses = async (): Promise<Record<string, AnalysisResul
   return analyses;
 };
 
-export const pullRemoteStyles = async () => {
+export const pullRemoteStyles = async (ownerId: OwnerId) => {
   if (!supabase) return;
-  const { data: sessionData } = await supabase.auth.getSession();
-  const userId = sessionData.session?.user.id;
-  if (!userId) return;
+  const userId = await requireSessionOwner(ownerId);
   const { data, error } = await supabase
     .from('style_profiles')
     .select('*')
@@ -388,24 +422,23 @@ export const pullRemoteStyles = async () => {
   if (error) throw error;
   await mergeStyleProfiles((data ?? []).map((row) => ({
     id: row.id as string,
+    ownerId,
     name: row.name as string,
     referencePhotoIds: (row.reference_photo_ids ?? []) as string[],
     palette: (row.palette ?? []) as string[],
     adjustments: (row.adjustments ?? {}) as SavedStyleProfile['adjustments'],
     mood: row.mood as string,
     createdAt: row.created_at as string,
-  })));
+  })), ownerId);
 };
 
-export const pullRemotePreferences = async () => {
+export const pullRemotePreferences = async (ownerId: OwnerId) => {
   if (!supabase) return;
-  const { data: sessionData } = await supabase.auth.getSession();
-  const userId = sessionData.session?.user.id;
-  if (!userId) return;
+  const userId = await requireSessionOwner(ownerId);
   const { data, error } = await supabase.from('profiles').select('*').eq('id', userId).maybeSingle();
   if (error) throw error;
   if (!data) return;
-  const local = await loadPreferences();
+  const local = await loadPreferences(ownerId);
   await savePreferences({
     ...local,
     skillLevel: data.skill_level ?? local.skillLevel,
@@ -415,14 +448,14 @@ export const pullRemotePreferences = async () => {
     exportGps: data.export_gps ?? local.exportGps,
     recommendationFeedback: data.recommendation_feedback ?? local.recommendationFeedback,
     camera: { ...local.camera, ...(data.camera_preferences ?? {}) },
-  });
+  }, ownerId);
 };
 
 export const persistAnalysis = async (photo: PhotoRecord, analysis: AnalysisResult) => {
   if (!supabase) return;
-  const { data } = await supabase.auth.getSession();
-  const ownerId = data.session?.user.id;
-  if (!ownerId) return;
+  if (photo.ownerId === GUEST_OWNER_ID) return;
+  const ownerId = await requireSessionOwner(photo.ownerId);
+  assertOwnerMatches(photo.ownerId, ownerId);
   const { error } = await supabase.from('analyses').upsert({
     owner_id: ownerId,
     photo_id: photo.id,
@@ -443,9 +476,9 @@ export const persistAnalysis = async (photo: PhotoRecord, analysis: AnalysisResu
 
 export const persistStyleProfile = async (style: StyleProfileResult, referencePhotoIds: string[]) => {
   if (!supabase) return;
-  const { data } = await supabase.auth.getSession();
-  const ownerId = data.session?.user.id;
-  if (!ownerId) return;
+  const activeOwnerId = getActiveOwnerId();
+  if (activeOwnerId === GUEST_OWNER_ID) return;
+  const ownerId = await requireSessionOwner(activeOwnerId);
   const { error } = await supabase.from('style_profiles').upsert({
     id: style.id,
     owner_id: ownerId,
@@ -461,9 +494,9 @@ export const persistStyleProfile = async (style: StyleProfileResult, referencePh
 
 export const persistPortfolioReview = async (review: PortfolioReview, selectedPhotoIds: string[]) => {
   if (!supabase) return;
-  const { data } = await supabase.auth.getSession();
-  const ownerId = data.session?.user.id;
-  if (!ownerId) return;
+  const activeOwnerId = getActiveOwnerId();
+  if (activeOwnerId === GUEST_OWNER_ID) return;
+  const ownerId = await requireSessionOwner(activeOwnerId);
   const { error } = await supabase.from('portfolio_reviews').insert({
     owner_id: ownerId,
     selected_photo_ids: selectedPhotoIds,
@@ -478,9 +511,9 @@ export const persistPortfolioReview = async (review: PortfolioReview, selectedPh
 
 export const persistPreferences = async (preferences: ExposurePreferences) => {
   if (!supabase) return;
-  const { data } = await supabase.auth.getSession();
-  const userId = data.session?.user.id;
-  if (!userId) return;
+  const activeOwnerId = getActiveOwnerId();
+  if (activeOwnerId === GUEST_OWNER_ID) return;
+  const userId = await requireSessionOwner(activeOwnerId);
   const { error } = await supabase.from('profiles').upsert({
     id: userId,
     skill_level: preferences.skillLevel,
