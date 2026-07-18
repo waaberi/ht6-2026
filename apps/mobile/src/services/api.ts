@@ -27,7 +27,7 @@ const requireApiUrl = async () => {
     process.env.EXPO_PUBLIC_API_URL,
     preferences.apiUrl,
   );
-  if (!apiUrl) throw new ApiUnavailableError('Set the Exposure API URL in Settings to enable analysis and export.');
+  if (!apiUrl) throw new ApiUnavailableError('Online tools are not configured.');
   return apiUrl;
 };
 
@@ -41,9 +41,8 @@ const apiFetch = async (path: string, init: Parameters<typeof fetch>[1]) => {
   try {
     return await fetch(`${apiUrl}${path}`, { ...init, signal: controller.signal });
   } catch (error) {
-    if (controller.signal.aborted) throw new ApiUnavailableError('The Exposure service timed out. Try again when the connection is stable.');
-    const detail = error instanceof Error ? error.message : 'Network request failed.';
-    throw new ApiUnavailableError(`Could not reach the Exposure API at ${apiUrl}. ${detail}`);
+    if (controller.signal.aborted) throw new ApiUnavailableError('Request timed out. Try again.');
+    throw new ApiUnavailableError('Exposure is offline. Check your connection.');
   } finally {
     clearTimeout(timeout);
   }

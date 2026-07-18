@@ -693,7 +693,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
       </View>
 
       <View style={styles.panel}>
-        {message ? <Text accessibilityRole="alert" style={styles.message}>{message}</Text> : null}
+        {message ? <Text accessibilityRole="alert" numberOfLines={3} style={styles.message}>{message}</Text> : null}
         <ScrollView
           key={tool}
           contentContainerStyle={styles.panelContent}
@@ -872,8 +872,8 @@ const CoachPanel = ({
   const captureAdvice = response?.captureAdvice.length ? response.captureAdvice : analysis.cameraRecommendations;
   return (
     <>
-      <Text style={styles.summary}>{response?.headline ?? analysis.summary}</Text>
-      {response?.reason ? <Text style={styles.body}>{response.reason}</Text> : null}
+      <Text numberOfLines={2} style={styles.summary}>{response?.headline ?? analysis.summary}</Text>
+      {response?.reason ? <Text numberOfLines={3} style={styles.body}>{response.reason}</Text> : null}
 
       {issues.length > 0 ? (
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
@@ -885,7 +885,7 @@ const CoachPanel = ({
               onPress={() => onSelectIssue(issue)}
               style={[styles.chip, selectedIssue?.id === issue.id && styles.chipActive]}
             >
-              <Text style={[styles.chipText, selectedIssue?.id === issue.id && styles.chipTextActive]}>{issue.title}</Text>
+              <Text numberOfLines={1} style={[styles.chipText, selectedIssue?.id === issue.id && styles.chipTextActive]}>{issue.title}</Text>
             </Pressable>
           ))}
         </ScrollView>
@@ -894,7 +894,7 @@ const CoachPanel = ({
       {selectedIssue ? (
         <View style={styles.focusedFinding}>
           <View style={styles.findingHeading}>
-            <Text style={styles.findingTitle}>{selectedIssue.title}</Text>
+            <Text numberOfLines={1} style={styles.findingTitle}>{selectedIssue.title}</Text>
           </View>
           <Text numberOfLines={3} style={styles.body}>{selectedIssue.explanation}</Text>
           <View style={styles.findingActions}>
@@ -915,9 +915,9 @@ const CoachPanel = ({
           <Text style={styles.sectionTitle}>Capture advice</Text>
           {captureAdvice.map((advice, index) => (
             <View key={`${advice.setting}-${index}`} style={styles.adviceRow}>
-              <Text style={styles.adviceSetting}>{advice.setting.replace('-', ' ')}</Text>
+              <Text numberOfLines={1} style={styles.adviceSetting}>{advice.setting.replace('-', ' ')}</Text>
               <View style={styles.adviceBody}>
-                {advice.value ? <Text style={styles.adviceValue}>{advice.value}</Text> : null}
+                {advice.value ? <Text numberOfLines={1} style={styles.adviceValue}>{advice.value}</Text> : null}
                 {'tradeoff' in advice && advice.tradeoff ? <Text numberOfLines={2} style={styles.caption}>{advice.tradeoff}</Text> : null}
                 {'explanation' in advice ? <Text numberOfLines={2} style={styles.caption}>{advice.explanation}</Text> : null}
               </View>
@@ -926,16 +926,9 @@ const CoachPanel = ({
         </View>
       ) : null}
 
-      {response?.evidence.length ? (
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Evidence</Text>
-          {response.evidence.map((item) => <Text key={item.path} style={styles.caption}>• {item.meaning}</Text>)}
-        </View>
-      ) : null}
-
       {response?.actions.map((action) => (
         <View key={action.id} style={styles.actionRow}>
-          <View style={styles.actionCopy}><Text style={styles.findingTitle}>{action.label}</Text><Text numberOfLines={2} style={styles.caption}>{action.reason}</Text></View>
+          <View style={styles.actionCopy}><Text numberOfLines={1} style={styles.findingTitle}>{action.label}</Text><Text numberOfLines={2} style={styles.caption}>{action.reason}</Text></View>
           <Pressable accessibilityRole="button" style={styles.smallPrimary} onPress={() => onApplyAction(action)}>
             <Text style={styles.smallPrimaryText}>{action.tool === 'remove' || action.tool === 'add' || action.tool === 'expand' ? 'Review' : 'Apply'}</Text>
           </Pressable>

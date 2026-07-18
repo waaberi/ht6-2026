@@ -12,7 +12,7 @@ const tools: Array<{ id: StudioTool; label: string; icon: IconName }> = [
   { id: 'coach', label: 'Coach', icon: 'lightbulb-outline' },
   { id: 'adjust', label: 'Adjust', icon: 'tune-variant' },
   { id: 'looks', label: 'Looks', icon: 'palette-outline' },
-  { id: 'ai', label: 'AI', icon: 'creation-outline' },
+  { id: 'ai', label: 'Generate', icon: 'creation-outline' },
   { id: 'layers', label: 'Layers', icon: 'layers-outline' },
   { id: 'history', label: 'History', icon: 'history' },
 ];
@@ -35,7 +35,7 @@ export const StudioToolRail = ({ active, onChange }: { active: StudioTool; onCha
           style={({ pressed }) => [styles.tool, selected && styles.toolSelected, pressed && styles.pressed]}
         >
           <MaterialCommunityIcons name={tool.icon} size={20} color={selected ? colors.text : colors.textSecondary} />
-          <Text style={[styles.label, selected && styles.labelSelected]}>{tool.label}</Text>
+          <Text numberOfLines={1} style={[styles.label, selected && styles.labelSelected]}>{tool.label}</Text>
         </Pressable>
       );
     })}
