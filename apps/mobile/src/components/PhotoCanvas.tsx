@@ -10,7 +10,7 @@ import {
   Rect,
   useImage,
 } from '@shopify/react-native-skia';
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { PanResponder, StyleSheet, View } from 'react-native';
 
 import { quarterTurnsForRotation, resolveCanvasExpansion } from '../domain/canvasTransforms';
@@ -72,6 +72,7 @@ export const PhotoCanvas = ({
   cropAspect,
   onCropChange,
   onCropCommit,
+  onImageSizeChange,
 }: {
   uri: string;
   stack: LayerStack;
@@ -84,6 +85,7 @@ export const PhotoCanvas = ({
   cropAspect?: number;
   onCropChange?: (region: Region) => void;
   onCropCommit?: (region: Region) => void;
+  onImageSizeChange?: (size: { width: number; height: number }) => void;
 }) => {
   const image = useImage(uri);
   const [size, setSize] = useState({ width: 1, height: 1 });
@@ -97,6 +99,14 @@ export const PhotoCanvas = ({
   const swapsDimensions = Math.abs(quarterTurns) % 2 === 1;
   const straightenDegrees = rotationDegrees - quarterTurns * 90;
   const rotation = -rotationDegrees * Math.PI / 180;
+
+  useEffect(() => {
+    if (!image || !onImageSizeChange) return;
+    const width = image.width();
+    const height = image.height();
+    if (width > 0 && height > 0) onImageSizeChange({ width, height });
+  }, [image, onImageSizeChange]);
+
   const geometry = useMemo(() => {
     const imageWidth = image?.width() ?? 1;
     const imageHeight = image?.height() ?? 1;

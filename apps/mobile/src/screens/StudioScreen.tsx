@@ -116,6 +116,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   const [tool, setTool] = useState<StudioTool>('coach');
   const [adjustmentSection, setAdjustmentSection] = useState<AdjustmentSection>('light');
   const [cropAspect, setCropAspect] = useState<number>();
+  const [previewImageSize, setPreviewImageSize] = useState<{ uri: string; width: number; height: number }>();
   const [message, setMessage] = useState<string>();
   const [coachResponse, setCoachResponse] = useState<CoachResponse>();
   const [coachQuestion, setCoachQuestion] = useState('');
@@ -297,6 +298,16 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     setSelectedIssueId(undefined);
     setGenerativeRecommendationId(undefined);
   }, []);
+
+  const previewUri = selectedPhoto?.analysisProxyUri;
+  const handlePreviewImageSizeChange = useCallback((size: { width: number; height: number }) => {
+    if (!previewUri) return;
+    setPreviewImageSize((current) => (
+      current?.uri === previewUri && current.width === size.width && current.height === size.height
+        ? current
+        : { uri: previewUri, ...size }
+    ));
+  }, [previewUri]);
 
   if (!selectedPhoto || !version || !previewStack) {
     return (
@@ -537,9 +548,14 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
 
   const cropPhoto = (aspect: number | undefined) => {
     const next: CanvasTransform = { ...draftTransform };
+    const decodedSize = previewImageSize?.uri === selectedPhoto.analysisProxyUri
+      ? previewImageSize
+      : undefined;
+    const imageWidth = decodedSize?.width ?? selectedPhoto.width;
+    const imageHeight = decodedSize?.height ?? selectedPhoto.height;
     setCropAspect(aspect);
     if (aspect === undefined) delete next.crop;
-    else next.crop = centeredCrop(selectedPhoto.width, selectedPhoto.height, aspect, draftTransform.rotationDegrees);
+    else next.crop = centeredCrop(imageWidth, imageHeight, aspect, draftTransform.rotationDegrees);
     void commitTransform(next, aspect === undefined ? 'Original crop' : `Crop ${aspectLabel(aspect)}`);
   };
 
@@ -796,6 +812,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
           cropAspect={cropAspect}
           onCropChange={(crop) => setDraftTransform((current) => ({ ...current, crop }))}
           onCropCommit={(crop) => void commitTransform({ ...draftTransform, crop }, 'Crop')}
+          onImageSizeChange={handlePreviewImageSizeChange}
         />
       </View>
 
@@ -849,8 +866,8 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
               section={adjustmentSection}
               onSectionChange={setAdjustmentSection}
               transform={draftTransform}
-              imageWidth={selectedPhoto.width}
-              imageHeight={selectedPhoto.height}
+              imageWidth={previewImageSize?.uri === selectedPhoto.analysisProxyUri ? previewImageSize.width : selectedPhoto.width}
+              imageHeight={previewImageSize?.uri === selectedPhoto.analysisProxyUri ? previewImageSize.height : selectedPhoto.height}
               onAngleChange={(degrees) => setDraftTransform((current) => withStraighten(current, degrees))}
               onAngleCommit={(degrees) => void commitTransform(withStraighten(draftTransform, degrees), 'Rotate angle')}
               onCrop={cropPhoto}
