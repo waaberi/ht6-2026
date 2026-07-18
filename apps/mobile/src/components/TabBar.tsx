@@ -32,11 +32,11 @@ export const TabBar = ({ active, onChange }: { active: MainTab; onChange: (tab: 
             accessibilityLabel={item.label}
             accessibilityState={{ selected }}
           >
-            <View style={[styles.iconWrap, selected && styles.selectedIconWrap]}>
+            <View style={styles.iconWrap}>
               <Ionicons
                 name={selected ? item.activeIcon : item.icon}
                 size={23}
-                color={selected ? colors.text : colors.textSecondary}
+                color={selected ? colors.primary : colors.textSecondary}
               />
             </View>
             <Text style={[styles.label, selected && styles.selectedLabel]}>{item.label}</Text>
@@ -70,8 +70,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  selectedIconWrap: { backgroundColor: colors.surfaceStrong },
   label: { color: colors.textSecondary, ...typography.caption, fontWeight: '600' },
-  selectedLabel: { color: colors.text, fontWeight: '700' },
+  selectedLabel: { color: colors.primary, fontWeight: '700' },
   pressed: { opacity: 0.72 },
 });

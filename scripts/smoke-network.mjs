@@ -50,6 +50,37 @@ try {
   if (!cloudResponse.ok) throw new Error(`Supabase auth endpoint returned ${cloudResponse.status}.`);
   console.log('Supabase auth: ok');
 
+  const serviceEnv = parseEnv('services/api/.env.local');
+  const serviceUrl = serviceEnv.SUPABASE_URL?.replace(/\/$/, '');
+  const serviceKey = serviceEnv.SUPABASE_SERVICE_ROLE_KEY || serviceEnv.SUPABASE_SECRET_KEY;
+  if (!serviceUrl || !serviceKey) throw new Error('Supabase service configuration is missing.');
+  const serviceHeaders = { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` };
+  const schemaChecks = [
+    ['photos', 'id'],
+    ['profiles', 'id,camera_preferences,recommendation_feedback'],
+    ['photo_versions', 'id,adjustments'],
+  ];
+  for (const [table, columns] of schemaChecks) {
+    const schemaResponse = await fetch(`${serviceUrl}/rest/v1/${table}?select=${columns}&limit=1`, {
+      headers: serviceHeaders,
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!schemaResponse.ok) {
+      throw new Error(`Supabase Exposure schema is missing ${table} (${schemaResponse.status}). Apply the linked migrations.`);
+    }
+  }
+  console.log('Supabase schema: ok');
+
+  const bucketResponse = await fetch(`${serviceUrl}/storage/v1/bucket`, {
+    headers: serviceHeaders,
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!bucketResponse.ok) throw new Error(`Supabase Storage endpoint returned ${bucketResponse.status}.`);
+  const bucketIds = new Set((await bucketResponse.json()).map((bucket) => bucket.id));
+  const missingBuckets = ['originals', 'derived', 'layer-assets'].filter((id) => !bucketIds.has(id));
+  if (missingBuckets.length) throw new Error(`Supabase Storage is missing: ${missingBuckets.join(', ')}.`);
+  console.log('Supabase storage: ok');
+
   const gemini = spawnSync(executable('uv'), [
     '--directory', 'services/api', 'run', '--env-file', '.env.local',
     'python', 'scripts/smoke_gemini.py', '--include-image',

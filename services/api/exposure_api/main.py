@@ -34,6 +34,7 @@ from .providers import GeminiImageError, GeminiImageQuotaError, GeminiProvider
 from .renderer import encode_image, export_exif, render_layer_stack
 
 MAX_UPLOAD_BYTES = int(os.getenv("EXPOSURE_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+SEMANTIC_TIMEOUT_SECONDS = max(5.0, min(40.0, float(os.getenv("EXPOSURE_SEMANTIC_TIMEOUT_SECONDS", "25"))))
 ANALYSIS_CACHE_MAX_ENTRIES = max(1, int(os.getenv("EXPOSURE_ANALYSIS_CACHE_MAX_ENTRIES", "128")))
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/heic", "image/heif", "image/webp"}
 GPS_KEY = re.compile(r"gps|latitude|longitude|location", re.IGNORECASE)
@@ -166,13 +167,18 @@ async def analyze(
     semantic = None
     if provider.configured:
         try:
-            semantic = await provider.analyze_semantics(
-                image_bytes,
-                analysis_mime_type,
-                deterministic,
-                safe_exif,
-                coaching,
+            semantic = await asyncio.wait_for(
+                provider.analyze_semantics(
+                    image_bytes,
+                    analysis_mime_type,
+                    deterministic,
+                    safe_exif,
+                    coaching,
+                ),
+                timeout=SEMANTIC_TIMEOUT_SECONDS,
             )
+        except TimeoutError:
+            logger.warning("Gemini semantic analysis exceeded %.1f seconds; returning deterministic results", SEMANTIC_TIMEOUT_SECONDS)
         except Exception:
             # Deterministic results remain useful and truthful during provider outages.
             logger.exception("Gemini semantic analysis failed")

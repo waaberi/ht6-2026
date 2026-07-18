@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
 
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
+
+from exposure_api import main
 
 
 def test_analysis_returns_validated_evidence_without_mutating_source(client: TestClient, image_bytes: bytes) -> None:
@@ -37,6 +40,52 @@ def test_analysis_cache_rebinds_the_requested_version(client: TestClient, image_
     second = client.post("/v1/analyze", files={"image": ("two.png", image_bytes, "image/png")}, data={"version_id": "two", "checksum": checksum})
     assert first.status_code == second.status_code == 200
     assert second.json()["versionId"] == "two"
+
+
+def test_analysis_handles_odd_width_images(client: TestClient) -> None:
+    image = Image.new("RGB", (121, 200), "#253b38")
+    ImageDraw.Draw(image).rectangle((61, 36, 102, 164), fill="#eabda8")
+    encoded = io.BytesIO()
+    image.save(encoded, format="PNG")
+
+    response = client.post(
+        "/v1/analyze",
+        files={"image": ("odd-width.png", encoded.getvalue(), "image/png")},
+        data={"version_id": "odd-width"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["metrics"]["width"] == 121
+    assert 0 <= response.json()["metrics"]["mirrorDifference"] <= 1
+
+
+def test_analysis_returns_deterministic_result_when_semantic_provider_times_out(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    class SlowProvider:
+        configured = True
+        semantic_model = "slow-semantic-fixture"
+
+        async def analyze_semantics(self, *_args, **_kwargs):
+            await asyncio.sleep(0.05)
+            raise AssertionError("semantic response should have timed out")
+
+    image = Image.new("RGB", (137, 91), "#45635e")
+    encoded = io.BytesIO()
+    image.save(encoded, format="PNG")
+    monkeypatch.setattr(main, "provider", SlowProvider())
+    monkeypatch.setattr(main, "SEMANTIC_TIMEOUT_SECONDS", 0.01)
+
+    response = client.post(
+        "/v1/analyze",
+        files={"image": ("slow-semantic.png", encoded.getvalue(), "image/png")},
+        data={"version_id": "slow-semantic"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["deterministicModel"] == "exposure-deterministic-1"
+    assert "semanticModel" not in response.json() or response.json()["semanticModel"] is None
 
 
 def test_camera_advice_does_not_invent_missing_exif(client: TestClient, image_bytes: bytes) -> None:

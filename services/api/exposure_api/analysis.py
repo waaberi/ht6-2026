@@ -160,7 +160,10 @@ def analyze_deterministic(
         for tx in (1 / 3, 2 / 3)
         for ty in (1 / 3, 2 / 3)
     )
-    symmetry = float(np.mean(np.abs(luminance[:, : image.width // 2] - np.fliplr(luminance[:, -image.width // 2 :]))))
+    symmetry_half_width = max(1, image.width // 2)
+    left_half = luminance[:, :symmetry_half_width]
+    right_half = luminance[:, image.width - symmetry_half_width:]
+    symmetry = float(np.mean(np.abs(left_half - np.fliplr(right_half))))
     edge_threshold = np.percentile(edges, 82)
     occupied_ratio = float(np.mean(edges >= edge_threshold))
     half_height = max(1, image.height // 2)
