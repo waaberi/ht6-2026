@@ -247,6 +247,11 @@ export const saveGeneratedLayerAsset = (id: string, encoded: string) => {
   return asset.uri;
 };
 
+export const deleteGeneratedLayerAsset = (id: string) => {
+  const asset = new File(layerAssetsDirectory, `${id}.png`);
+  if (asset.exists) asset.delete();
+};
+
 export const saveImportedLayerAsset = async (id: string, sourceUri: string, mimeType = 'image/jpeg') => {
   ensureDirectories();
   const extension = mimeType === 'image/png' ? 'png' : 'jpg';

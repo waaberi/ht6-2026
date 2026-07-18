@@ -10,7 +10,7 @@ import { AdjustmentSheet, type AdjustmentSection } from '../components/studio/Ad
 import { LooksPanel } from '../components/studio/LooksPanel';
 import { StudioToolRail, type StudioTool } from '../components/studio/StudioToolRail';
 import { colors } from '../components/theme';
-import { saveGeneratedLayerAsset } from '../data/photoRepository';
+import { deleteGeneratedLayerAsset, saveGeneratedLayerAsset } from '../data/photoRepository';
 import { recordRecommendationFeedback } from '../data/preferences';
 import { loadStyleProfiles, type SavedStyleProfile } from '../data/styleRepository';
 import { centeredCrop, restoreManualTransform, rotateClockwise, withStraighten } from '../domain/canvasTransforms';
@@ -22,6 +22,7 @@ import type {
   CoachAction,
   CoachResponse,
   GenerativeOperation,
+  GenerativePatchLayer,
   Issue,
   LayerStack,
   Region,
@@ -37,6 +38,14 @@ const CENTER_TARGET: Region = { x: 0.3, y: 0.3, width: 0.4, height: 0.4 };
 const UPPER_TARGET: Region = { x: 0.2, y: 0.08, width: 0.6, height: 0.34 };
 const LOWER_TARGET: Region = { x: 0.2, y: 0.58, width: 0.6, height: 0.34 };
 type ExpansionDirection = 'top' | 'right' | 'bottom' | 'left';
+type GenerativeDraft = {
+  sourcePhotoId: string;
+  sourceVersionId: string;
+  label: string;
+  stack: LayerStack;
+  layer: GenerativePatchLayer;
+  recommendation?: Issue;
+};
 
 const aspectLabel = (aspect: number) => {
   if (Math.abs(aspect - 1) < 0.001) return '1:1';
@@ -106,8 +115,13 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   const [generativeOperation, setGenerativeOperation] = useState<GenerativeOperation>('remove');
   const [generativePrompt, setGenerativePrompt] = useState('Remove the selected distraction and reconstruct the background.');
   const [generativeTarget, setGenerativeTarget] = useState<Region>(CENTER_TARGET);
+  const [generativeRecommendationId, setGenerativeRecommendationId] = useState<string>();
   const [expansionDirection, setExpansionDirection] = useState<ExpansionDirection>('right');
   const [expansionFraction, setExpansionFraction] = useState(0.25);
+  const [generativeDraft, setGenerativeDraft] = useState<GenerativeDraft>();
+  const generativeDraftRef = useRef<GenerativeDraft | undefined>(undefined);
+  const generativeCommitRef = useRef(false);
+  const mountedRef = useRef(true);
   const adjustmentCommitRef = useRef(false);
   const [savedLooks, setSavedLooks] = useState<SavedStyleProfile[]>([]);
   const [looksLoading, setLooksLoading] = useState(true);
@@ -121,6 +135,8 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   const transformCommitRef = useRef(false);
 
   const version = selectedPhoto ? currentVersion(selectedPhoto) : undefined;
+  const currentSelectionRef = useRef({ photoId: selectedPhoto?.id, versionId: version?.id });
+  currentSelectionRef.current = { photoId: selectedPhoto?.id, versionId: version?.id };
   const savedAdjustments = useMemo(
     () => version ? collectiveAdjustmentValues(version.stack) : {},
     [version],
@@ -144,6 +160,39 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     [analysis?.issues, dismissedIssueIds],
   );
   const selectedIssue = visibleIssues.find((issue) => issue.id === selectedIssueId) ?? visibleIssues[0];
+  const explicitRecommendation = generativeRecommendationId
+    ? visibleIssues.find((issue) => issue.id === generativeRecommendationId)
+    : undefined;
+
+  const deleteDraftAssets = useCallback((draft: GenerativeDraft) => {
+    deleteGeneratedLayerAsset(draft.layer.patchAssetId);
+    deleteGeneratedLayerAsset(draft.layer.maskAssetId);
+  }, []);
+
+  const releaseGenerativeDraft = useCallback((deleteAssets: boolean) => {
+    const draft = generativeDraftRef.current;
+    if (draft && deleteAssets) deleteDraftAssets(draft);
+    generativeDraftRef.current = undefined;
+    if (mountedRef.current) setGenerativeDraft(undefined);
+  }, [deleteDraftAssets]);
+
+  useEffect(() => () => {
+    mountedRef.current = false;
+    const draft = generativeDraftRef.current;
+    if (draft && !generativeCommitRef.current) {
+      deleteDraftAssets(draft);
+      generativeDraftRef.current = undefined;
+    }
+  }, [deleteDraftAssets]);
+
+  useEffect(() => {
+    const draft = generativeDraftRef.current;
+    if (!draft) return;
+    if (generativeCommitRef.current) return;
+    if (draft.sourcePhotoId === selectedPhoto?.id && draft.sourceVersionId === version?.id) return;
+    releaseGenerativeDraft(true);
+    setMessage('The photo changed, so the AI preview was discarded.');
+  }, [releaseGenerativeDraft, selectedPhoto?.id, version?.id]);
 
   useEffect(() => {
     let active = true;
@@ -176,6 +225,11 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
 
   const previewStack = useMemo<LayerStack | undefined>(() => {
     if (!version) return undefined;
+    if (
+      generativeDraft
+      && generativeDraft.sourcePhotoId === selectedPhoto?.id
+      && generativeDraft.sourceVersionId === version.id
+    ) return generativeDraft.stack;
     const collectiveStack = setCollectiveAdjustments(version.stack, draftAdjustments);
     const adjustedStack: LayerStack = {
       ...collectiveStack,
@@ -193,11 +247,12 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
       appliedLookLayer?.id ?? lookDraftLayerId,
       appliedLookLayer?.createdAt ?? new Date().toISOString(),
     );
-  }, [appliedLookLayer?.createdAt, appliedLookLayer?.id, draftAdjustments, draftLayerOpacities, draftTransform, lookDraftLayerId, lookStrength, selectedLook, tool, version]);
+  }, [appliedLookLayer?.createdAt, appliedLookLayer?.id, draftAdjustments, draftLayerOpacities, draftTransform, generativeDraft, lookDraftLayerId, lookStrength, selectedLook, selectedPhoto?.id, tool, version]);
 
   const updateGenerativeTarget = useCallback((target: Region) => {
     setGenerativeTarget(target);
     setSelectedIssueId(undefined);
+    setGenerativeRecommendationId(undefined);
   }, []);
 
   if (!selectedPhoto || !version || !previewStack) {
@@ -233,10 +288,12 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     setSelectedIssueId(undefined);
   };
 
-  const openGenerativeTool = (operation: GenerativeOperation, target: Region, prompt: string) => {
+  const openGenerativeTool = (operation: GenerativeOperation, target: Region, prompt: string, recommendationIssueId?: string) => {
     setGenerativeOperation(operation);
     setGenerativeTarget(target);
     setGenerativePrompt(prompt);
+    setSelectedIssueId(recommendationIssueId);
+    setGenerativeRecommendationId(recommendationIssueId);
     setTool('ai');
   };
 
@@ -288,6 +345,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
         issue.fix.kind === 'retouch'
           ? `Remove ${issue.title.toLowerCase()} and reconstruct the surrounding background.`
           : issue.recommendedAction,
+        issue.id,
       );
     } else if (issue.fix?.kind === 'crop') {
       setAdjustmentSection('crop');
@@ -349,12 +407,13 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
         setAdjustmentSection('crop');
         setTool('adjust');
       } else if (plan.kind === 'generative') {
-        openGenerativeTool(plan.operation, plan.target, plan.prompt);
+        openGenerativeTool(plan.operation, plan.target, plan.prompt, selectedIssue?.id);
       } else if (plan.kind === 'expand') {
         setExpansionDirection(plan.direction);
         setExpansionFraction(plan.fraction);
         setGenerativeOperation('expand');
         setGenerativePrompt(plan.prompt);
+        setGenerativeRecommendationId(selectedIssue?.id);
         setTool('ai');
       } else {
         onRetake();
@@ -502,9 +561,13 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
 
   const generateEdit = async () => {
     if (!generativePrompt.trim()) return;
+    if (generativeDraftRef.current) releaseGenerativeDraft(true);
     const sourceVersionId = version.id;
+    const sourcePhotoId = selectedPhoto.id;
     setMessage(undefined);
     setAssetBusy(true);
+    let patchAssetId: string | undefined;
+    let maskAssetId: string | undefined;
     try {
       const result = await createGenerativePatch(
         selectedPhoto,
@@ -516,39 +579,81 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
         expansionFraction,
       );
       if (result.sourceVersionId !== sourceVersionId) throw new StalePhotoVersionError();
-      const patchAssetId = randomUUID();
-      const maskAssetId = randomUUID();
+      if (!mountedRef.current) return;
+      if (
+        currentSelectionRef.current.photoId !== sourcePhotoId
+        || currentSelectionRef.current.versionId !== sourceVersionId
+      ) throw new StalePhotoVersionError();
+      patchAssetId = randomUUID();
+      maskAssetId = randomUUID();
       const patchUri = saveGeneratedLayerAsset(patchAssetId, result.patchBase64);
       const maskUri = saveGeneratedLayerAsset(maskAssetId, result.maskBase64);
       const label = generativeOperation === 'remove'
-        ? `Removed ${selectedIssue?.title.toLowerCase() ?? 'selection'}`
+        ? `Removed ${explicitRecommendation?.title.toLowerCase() ?? 'selection'}`
         : generativeOperation === 'expand'
           ? `Expanded ${expansionDirection}`
           : `Added ${generativePrompt.trim().slice(0, 42)}`;
-      const generatedLayer = {
+      const generatedLayer: GenerativePatchLayer = {
         id: randomUUID(), type: 'generative-patch', name: label, enabled: true, opacity: 1,
         createdAt: new Date().toISOString(), patchAssetId, patchUri, maskAssetId, maskUri,
         target: result.target, prompt: generativePrompt.trim(),
         canvasSpace: true,
         canvasExpansion: result.expansion ?? version.stack.canvasTransform.expansion ?? { top: 0, right: 0, bottom: 0, left: 0 },
         provenance: { model: result.model, sourceVersionId: result.sourceVersionId, driftScore: result.driftScore },
-      } as const;
+      };
+      let candidateStack: LayerStack;
       if (generativeOperation === 'expand') {
         if (!result.expansion) throw new Error('The expansion result did not include canvas geometry.');
-        await commit({
+        candidateStack = {
           ...version.stack,
           canvasTransform: { ...version.stack.canvasTransform, expansion: result.expansion },
           layers: [...version.stack.layers, generatedLayer],
-        }, label, sourceVersionId);
+        };
       } else {
-        await addLayer(generatedLayer, label, sourceVersionId);
+        candidateStack = { ...version.stack, layers: [...version.stack.layers, generatedLayer] };
       }
-      await acceptRecommendation(selectedIssue);
-      setTool('layers');
+      const draft: GenerativeDraft = {
+        sourcePhotoId,
+        sourceVersionId,
+        label,
+        stack: candidateStack,
+        layer: generatedLayer,
+        recommendation: explicitRecommendation,
+      };
+      generativeDraftRef.current = draft;
+      setGenerativeDraft(draft);
+      patchAssetId = undefined;
+      maskAssetId = undefined;
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'AI edit failed.');
+      if (patchAssetId) deleteGeneratedLayerAsset(patchAssetId);
+      if (maskAssetId) deleteGeneratedLayerAsset(maskAssetId);
+      if (mountedRef.current) setMessage(error instanceof Error ? error.message : 'AI edit failed.');
     } finally {
-      setAssetBusy(false);
+      if (mountedRef.current) setAssetBusy(false);
+    }
+  };
+
+  const acceptGenerativeDraft = async () => {
+    const draft = generativeDraftRef.current;
+    if (!draft) return;
+    setMessage(undefined);
+    setAssetBusy(true);
+    generativeCommitRef.current = true;
+    try {
+      if (
+        currentSelectionRef.current.photoId !== draft.sourcePhotoId
+        || currentSelectionRef.current.versionId !== draft.sourceVersionId
+      ) throw new StalePhotoVersionError();
+      await commitStack(draft.stack, draft.label, draft.sourceVersionId);
+      releaseGenerativeDraft(false);
+      setTool('layers');
+      await acceptRecommendation(draft.recommendation);
+    } catch (error) {
+      if (error instanceof StalePhotoVersionError || !mountedRef.current) releaseGenerativeDraft(true);
+      if (mountedRef.current) setMessage(error instanceof Error ? error.message : 'AI edit failed.');
+    } finally {
+      generativeCommitRef.current = false;
+      if (mountedRef.current) setAssetBusy(false);
     }
   };
 
@@ -669,8 +774,10 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
               busy={assetBusy}
               expansionDirection={expansionDirection}
               expansionFraction={expansionFraction}
+              previewReady={Boolean(generativeDraft)}
               onOperationChange={(operation) => {
                 setGenerativeOperation(operation);
+                setGenerativeRecommendationId(undefined);
                 setGenerativePrompt(operation === 'remove'
                   ? 'Remove the selected distraction and reconstruct the background.'
                   : operation === 'expand'
@@ -681,8 +788,11 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
               onTargetChange={(target, issueId) => {
                 setGenerativeTarget(target);
                 setSelectedIssueId(issueId);
+                setGenerativeRecommendationId(issueId);
               }}
               onGenerate={generateEdit}
+              onAccept={() => void acceptGenerativeDraft()}
+              onDiscard={() => releaseGenerativeDraft(true)}
               onExpansionDirectionChange={setExpansionDirection}
               onExpansionFractionChange={setExpansionFraction}
             />
@@ -707,6 +817,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
           active={tool}
           onChange={(nextTool) => {
             if (tool === 'adjust' && nextTool !== 'adjust') setDraftTransform(version.stack.canvasTransform);
+            if (nextTool === 'ai') setGenerativeRecommendationId(undefined);
             setTool(nextTool);
           }}
         />
@@ -857,10 +968,13 @@ const AiPanel = ({
   busy,
   expansionDirection,
   expansionFraction,
+  previewReady,
   onOperationChange,
   onPromptChange,
   onTargetChange,
   onGenerate,
+  onAccept,
+  onDiscard,
   onExpansionDirectionChange,
   onExpansionFractionChange,
 }: {
@@ -871,14 +985,29 @@ const AiPanel = ({
   busy: boolean;
   expansionDirection: ExpansionDirection;
   expansionFraction: number;
+  previewReady: boolean;
   onOperationChange: (operation: GenerativeOperation) => void;
   onPromptChange: (value: string) => void;
   onTargetChange: (target: Region, issueId?: string) => void;
   onGenerate: () => void;
+  onAccept: () => void;
+  onDiscard: () => void;
   onExpansionDirectionChange: (direction: ExpansionDirection) => void;
   onExpansionFractionChange: (fraction: number) => void;
 }) => {
   const selected = (candidate: Region) => JSON.stringify(candidate) === JSON.stringify(target);
+  if (previewReady) {
+    return (
+      <View accessibilityLabel="AI edit preview actions" style={styles.previewActions}>
+        <Pressable accessibilityRole="button" style={styles.previewDiscard} onPress={onDiscard} disabled={busy}>
+          <Text style={styles.previewDiscardText}>Discard</Text>
+        </Pressable>
+        <Pressable accessibilityRole="button" style={[styles.previewAccept, busy && styles.disabled]} onPress={onAccept} disabled={busy}>
+          {busy ? <ActivityIndicator color={colors.onPrimary} /> : <Text style={styles.previewAcceptText}>Accept</Text>}
+        </Pressable>
+      </View>
+    );
+  }
   return (
     <>
       <View style={styles.segmented}>
@@ -1044,6 +1173,11 @@ const styles = StyleSheet.create({
   centerAction: { minHeight: 100, justifyContent: 'center' },
   primary: { backgroundColor: colors.lime, minHeight: 48, alignItems: 'center', justifyContent: 'center', borderRadius: 8, paddingHorizontal: 16 },
   primaryText: { color: colors.limeInk, fontWeight: '800', fontSize: 13 },
+  previewActions: { flexDirection: 'row', gap: 12, minHeight: 52 },
+  previewDiscard: { flex: 1, minHeight: 52, borderRadius: 8, backgroundColor: colors.surfaceStrong, borderWidth: 1, borderColor: colors.outlineStrong, alignItems: 'center', justifyContent: 'center' },
+  previewDiscardText: { color: colors.text, fontSize: 14, fontWeight: '800' },
+  previewAccept: { flex: 1, minHeight: 52, borderRadius: 8, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' },
+  previewAcceptText: { color: colors.onPrimary, fontSize: 14, fontWeight: '800' },
   summary: { color: colors.ink, fontSize: 18, fontWeight: '800', lineHeight: 23 },
   body: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 4 },
   caption: { color: colors.muted, fontSize: 12, lineHeight: 17 },
