@@ -87,50 +87,36 @@ def test_deterministic_analysis_emits_signals_without_diagnosis_templates() -> N
     assert all(signal.signal_key and signal.evidence for signal in first.signals)
 
 
-def test_semantic_merge_supports_reinterprets_suppresses_and_adds() -> None:
+def test_semantic_merge_supports_reinterprets_omits_and_adds() -> None:
     result = _analysis_with_signals()
     semantic = SemanticAnalysis.model_validate({
         "summary": "Window light and the diagonal create a deliberate, quiet portrait.",
-        "apparentIntent": "A quiet portrait shaped by side light and diagonal architecture.",
         "assessments": [
             {
                 "signalId": "signal-light",
                 "disposition": "support",
-                "reason": "The face is visibly dim against the bright window.",
                 "confidence": 0.9,
                 "basedOn": ["signals.signal-light", "metrics.meanLuminance"],
-                "interpretation": {
-                    "category": "lighting",
-                    "title": "Window Overpowers the Face",
-                    "explanation": "Mean luminance is 0.2, while the visible window leaves the face without separation.",
-                    "recommendedAction": "Lift the face slightly, preserving the window mood.",
-                },
+                "category": "lighting",
+                "title": "Window Overpowers the Face",
+                "explanation": "Mean luminance is 0.2, while the visible window leaves the face without separation.",
+                "recommendedAction": "Lift the face slightly, preserving the window mood.",
             },
             {
                 "signalId": "signal-tilt",
                 "disposition": "reinterpret",
-                "reason": "The visible diagonal architecture reinforces motion rather than accidental tilt.",
                 "confidence": 0.88,
                 "basedOn": ["signals.signal-tilt", "metrics.estimatedTiltDegrees"],
-                "interpretation": {
-                    "category": "intent",
-                    "title": "Diagonal Adds Momentum",
-                    "explanation": "The measured eight-degree diagonal follows the visible architecture and supports the subject's movement.",
-                    "recommendedAction": "Keep the diagonal; tighten the trailing edge.",
-                },
-            },
-            {
-                "signalId": "signal-edge",
-                "disposition": "suppress",
-                "reason": "The bright edge is visibly part of the window frame.",
-                "confidence": 0.91,
+                "category": "intent",
+                "title": "Diagonal Adds Momentum",
+                "explanation": "The measured eight-degree diagonal follows the visible architecture and supports the subject's movement.",
+                "recommendedAction": "Keep the diagonal; tighten the trailing edge.",
             },
         ],
         "issues": [{
             "category": "distraction",
             "title": "Window Edge Touches Hair",
             "explanation": "The bright window edge visibly intersects the hair, competing with the dim face at mean luminance 0.2.",
-            "severity": 0.55,
             "confidence": 0.86,
             "box2d": [120, 680, 820, 920],
             "recommendedAction": "Darken that narrow edge without flattening the window.",
@@ -157,20 +143,16 @@ def test_semantic_merge_discards_unknown_grounding_references() -> None:
     result = _analysis_with_signals()
     semantic = SemanticAnalysis.model_validate({
         "summary": "The measured exposure needs image context before any edit.",
-        "apparentIntent": "A low-key portrait.",
         "assessments": [
             {
                 "signalId": "signal-light",
                 "disposition": "support",
-                "reason": "The face is visibly dim.",
                 "confidence": 0.9,
                 "basedOn": ["signals.signal-light", "metrics.inventedScore"],
-                "interpretation": {
-                    "category": "lighting",
-                    "title": "Face Needs Separation",
-                    "explanation": "The visible face merges into the dark wall despite the low-key intent.",
-                    "recommendedAction": "Lift only the face by a small amount.",
-                },
+                "category": "lighting",
+                "title": "Face Needs Separation",
+                "explanation": "The visible face merges into the dark wall despite the low-key intent.",
+                "recommendedAction": "Lift only the face by a small amount.",
             },
         ],
         "issues": [
@@ -178,7 +160,6 @@ def test_semantic_merge_discards_unknown_grounding_references() -> None:
                 "category": "composition",
                 "title": "Generic Composition Claim",
                 "explanation": "The frame supposedly needs a crop without any supplied evidence supporting that claim.",
-                "severity": 0.5,
                 "confidence": 0.8,
                 "box2d": [0, 0, 500, 500],
                 "recommendedAction": "Crop the frame.",
@@ -197,33 +178,32 @@ def test_semantic_merge_discards_unknown_grounding_references() -> None:
     [
         {
             "summary": "A concise summary.",
-            "apparentIntent": "A portrait.",
             "assessments": [{
                 "signalId": "signal-light",
                 "disposition": "support",
-                "reason": "The face is visibly dim.",
                 "confidence": 0.9,
                 "basedOn": ["signals.signal-light"],
             }],
         },
         {
             "summary": "A concise summary.",
-            "apparentIntent": "A portrait.",
             "assessments": [{
                 "signalId": "signal-light",
                 "disposition": "suppress",
-                "reason": "",
                 "confidence": 0.9,
+                "basedOn": ["signals.signal-light"],
+                "category": "lighting",
+                "title": "Invalid Suppression",
+                "explanation": "Suppressed signals should not consume output.",
+                "recommendedAction": "Omit it.",
             }],
         },
         {
             "summary": "A concise summary.",
-            "apparentIntent": "A portrait.",
             "issues": [{
                 "category": "composition",
                 "title": "An Ungrounded Finding",
                 "explanation": "A visible edge crosses the subject without any measured reference.",
-                "severity": 0.5,
                 "confidence": 0.8,
                 "box2d": [0, 0, 500, 500],
                 "recommendedAction": "Crop the edge.",

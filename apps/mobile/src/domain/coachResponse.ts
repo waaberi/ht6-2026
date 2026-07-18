@@ -84,6 +84,14 @@ const string = (value: unknown, path: string): string => {
   return value;
 };
 
+const conciseString = (value: unknown, path: string, maximumWords: number): string => {
+  const parsed = string(value, path);
+  if (parsed.trim().split(/\s+/).length > maximumWords) {
+    invalid(path, `must contain at most ${maximumWords} words`);
+  }
+  return parsed;
+};
+
 const optionalString = (value: unknown, path: string): string | undefined => {
   if (value === null || value === undefined) return undefined;
   return string(value, path);
@@ -208,7 +216,7 @@ const coachEvidence = (value: unknown, path: string): CoachEvidence => {
   }
   return {
     path: string(source.path, `${path}.path`),
-    meaning: string(source.meaning, `${path}.meaning`),
+    meaning: conciseString(source.meaning, `${path}.meaning`, 18),
     ...(parsedValue !== undefined ? { value: parsedValue } : {}),
   };
 };
@@ -220,10 +228,15 @@ const captureAdvice = (value: unknown, path: string): CoachCaptureAdvice => {
     invalid(`${path}.setting`, 'must be a supported camera setting');
   }
   const valueText = optionalString(source.value, `${path}.value`);
-  const tradeoff = optionalString(source.tradeoff, `${path}.tradeoff`);
+  const tradeoff = source.tradeoff == null
+    ? undefined
+    : conciseString(source.tradeoff, `${path}.tradeoff`, 20);
+  const basedOn = array(source.basedOn, `${path}.basedOn`, 6)
+    .map((entry, index) => string(entry, `${path}.basedOn[${index}]`));
+  if (!basedOn.length) invalid(`${path}.basedOn`, 'must contain at least one evidence path');
   return {
     setting: source.setting as CoachCaptureAdvice['setting'],
-    basedOn: array(source.basedOn, `${path}.basedOn`, 6).map((entry, index) => string(entry, `${path}.basedOn[${index}]`)),
+    basedOn,
     ...(valueText ? { value: valueText } : {}),
     ...(tradeoff ? { tradeoff } : {}),
   };
@@ -236,6 +249,7 @@ const coachAction = (value: unknown, path: string): ParsedCoachAction => {
     'tool',
     'label',
     'reason',
+    'basedOn',
     'requiresConfirmation',
     'adjustments',
     'target',
@@ -247,6 +261,9 @@ const coachAction = (value: unknown, path: string): ParsedCoachAction => {
   if (source.requiresConfirmation !== true) invalid(`${path}.requiresConfirmation`, 'must be true');
 
   const tool = source.tool as CoachTool;
+  const basedOn = array(source.basedOn, `${path}.basedOn`, 4)
+    .map((entry, index) => string(entry, `${path}.basedOn[${index}]`));
+  if (!basedOn.length) invalid(`${path}.basedOn`, 'must contain at least one evidence path');
   const parsedAdjustments = source.adjustments == null ? undefined : adjustments(source.adjustments, `${path}.adjustments`);
   const target = source.target == null ? undefined : region(source.target, `${path}.target`);
   const prompt = optionalString(source.prompt, `${path}.prompt`);
@@ -292,8 +309,9 @@ const coachAction = (value: unknown, path: string): ParsedCoachAction => {
   return {
     id: string(source.id, `${path}.id`),
     tool,
-    label: string(source.label, `${path}.label`),
-    reason: string(source.reason, `${path}.reason`),
+    label: conciseString(source.label, `${path}.label`, 6),
+    reason: conciseString(source.reason, `${path}.reason`, 20),
+    basedOn,
     requiresConfirmation: true,
     ...(parsedAdjustments ? { adjustments: parsedAdjustments } : {}),
     ...(target ? { target } : {}),
@@ -307,8 +325,8 @@ export const parseCoachResponse = (value: unknown): CoachResponse => {
   const source = record(value, 'response');
   knownKeys(source, ['headline', 'reason', 'evidence', 'captureAdvice', 'actions', 'model'], 'response');
   const parsed: CoachResponse = {
-    headline: string(source.headline, 'response.headline'),
-    reason: string(source.reason, 'response.reason'),
+    headline: conciseString(source.headline, 'response.headline', 8),
+    reason: conciseString(source.reason, 'response.reason', 24),
     evidence: array(source.evidence, 'response.evidence', 4).map((entry, index) => coachEvidence(entry, `response.evidence[${index}]`)),
     captureAdvice: array(source.captureAdvice, 'response.captureAdvice', 3).map((entry, index) => captureAdvice(entry, `response.captureAdvice[${index}]`)),
     actions: array(source.actions, 'response.actions', 2).map((entry, index) => coachAction(entry, `response.actions[${index}]`)),

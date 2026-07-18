@@ -9,6 +9,7 @@ const action = (changes: Partial<CoachAction> & Pick<CoachAction, 'tool'>): Coac
   id: changes.tool,
   label: changes.tool,
   reason: 'Fixture reason',
+  basedOn: ['metrics.meanLuminance'],
   requiresConfirmation: true,
   ...changes,
 });

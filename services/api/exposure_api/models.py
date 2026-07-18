@@ -91,14 +91,18 @@ class AnalysisResult(ApiModel):
     summary: str
 
 
-class SemanticInterpretation(ApiModel):
+class SemanticAssessment(ApiModel):
+    signal_id: str = Field(min_length=1, max_length=80)
+    disposition: Literal["support", "reinterpret"]
+    confidence: float = Field(ge=0, le=1)
+    based_on: list[str] = Field(min_length=1, max_length=8)
     category: Literal["composition", "focus", "color", "lighting", "distraction", "intent"]
     title: str = Field(min_length=1, max_length=80)
     explanation: str = Field(min_length=1, max_length=240)
     recommended_action: str = Field(min_length=1, max_length=160)
 
     @model_validator(mode="after")
-    def validate_concise_copy(self) -> "SemanticInterpretation":
+    def validate_concise_copy(self) -> "SemanticAssessment":
         if len(self.title.split()) > 7:
             raise ValueError("semantic titles must be at most 7 words")
         if len(self.explanation.split()) > 24:
@@ -108,30 +112,10 @@ class SemanticInterpretation(ApiModel):
         return self
 
 
-class SemanticAssessment(ApiModel):
-    signal_id: str = Field(min_length=1, max_length=80)
-    disposition: Literal["support", "reinterpret", "suppress"]
-    reason: str = Field(min_length=1, max_length=200)
-    confidence: float = Field(ge=0, le=1)
-    based_on: list[str] = Field(default_factory=list, max_length=8)
-    interpretation: SemanticInterpretation | None = None
-
-    @model_validator(mode="after")
-    def validate_interpretation(self) -> "SemanticAssessment":
-        if self.disposition in {"support", "reinterpret"} and self.interpretation is None:
-            raise ValueError("support and reinterpret assessments require an interpretation")
-        if self.disposition in {"support", "reinterpret"} and not self.based_on:
-            raise ValueError("support and reinterpret assessments require evidence references")
-        if self.disposition == "suppress" and self.interpretation is not None:
-            raise ValueError("suppress assessments cannot include an interpretation")
-        return self
-
-
 class SemanticIssue(ApiModel):
     category: Literal["composition", "focus", "color", "lighting", "distraction", "intent"]
     title: str = Field(min_length=1, max_length=80)
     explanation: str = Field(min_length=1, max_length=240)
-    severity: float = Field(ge=0, le=1)
     confidence: float = Field(ge=0, le=1)
     box_2d: list[int] = Field(min_length=4, max_length=4)
     recommended_action: str = Field(min_length=1, max_length=160)
@@ -155,7 +139,6 @@ class SemanticIssue(ApiModel):
 
 class SemanticAnalysis(ApiModel):
     summary: str = Field(min_length=1, max_length=280)
-    apparent_intent: str = Field(min_length=1, max_length=160)
     assessments: list[SemanticAssessment] = Field(default_factory=list, max_length=12)
     issues: list[SemanticIssue] = Field(default_factory=list, max_length=4)
 
@@ -166,10 +149,7 @@ class SemanticAnalysis(ApiModel):
             raise ValueError("semantic assessments must reference each signal at most once")
         if len(self.summary.split()) > 24:
             raise ValueError("semantic summaries must be at most 24 words")
-        presented_assessments = sum(
-            assessment.disposition != "suppress" for assessment in self.assessments
-        )
-        if presented_assessments + len(self.issues) > 3:
+        if len(self.assessments) + len(self.issues) > 3:
             raise ValueError("semantic analysis may present at most 3 findings")
         return self
 
@@ -225,12 +205,24 @@ class CoachEvidence(ApiModel):
     value: str | float | int | bool | None = None
     meaning: str = Field(min_length=1, max_length=180)
 
+    @model_validator(mode="after")
+    def validate_concise_meaning(self) -> "CoachEvidence":
+        if len(self.meaning.split()) > 18:
+            raise ValueError("Coach evidence meaning must be at most 18 words")
+        return self
+
 
 class CoachCaptureAdvice(ApiModel):
     setting: Literal["iso", "aperture", "shutter", "focal-length", "distance", "stability", "lighting"]
     value: str | None = Field(default=None, max_length=120)
     tradeoff: str | None = Field(default=None, max_length=180)
-    based_on: list[str] = Field(default_factory=list, max_length=6)
+    based_on: list[str] = Field(min_length=1, max_length=6)
+
+    @model_validator(mode="after")
+    def validate_concise_tradeoff(self) -> "CoachCaptureAdvice":
+        if self.tradeoff and len(self.tradeoff.split()) > 20:
+            raise ValueError("Coach capture tradeoffs must be at most 20 words")
+        return self
 
 
 class CoachAction(ApiModel):
@@ -238,6 +230,7 @@ class CoachAction(ApiModel):
     tool: CoachTool
     label: str = Field(min_length=1, max_length=48)
     reason: str = Field(min_length=1, max_length=180)
+    based_on: list[str] = Field(min_length=1, max_length=4)
     requires_confirmation: bool = True
     adjustments: dict[str, float] | None = Field(
         default=None,
@@ -258,6 +251,10 @@ class CoachAction(ApiModel):
 
     @model_validator(mode="after")
     def validate_tool_contract(self) -> "CoachAction":
+        if len(self.label.split()) > 6:
+            raise ValueError("Coach action labels must be at most 6 words")
+        if len(self.reason.split()) > 20:
+            raise ValueError("Coach action reasons must be at most 20 words")
         adjustment_keys = {
             "exposure", "contrast", "highlights", "shadows", "temperature", "tint",
             "saturation", "vibrance", "sharpening", "denoise", "grain", "vignette",
@@ -322,6 +319,14 @@ class CoachResponse(ApiModel):
     capture_advice: list[CoachCaptureAdvice] = Field(default_factory=list, max_length=3)
     actions: list[CoachAction] = Field(default_factory=list, max_length=2)
     model: str = ""
+
+    @model_validator(mode="after")
+    def validate_concise_copy(self) -> "CoachResponse":
+        if len(self.headline.split()) > 8:
+            raise ValueError("Coach headlines must be at most 8 words")
+        if len(self.reason.split()) > 24:
+            raise ValueError("Coach reasons must be at most 24 words")
+        return self
 
 
 class PortfolioReview(ApiModel):

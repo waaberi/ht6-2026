@@ -345,15 +345,19 @@ async def coach(request: CoachRequest) -> CoachResponse:
     if request.analysis.issues:
         issue = selected_issue or request.analysis.issues[0]
         evidence = [
-            CoachEvidence(path=f"issues.{issue.id}.evidence.{key}", value=value, meaning=issue.explanation)
+            CoachEvidence(
+                path=f"issues.{issue.id}.evidence.{key}",
+                value=value,
+                meaning=" ".join(issue.explanation.split()[:18]),
+            )
             for key, value in list(issue.evidence.items())[:1]
         ]
-        headline = issue.title
-        reason = issue.recommended_action
+        headline = " ".join(issue.title.split()[:8])
+        reason = " ".join(issue.recommended_action.split()[:24])
     else:
         evidence = []
-        headline = "Keep the current intent"
-        reason = "No strong technical fault crossed the measured thresholds."
+        headline = "Coach unavailable"
+        reason = "Measurements remain available. Try again shortly."
     capture_advice = [
         CoachCaptureAdvice(
             setting=item.setting,
@@ -369,5 +373,5 @@ async def coach(request: CoachRequest) -> CoachResponse:
         evidence=evidence,
         capture_advice=capture_advice,
         actions=[],
-        model="exposure-deterministic-coach-1",
+        model="exposure-fallback-coach-1",
     )

@@ -220,6 +220,7 @@ export type CoachAction = {
   tool: CoachTool;
   label: string;
   reason: string;
+  basedOn: string[];
   requiresConfirmation: boolean;
   adjustments?: AdjustmentValues;
   target?: Region;

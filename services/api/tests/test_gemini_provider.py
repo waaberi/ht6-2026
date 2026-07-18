@@ -4,8 +4,13 @@ import json
 from importlib.metadata import version
 from types import SimpleNamespace
 
-from exposure_api.models import AnalysisResult, AnalysisSignal, CoachRequest, CoachResponse, Region
-from exposure_api.providers import GeminiImageQuotaError, GeminiProvider, _ground_coach_response
+from exposure_api.models import AnalysisResult, AnalysisSignal, CoachRequest, CoachResponse, Region, SemanticAnalysis
+from exposure_api.providers import (
+    GeminiImageQuotaError,
+    GeminiProvider,
+    _gemini_json_schema,
+    _ground_coach_response,
+)
 
 
 def test_google_genai_uses_current_interactions_schema() -> None:
@@ -21,19 +26,15 @@ def test_semantic_prompt_exposes_grounded_signals_and_concise_contract() -> None
             captured.update(kwargs)
             return SimpleNamespace(output_text=json.dumps({
                 "summary": "Side light leaves the face visibly subdued.",
-                "apparentIntent": "A low-key portrait beside a bright window.",
                 "assessments": [{
                     "signalId": "signal-light",
                     "disposition": "support",
-                    "reason": "The visible face is dim beside the window.",
                     "confidence": 0.9,
                     "basedOn": ["signals.signal-light", "metrics.meanLuminance"],
-                    "interpretation": {
-                        "category": "lighting",
-                        "title": "Window Subdues the Face",
-                        "explanation": "Mean luminance is 0.2, and the visible window dominates the face.",
-                        "recommendedAction": "Lift the face slightly; preserve the window mood.",
-                    },
+                    "category": "lighting",
+                    "title": "Window Subdues the Face",
+                    "explanation": "Mean luminance is 0.2, and the visible window dominates the face.",
+                    "recommendedAction": "Lift the face slightly; preserve the window mood.",
                 }],
                 "issues": [],
             }))
@@ -72,9 +73,25 @@ def test_semantic_prompt_exposes_grounded_signals_and_concise_contract() -> None
     prompt = captured["input"][0]["text"]  # type: ignore[index]
     assert '"id":"signal-light"' in prompt
     assert "signals.signal-light" in prompt
-    assert "Present 1-3 total findings" in prompt
+    assert "zero to three" in prompt
     assert "Summary: at most 24 words" in prompt
     assert "Unknown references are discarded" in prompt
+
+
+def test_gemini_schemas_use_only_the_supported_structured_output_shape() -> None:
+    for model in (SemanticAnalysis, CoachResponse):
+        schema_text = json.dumps(_gemini_json_schema(model))
+        assert '"$ref"' not in schema_text
+        assert '"$defs"' not in schema_text
+        assert '"anyOf"' not in schema_text
+        assert '"default"' not in schema_text
+        assert '"minLength"' not in schema_text
+        assert '"maxLength"' not in schema_text
+        assert '"exclusiveMinimum"' not in schema_text
+    semantic_schema = _gemini_json_schema(SemanticAnalysis)
+    assert "apparentIntent" not in semantic_schema["properties"]
+    assert "reason" not in semantic_schema["properties"]["assessments"]["items"]["properties"]
+    assert "severity" not in semantic_schema["properties"]["issues"]["items"]["properties"]
 
 
 def test_generative_prompt_includes_operation_and_target() -> None:
@@ -200,6 +217,11 @@ def test_coach_prompt_exposes_only_enabled_tools_and_photography_contract() -> N
     assert "Return the supplied JSON schema only" in prompt
     assert "absolute editor slider targets, not deltas" in prompt
     assert "expansionFraction from 0.1 to 0.5" in prompt
+    assert "normally contains zero or one reversible proposal" in prompt
+    assert "Never output a generic photography checklist" in prompt
+    assert "Every action must include one to four valid basedOn paths" in prompt
+    assert "USE ONLY WHEN RELEVANT" in prompt
+    assert "captureAdvice must be empty unless capture choices directly answer the question" in prompt
     schema = captured["response_format"]["schema"]  # type: ignore[index]
     assert {"headline", "reason"}.issubset(schema["required"])
 
@@ -251,6 +273,7 @@ def test_grounding_drops_retake_without_grounded_capture_advice() -> None:
             "tool": "retake",
             "label": "Retake",
             "reason": "The detail cannot be recovered.",
+            "basedOn": ["metrics.meanLuminance"],
         }],
         model="fixture",
     )

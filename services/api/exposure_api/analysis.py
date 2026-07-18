@@ -357,33 +357,27 @@ def merge_semantic(result: AnalysisResult, semantic: SemanticAnalysis | None, mo
         assessment = assessments.get(signal.id)
         if assessment is None:
             continue
-        if assessment.disposition == "suppress":
-            continue
         signal_reference = f"signals.{signal.id}"
         if (
-            assessment.interpretation is None
-            or signal_reference not in assessment.based_on
+            signal_reference not in assessment.based_on
             or any(reference not in known_references for reference in assessment.based_on)
         ):
             continue
-        interpretation = assessment.interpretation
         assessed_issues.append(Issue(
             id=signal.id,
-            category=interpretation.category,
-            title=interpretation.title,
-            explanation=interpretation.explanation,
+            category=assessment.category,
+            title=assessment.title,
+            explanation=assessment.explanation,
             evidence={
                 **signal.evidence,
                 "signalKey": signal.signal_key,
                 "semanticDisposition": assessment.disposition,
-                "semanticReason": assessment.reason,
                 "semanticConfidence": assessment.confidence,
-                "apparentIntent": semantic.apparent_intent,
             },
             severity=signal.severity,
             confidence=min(signal.confidence, assessment.confidence),
             location=signal.location,
-            recommended_action=interpretation.recommended_action,
+            recommended_action=assessment.recommended_action,
             fix=signal.fix if assessment.disposition == "support" else None,
         ))
 
@@ -398,10 +392,9 @@ def merge_semantic(result: AnalysisResult, semantic: SemanticAnalysis | None, mo
             finding.explanation,
             {
                 "source": "gemini",
-                "apparentIntent": semantic.apparent_intent,
                 "basedOn": ",".join(finding.based_on),
             },
-            finding.severity,
+            finding.confidence,
             finding.confidence,
             finding.recommended_action,
             location=Region(x=xmin / 1000, y=ymin / 1000, width=(xmax - xmin) / 1000, height=(ymax - ymin) / 1000),

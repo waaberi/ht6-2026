@@ -12,6 +12,7 @@ const response = (action: Record<string, unknown>) => ({
     id: 'action-1',
     label: 'Apply',
     reason: 'Preserve highlight detail.',
+    basedOn: ['lighting.clippedHighlights'],
     requiresConfirmation: true,
     adjustments: null,
     target: null,
@@ -37,6 +38,7 @@ test('parses a valid response and preserves a bounded expand fraction', () => {
     tool: 'expand',
     label: 'Apply',
     reason: 'Preserve highlight detail.',
+    basedOn: ['lighting.clippedHighlights'],
     requiresConfirmation: true,
     prompt: 'Continue the sky naturally.',
     canvasTransform: { expansion: { top: 0, right: 1, bottom: 0, left: 0 } },
@@ -51,6 +53,7 @@ test('rejects unknown fields, tools, and non-confirmable actions', () => {
   );
   assert.throws(() => parseCoachResponse(response({ tool: 'auto_magic' })), /supported Coach tool/);
   assert.throws(() => parseCoachResponse(response({ tool: 'retake', requiresConfirmation: false })), /must be true/);
+  assert.throws(() => parseCoachResponse(response({ tool: 'retake', basedOn: [] })), /basedOn.*at least one/);
 });
 
 test('rejects unsupported, non-finite, and out-of-range adjustments', () => {
@@ -107,4 +110,26 @@ test('requires the complete top-level response shape', () => {
 test('requires concrete camera advice with a retake action', () => {
   const withoutAdvice = { ...response({ tool: 'retake' }), captureAdvice: [] };
   assert.throws(() => parseCoachResponse(withoutAdvice), /captureAdvice.*accompany/);
+  const ungroundedAdvice = {
+    ...response({ tool: 'retake' }),
+    captureAdvice: [{ setting: 'iso', value: 'ISO 100', tradeoff: 'May require a slower shutter.', basedOn: [] }],
+  };
+  assert.throws(() => parseCoachResponse(ungroundedAdvice), /captureAdvice\[0\].basedOn.*at least one/);
+});
+
+test('rejects verbose Coach copy at the runtime boundary', () => {
+  assert.throws(
+    () => parseCoachResponse({
+      ...response({ tool: 'retake' }),
+      headline: 'This headline contains far too many words for one clear mobile recommendation today',
+    }),
+    /headline.*at most 8 words/,
+  );
+  assert.throws(
+    () => parseCoachResponse(response({
+      tool: 'retake',
+      label: 'This action label is much too long',
+    })),
+    /label.*at most 6 words/,
+  );
 });

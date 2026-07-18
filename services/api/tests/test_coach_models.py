@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from exposure_api.models import CoachAction, Region
+from exposure_api.models import CoachAction, CoachResponse, Region
 
 
 def test_region_must_remain_inside_normalized_bounds() -> None:
@@ -21,6 +21,7 @@ def test_expand_requires_a_bounded_expansion_fraction_and_serializes_camel_case(
         "tool": "expand",
         "label": "Expand right",
         "reason": "The subject needs more breathing room.",
+        "based_on": ["metrics.negativeSpaceRatio"],
         "canvas_transform": {"expansion": {"top": 0, "right": 1, "bottom": 0, "left": 0}},
     }
 
@@ -44,6 +45,7 @@ def test_expansion_fraction_is_rejected_for_other_tools() -> None:
             tool="adjust_global",
             label="Set exposure",
             reason="The measured midtones are dark.",
+            based_on=["metrics.meanLuminance"],
             adjustments={"exposure": 0.25},
             expansion_fraction=0.25,
         )
@@ -60,7 +62,7 @@ def test_coach_schema_documents_absolute_global_adjustment_targets() -> None:
 
 
 def test_crop_and_straighten_reject_ambiguous_or_invalid_transforms() -> None:
-    common = {"id": "transform", "label": "Transform", "reason": "Measured geometry supports it."}
+    common = {"id": "transform", "label": "Transform", "reason": "Measured geometry supports it.", "based_on": ["metrics.estimatedTiltDegrees"]}
     crop = CoachAction(
         **common,
         tool="crop",
@@ -77,7 +79,7 @@ def test_crop_and_straighten_reject_ambiguous_or_invalid_transforms() -> None:
 
 
 def test_adjustments_must_be_finite_and_unrelated_tools_reject_transforms() -> None:
-    common = {"id": "adjust", "tool": "adjust_global", "label": "Adjust", "reason": "Measured exposure supports it."}
+    common = {"id": "adjust", "tool": "adjust_global", "label": "Adjust", "reason": "Measured exposure supports it.", "based_on": ["metrics.meanLuminance"]}
     with pytest.raises(ValidationError, match="finite"):
         CoachAction(**common, adjustments={"exposure": float("nan")})
     with pytest.raises(ValidationError, match="only valid"):
@@ -88,5 +90,34 @@ def test_adjustments_must_be_finite_and_unrelated_tools_reject_transforms() -> N
             tool="retake",
             label="Retake",
             reason="The highlights are not recoverable.",
+            based_on=["lighting.clippedHighlights"],
             adjustments={"exposure": -0.2},
+        )
+
+
+def test_coach_contract_rejects_verbose_or_ungrounded_copy() -> None:
+    with pytest.raises(ValidationError, match="at most 6 words"):
+        CoachAction(
+            id="retake",
+            tool="retake",
+            label="This action label contains far too many words",
+            reason="Measured clipping affects the subject.",
+            based_on=["lighting.clippedHighlights"],
+        )
+    with pytest.raises(ValidationError, match="at most 8 words"):
+        CoachResponse(
+            headline="This headline contains far too many words for one recommendation",
+            reason="Measured clipping affects the subject.",
+            evidence=[],
+            capture_advice=[],
+            actions=[],
+            model="fixture",
+        )
+    with pytest.raises(ValidationError):
+        CoachAction(
+            id="retake",
+            tool="retake",
+            label="Retake",
+            reason="Measured clipping affects the subject.",
+            based_on=[],
         )

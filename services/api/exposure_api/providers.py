@@ -38,6 +38,62 @@ class GeminiImageQuotaError(GeminiImageError):
     pass
 
 
+_UNSUPPORTED_GEMINI_SCHEMA_KEYS = {
+    "default",
+    "exclusiveMaximum",
+    "exclusiveMinimum",
+    "maxLength",
+    "minLength",
+}
+
+
+def _gemini_json_schema(model: type[Any]) -> dict[str, Any]:
+    """Reduce Pydantic JSON Schema to Gemini's documented supported subset."""
+    schema = model.model_json_schema(by_alias=True)
+    definitions = schema.get("$defs", {})
+
+    def normalize(value: Any) -> Any:
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+
+        if "$ref" in value:
+            reference = value["$ref"]
+            prefix = "#/$defs/"
+            if not isinstance(reference, str) or not reference.startswith(prefix):
+                raise ValueError(f"Unsupported Gemini schema reference: {reference}")
+            resolved = normalize(definitions[reference.removeprefix(prefix)])
+            siblings = {key: item for key, item in value.items() if key != "$ref"}
+            return {**resolved, **normalize(siblings)}
+
+        if "anyOf" in value:
+            branches = [normalize(branch) for branch in value["anyOf"]]
+            parent = {
+                key: normalize(item)
+                for key, item in value.items()
+                if key not in {"anyOf", *_UNSUPPORTED_GEMINI_SCHEMA_KEYS}
+            }
+            null_branch = {"type": "null"}
+            non_null = [branch for branch in branches if branch != null_branch]
+            if len(branches) == 2 and len(non_null) == 1 and isinstance(non_null[0].get("type"), str):
+                return {**non_null[0], **parent, "type": [non_null[0]["type"], "null"]}
+            if all(set(branch) == {"type"} and isinstance(branch["type"], str) for branch in branches):
+                return {**parent, "type": [branch["type"] for branch in branches]}
+            raise ValueError("Gemini schema contains an unsupported union")
+
+        return {
+            key: normalize(item)
+            for key, item in value.items()
+            if key not in {"$defs", *_UNSUPPORTED_GEMINI_SCHEMA_KEYS}
+        }
+
+    normalized = normalize(schema)
+    if not isinstance(normalized, dict):
+        raise ValueError("Gemini response schema must be an object")
+    return normalized
+
+
 def _coach_prompt(request: CoachRequest, available_tools: list[str]) -> str:
     selected_issue = next(
         (issue for issue in request.analysis.issues if issue.id == request.selected_issue_id),
@@ -56,8 +112,9 @@ def _coach_prompt(request: CoachRequest, available_tools: list[str]) -> str:
         "are evidence-backed diagnoses. 3. Semantic intent is an interpretation and must be described as such. "
         "Never invent EXIF, camera controls, subject distance, recoverable detail, or GPS. Do not repeat a correction "
         "that is already represented in the current layer stack.\n\n"
-        "PHOTOGRAPHY CHECKLIST\n"
-        "Reason about shutter speed, aperture, and ISO as linked exposure tradeoffs. Distinguish subject motion, "
+        "PHOTOGRAPHY REFERENCE — USE ONLY WHEN RELEVANT\n"
+        "Consider only factors needed to answer the question and supported by supplied evidence. Reason about shutter "
+        "speed, aperture, and ISO as linked exposure tradeoffs. Distinguish subject motion, "
         "camera shake, shallow depth of field, and missed focus instead of calling every soft area blur. Account for "
         "focal length, subject distance, perspective, stabilization, light direction and hardness, clipping and dynamic "
         "range, mixed white balance, subject hierarchy, edge tension, balance, negative space, leading lines, color "
@@ -68,10 +125,15 @@ def _coach_prompt(request: CoachRequest, available_tools: list[str]) -> str:
         f"{tool_contract or '- None. Give advice only and return no actions.'}\n"
         "Do not return a tool that is not listed above.\n\n"
         "OUTPUT CONTRACT\n"
-        "Return the supplied JSON schema only. headline states the priority. reason explains why it matters for this "
-        "image. evidence contains only paths into the supplied analysis. captureAdvice contains at most three concrete "
-        "capture choices, each with basedOn evidence paths and an explicit tradeoff for ISO, aperture, or shutter. "
-        "actions contains zero to two reversible proposals. Every action requiresConfirmation must be true. Use "
+        "Answer the exact question with only image-specific guidance. Return the supplied JSON schema only. headline "
+        "states the priority in at most 8 words. reason explains why it matters for this image in at most 24 words. "
+        "Normally include one decisive evidence item; include more only when the answer depends on them. captureAdvice "
+        "must be empty unless capture choices directly answer the question; otherwise include at most three concrete "
+        "choices, each with basedOn evidence paths and an explicit tradeoff for ISO, aperture, or shutter. "
+        "actions normally contains zero or one reversible proposal; return two only when the user explicitly requests "
+        "distinct alternatives. Action labels use at most 6 words and reasons at most 20. Every action must include one "
+        "to four valid basedOn paths, and requiresConfirmation must be true. Never output a generic photography checklist, "
+        "repeat the question, or restate evidence without a decision. Use "
         "remove only for a demonstrated accidental distraction; use add only for an explicit creative request. "
         "adjust_global adjustments are absolute editor slider targets, not deltas; omitted sliders stay unchanged. "
         "expand must include expansionFraction from 0.1 to 0.5 as well as exactly one selected expansion edge. "
@@ -100,6 +162,9 @@ def _known_evidence_paths(request: CoachRequest) -> set[str]:
         "lighting.colorCast.green",
         "lighting.colorCast.blue",
     })
+    for signal in request.analysis.signals:
+        paths.add(f"signals.{signal.id}")
+        paths.update(f"signals.{signal.id}.evidence.{key}" for key in signal.evidence)
     for index, issue in enumerate(request.analysis.issues):
         prefixes = (f"issues.{issue.id}", f"issues.{index}", f"issues[{index}]")
         for prefix in prefixes:
@@ -129,7 +194,11 @@ def _ground_coach_response(request: CoachRequest, response: CoachResponse) -> Co
         needs_tradeoff = item.setting in {"iso", "aperture", "shutter"}
         if based_on and (not needs_tradeoff or item.tradeoff):
             capture_advice.append(item.model_copy(update={"based_on": based_on}))
-    actions = [action for action in response.actions if action.tool in allowed_tools]
+    actions = []
+    for action in response.actions:
+        based_on = [path for path in action.based_on if path in known_paths]
+        if action.tool in allowed_tools and based_on:
+            actions.append(action.model_copy(update={"based_on": based_on}))
     if not capture_advice:
         actions = [action for action in actions if action.tool != "retake"]
     return response.model_copy(update={
@@ -168,13 +237,14 @@ class GeminiProvider:
         prompt = (
             "You are Exposure, a rigorous photography editor. Convert measured signals into concise, image-specific "
             "judgments; the deterministic layer intentionally supplies no diagnosis copy. Assess a signal only by its "
-            "exact signalId. Use support when the visible photograph confirms its contextual significance, reinterpret "
-            "when the measurement is real but its photographic meaning differs, and suppress when it is irrelevant or "
-            "intentional. Every assessment needs a concrete reason. Support and reinterpret must include the matching "
-            "signals.<id> in basedOn. New issues must cite only supplied basedOn references; image-only observations still "
+            "exact signalId. Use support when the visible photograph confirms its contextual significance and reinterpret "
+            "when the measurement is real but its photographic meaning differs. Omit irrelevant or intentional signals "
+            "without explaining the omission. Every assessment must include the matching signals.<id> in basedOn. New "
+            "issues must cite only supplied basedOn references; image-only observations still "
             "need one related measured reference. Unknown references are discarded. Do not contradict measurements, "
-            "invent EXIF, infer GPS, apply generic rules, or duplicate a signal. Present 1-3 total findings, ordered by "
-            "impact. Summary: at most 24 words. Title: at most 7 words. Explanation: one sentence, at most 24 words. "
+            "invent EXIF, infer GPS, apply generic rules, or duplicate a signal. Present only warranted findings, from "
+            "zero to three, ordered by impact. Summary: at most 24 words. Title: at most 7 words. Explanation: one "
+            "sentence, at most 24 words. "
             "Action: at most 14 words. Every statement must name evidence or visible context specific to this image. "
             "Bounding boxes use [ymin,xmin,ymax,xmax] on a 0..1000 scale. Return JSON matching the schema only.\n\n"
             f"Measurements: {json.dumps(deterministic.metrics, separators=(',', ':'))}\n"
@@ -195,7 +265,7 @@ class GeminiProvider:
                 response_format={
                     "type": "text",
                     "mime_type": "application/json",
-                    "schema": SemanticAnalysis.model_json_schema(by_alias=True),
+                    "schema": _gemini_json_schema(SemanticAnalysis),
                 },
             )
             return SemanticAnalysis.model_validate_json(interaction.output_text)
@@ -216,7 +286,7 @@ class GeminiProvider:
                 response_format={
                     "type": "text",
                     "mime_type": "application/json",
-                    "schema": CoachResponse.model_json_schema(by_alias=True),
+                    "schema": _gemini_json_schema(CoachResponse),
                 },
             )
             result = CoachResponse.model_validate_json(interaction.output_text)
