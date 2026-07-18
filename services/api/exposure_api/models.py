@@ -345,6 +345,21 @@ class StyleProfile(ApiModel):
     mood: str
 
 
+class CanvasExpansion(ApiModel):
+    top: int = Field(ge=0)
+    right: int = Field(ge=0)
+    bottom: int = Field(ge=0)
+    left: int = Field(ge=0)
+    reference_width: int | None = Field(default=None, ge=1)
+    reference_height: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def validate_reference_dimensions(self) -> "CanvasExpansion":
+        if (self.reference_width is None) != (self.reference_height is None):
+            raise ValueError("Expansion referenceWidth and referenceHeight must be supplied together")
+        return self
+
+
 class GenerativePatchResult(ApiModel):
     patch_base64: str
     mask_base64: str
@@ -352,4 +367,4 @@ class GenerativePatchResult(ApiModel):
     drift_score: float
     model: str
     source_version_id: str
-    expansion: dict[Literal["top", "right", "bottom", "left"], int] | None = None
+    expansion: CanvasExpansion | None = None

@@ -12,6 +12,7 @@ import { supabase } from './supabase';
 import type {
   AdjustmentValues,
   AnalysisResult,
+  CanvasExpansion,
   CoachResponse,
   GenerativeOperation,
   LayerStack,
@@ -143,7 +144,7 @@ export type GenerativePatchResult = {
   driftScore: number;
   model: string;
   sourceVersionId: string;
-  expansion?: { top: number; right: number; bottom: number; left: number };
+  expansion?: CanvasExpansion;
 };
 
 export const createGenerativePatch = async (

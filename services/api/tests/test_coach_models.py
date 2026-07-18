@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from exposure_api.models import CoachAction, CoachResponse, Region
+from exposure_api.models import CanvasExpansion, CoachAction, CoachResponse, Region
 
 
 def test_region_must_remain_inside_normalized_bounds() -> None:
@@ -13,6 +13,27 @@ def test_region_must_remain_inside_normalized_bounds() -> None:
         Region(x=0.8, y=0.1, width=0.21, height=0.2)
     with pytest.raises(ValidationError, match="inside normalized image bounds"):
         Region(x=0.1, y=0.8, width=0.2, height=0.21)
+
+
+def test_canvas_expansion_reference_dimensions_are_paired_and_serialize_camel_case() -> None:
+    expansion = CanvasExpansion(
+        top=0,
+        right=1000,
+        bottom=0,
+        left=0,
+        reference_width=4000,
+        reference_height=3000,
+    )
+    assert expansion.model_dump(by_alias=True) == {
+        "top": 0,
+        "right": 1000,
+        "bottom": 0,
+        "left": 0,
+        "referenceWidth": 4000,
+        "referenceHeight": 3000,
+    }
+    with pytest.raises(ValidationError, match="supplied together"):
+        CanvasExpansion(top=0, right=100, bottom=0, left=0, reference_width=4000)
 
 
 def test_expand_requires_a_bounded_expansion_fraction_and_serializes_camel_case() -> None:

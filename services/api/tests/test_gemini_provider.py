@@ -4,10 +4,14 @@ import json
 from importlib.metadata import version
 from types import SimpleNamespace
 
+import pytest
+
 from exposure_api.models import AnalysisResult, AnalysisSignal, CoachRequest, CoachResponse, Region, SemanticAnalysis
 from exposure_api.providers import (
     GeminiImageQuotaError,
+    GeminiImageTimeoutError,
     GeminiProvider,
+    SemanticProviderResult,
     _gemini_json_schema,
     _ground_coach_response,
 )
@@ -68,8 +72,9 @@ def test_semantic_prompt_exposes_grounded_signals_and_concise_contract() -> None
 
     result = asyncio.run(provider.analyze_semantics(b"image", "image/png", analysis, {}, {}))
 
-    assert result is not None
-    assert result.assessments[0].signal_id == "signal-light"
+    assert isinstance(result, SemanticProviderResult)
+    assert result.analysis.assessments[0].signal_id == "signal-light"
+    assert result.model == provider.semantic_model
     prompt = captured["input"][0]["text"]  # type: ignore[index]
     assert '"id":"signal-light"' in prompt
     assert "signals.signal-light" in prompt
@@ -162,6 +167,129 @@ def test_image_quota_error_is_normalized() -> None:
         raise AssertionError("quota errors must use the stable provider contract")
 
 
+def test_image_timeout_error_is_normalized() -> None:
+    class ApiTimeoutError(RuntimeError):
+        pass
+
+    class Interactions:
+        def create(self, **_kwargs: object) -> SimpleNamespace:
+            raise ApiTimeoutError("request timed out")
+
+    provider = GeminiProvider()
+    provider._client = SimpleNamespace(interactions=Interactions())  # type: ignore[assignment]
+    with pytest.raises(GeminiImageTimeoutError):
+        asyncio.run(provider.generate_candidate(
+            b"source",
+            "image/png",
+            "remove the cable",
+            Region(x=0.1, y=0.1, width=0.2, height=0.2),
+            "remove",
+            request_timeout_seconds=3,
+        ))
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        (429, "quota exceeded"),
+        (404, "model not found for api version"),
+        (400, "model is not supported for this endpoint"),
+    ],
+)
+def test_semantic_model_chain_falls_back_only_for_model_availability_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    message: str,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class ProviderError(RuntimeError):
+        def __init__(self) -> None:
+            super().__init__(message)
+            self.status_code = status
+
+    class Interactions:
+        def create(self, **kwargs: object) -> SimpleNamespace:
+            calls.append(kwargs)
+            if kwargs["model"] == "primary-model":
+                raise ProviderError()
+            return SimpleNamespace(output_text=json.dumps({
+                "summary": "Fallback response.",
+                "assessments": [],
+                "issues": [],
+            }))
+
+    monkeypatch.setenv("GEMINI_MODEL", "primary-model")
+    monkeypatch.setenv("GEMINI_FALLBACK_MODELS", "primary-model, fallback-model, fallback-model")
+    provider = GeminiProvider()
+    provider._client = SimpleNamespace(interactions=Interactions())  # type: ignore[assignment]
+    analysis = AnalysisResult(
+        version_id="version",
+        checksum="checksum",
+        metrics={},
+        lighting={
+            "exposure": 0,
+            "contrast": 0,
+            "clippedShadows": 0,
+            "clippedHighlights": 0,
+            "colorCast": {"red": 0, "green": 0, "blue": 0},
+        },
+        issues=[],
+        camera_recommendations=[],
+        summary="Fixture",
+    )
+
+    result = asyncio.run(provider.analyze_semantics(
+        b"image",
+        "image/png",
+        analysis,
+        {},
+        {},
+        request_timeout_seconds=7,
+    ))
+
+    assert isinstance(result, SemanticProviderResult)
+    assert result.model == "fallback-model"
+    assert provider.semantic_models == ("primary-model", "fallback-model")
+    assert [call["model"] for call in calls] == ["primary-model", "fallback-model"]
+    assert [call["timeout"] for call in calls] == [7, 7]
+
+
+def test_semantic_model_chain_does_not_mask_non_model_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    class Interactions:
+        def create(self, **kwargs: object) -> SimpleNamespace:
+            calls.append(str(kwargs["model"]))
+            error = RuntimeError("structured request is invalid")
+            error.status_code = 400  # type: ignore[attr-defined]
+            raise error
+
+    monkeypatch.setenv("GEMINI_MODEL", "primary-model")
+    monkeypatch.setenv("GEMINI_FALLBACK_MODELS", "fallback-model")
+    provider = GeminiProvider()
+    provider._client = SimpleNamespace(interactions=Interactions())  # type: ignore[assignment]
+    analysis = AnalysisResult(
+        version_id="version",
+        checksum="checksum",
+        metrics={},
+        lighting={
+            "exposure": 0,
+            "contrast": 0,
+            "clippedShadows": 0,
+            "clippedHighlights": 0,
+            "colorCast": {"red": 0, "green": 0, "blue": 0},
+        },
+        issues=[],
+        camera_recommendations=[],
+        summary="Fixture",
+    )
+
+    with pytest.raises(RuntimeError, match="structured request is invalid"):
+        asyncio.run(provider.analyze_semantics(b"image", "image/png", analysis, {}, {}))
+    assert calls == ["primary-model"]
+
+
 def test_coach_prompt_exposes_only_enabled_tools_and_photography_contract() -> None:
     captured: dict[str, object] = {}
 
@@ -224,6 +352,53 @@ def test_coach_prompt_exposes_only_enabled_tools_and_photography_contract() -> N
     assert "captureAdvice must be empty unless capture choices directly answer the question" in prompt
     schema = captured["response_format"]["schema"]  # type: ignore[index]
     assert {"headline", "reason"}.issubset(schema["required"])
+
+
+def test_coach_reports_the_fallback_model_that_succeeded(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    class QuotaError(RuntimeError):
+        status_code = 429
+
+    class Interactions:
+        def create(self, **kwargs: object) -> SimpleNamespace:
+            model = str(kwargs["model"])
+            calls.append(model)
+            if model == "primary-model":
+                raise QuotaError("quota exceeded")
+            return SimpleNamespace(output_text=json.dumps({
+                "headline": "No change needed",
+                "reason": "The supplied measurements do not support a correction.",
+                "evidence": [],
+                "captureAdvice": [],
+                "actions": [],
+            }))
+
+    analysis = AnalysisResult(
+        version_id="version",
+        checksum="checksum",
+        metrics={},
+        lighting={
+            "exposure": 0,
+            "contrast": 0,
+            "clippedShadows": 0,
+            "clippedHighlights": 0,
+            "colorCast": {"red": 0, "green": 0, "blue": 0},
+        },
+        issues=[],
+        camera_recommendations=[],
+        summary="Fixture",
+    )
+    monkeypatch.setenv("GEMINI_MODEL", "primary-model")
+    monkeypatch.setenv("GEMINI_FALLBACK_MODELS", "fallback-model")
+    provider = GeminiProvider()
+    provider._client = SimpleNamespace(interactions=Interactions())  # type: ignore[assignment]
+
+    result = asyncio.run(provider.coach(CoachRequest(analysis=analysis, question="What should change?")))
+
+    assert result is not None
+    assert result.model == "fallback-model"
+    assert calls == ["primary-model", "fallback-model"]
 
 
 def test_coach_request_defaults_to_full_tool_contract_but_respects_explicit_empty_list() -> None:

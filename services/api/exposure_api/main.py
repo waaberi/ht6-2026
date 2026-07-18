@@ -22,6 +22,7 @@ from .curation import create_style_profile, review_portfolio
 from .generative import ExcessiveDriftError, extract_localized_patch
 from .models import (
     AnalysisResult,
+    CanvasExpansion,
     CoachCaptureAdvice,
     CoachEvidence,
     CoachRequest,
@@ -32,11 +33,19 @@ from .models import (
     Region,
     StyleProfile,
 )
-from .providers import GeminiImageError, GeminiImageQuotaError, GeminiProvider
-from .renderer import encode_image, export_exif, render_layer_stack
+from .providers import (
+    GeminiImageError,
+    GeminiImageQuotaError,
+    GeminiImageTimeoutError,
+    GeminiProvider,
+    SemanticProviderResult,
+)
+from .renderer import canvas_content_size, encode_image, export_exif, render_layer_stack, resolve_canvas_expansion
 
 MAX_UPLOAD_BYTES = int(os.getenv("EXPOSURE_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 SEMANTIC_TIMEOUT_SECONDS = max(5.0, min(40.0, float(os.getenv("EXPOSURE_SEMANTIC_TIMEOUT_SECONDS", "25"))))
+COACH_TIMEOUT_SECONDS = max(5.0, min(60.0, float(os.getenv("EXPOSURE_COACH_TIMEOUT_SECONDS", "25"))))
+IMAGE_TIMEOUT_SECONDS = max(10.0, min(180.0, float(os.getenv("EXPOSURE_IMAGE_TIMEOUT_SECONDS", "90"))))
 ANALYSIS_CACHE_MAX_ENTRIES = max(1, int(os.getenv("EXPOSURE_ANALYSIS_CACHE_MAX_ENTRIES", "128")))
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/heic", "image/heif", "image/webp"}
 GPS_KEY = re.compile(r"gps|latitude|longitude|location", re.IGNORECASE)
@@ -67,6 +76,11 @@ def _store_analysis(key: AnalysisCacheKey, result: AnalysisResult) -> None:
     analysis_cache.move_to_end(key)
     while len(analysis_cache) > ANALYSIS_CACHE_MAX_ENTRIES:
         analysis_cache.popitem(last=False)
+
+
+def _semantic_cache_identity() -> str:
+    models = getattr(provider, "semantic_models", (provider.semantic_model,))
+    return "|".join(models)
 
 
 async def _read_image(upload: UploadFile) -> bytes:
@@ -121,6 +135,7 @@ async def health() -> dict[str, object]:
         "service": "Exposure",
         "geminiConfigured": provider.configured,
         "semanticModel": provider.semantic_model,
+        "semanticFallbackModels": list(getattr(provider, "semantic_models", (provider.semantic_model,))[1:]),
         "imageModel": provider.image_model,
         "authRequired": auth.AUTH_REQUIRED,
         "authConfigured": auth.auth_configured(),
@@ -157,7 +172,7 @@ async def analyze(
     else:
         checksum = checksum or hashlib.sha256(image_bytes).hexdigest()
     coaching_fingerprint = hashlib.sha256(json.dumps(coaching, sort_keys=True).encode()).hexdigest()[:12]
-    cache_key = (checksum, SCHEMA_VERSION, provider.semantic_model if provider.configured else "local", coaching_fingerprint)
+    cache_key = (checksum, SCHEMA_VERSION, _semantic_cache_identity() if provider.configured else "local", coaching_fingerprint)
     cached = _cached_analysis(cache_key)
     if cached:
         return cached.model_copy(update={"version_id": version_id})
@@ -169,25 +184,34 @@ async def analyze(
         supplied_exif=safe_exif,
     )
     semantic = None
+    semantic_model = None
     if provider.configured:
         try:
-            semantic = await asyncio.wait_for(
+            semantic_response = await asyncio.wait_for(
                 provider.analyze_semantics(
                     image_bytes,
                     analysis_mime_type,
                     deterministic,
                     safe_exif,
                     coaching,
+                    request_timeout_seconds=SEMANTIC_TIMEOUT_SECONDS,
                 ),
                 timeout=SEMANTIC_TIMEOUT_SECONDS,
             )
+            if isinstance(semantic_response, SemanticProviderResult):
+                semantic = semantic_response.analysis
+                semantic_model = semantic_response.model
+            else:
+                # Preserve compatibility with alternate providers implementing the original contract.
+                semantic = semantic_response
+                semantic_model = provider.semantic_model if semantic else None
         except TimeoutError:
             logger.warning("Gemini semantic analysis exceeded %.1f seconds; returning deterministic results", SEMANTIC_TIMEOUT_SECONDS)
         except Exception:
             # Deterministic results remain useful and truthful during provider outages.
             logger.exception("Gemini semantic analysis failed")
             semantic = None
-    result = merge_semantic(deterministic, semantic, provider.semantic_model if semantic else None)
+    result = merge_semantic(deterministic, semantic, semantic_model)
     # A provider timeout/outage must not poison this photo's semantic cache.
     # Return the useful deterministic result now, but let the next request retry Gemini.
     if not provider.configured or semantic is not None:
@@ -239,7 +263,7 @@ async def generative_layer(
         raise HTTPException(422, "target_json and layer_stack_json must use Exposure contracts") from error
     asset_bytes = await _read_assets(assets, asset_ids_json)
     rendered = await asyncio.to_thread(render_layer_stack, image_bytes, stack, asset_bytes)
-    cumulative_expansion: dict[str, int] | None = None
+    cumulative_expansion: CanvasExpansion | None = None
     if operation == "expand":
         try:
             expansion_request = json.loads(expansion_json)
@@ -264,14 +288,32 @@ async def generative_layer(
             width=delta / rendered.width if direction in {"left", "right"} else 1,
             height=delta / rendered.height if direction in {"top", "bottom"} else 1,
         )
-        existing = stack.canvas_transform.get("expansion") or {}
-        cumulative_expansion = {
-            side: max(0, int(existing.get(side, 0))) + (delta if side == direction else 0)
-            for side in ("top", "right", "bottom", "left")
-        }
+        reference_size = await asyncio.to_thread(canvas_content_size, image_bytes, stack.canvas_transform)
+        existing = resolve_canvas_expansion(stack.canvas_transform.get("expansion"), reference_size)
+        cumulative_expansion = CanvasExpansion(
+            **{
+                side: existing[side] + (delta if side == direction else 0)
+                for side in ("top", "right", "bottom", "left")
+            },
+            reference_width=reference_size[0],
+            reference_height=reference_size[1],
+        )
     rendered_bytes, _ = await asyncio.to_thread(encode_image, rendered, "png")
     try:
-        candidate = await provider.generate_candidate(rendered_bytes, "image/png", prompt, target, operation)
+        candidate = await asyncio.wait_for(
+            provider.generate_candidate(
+                rendered_bytes,
+                "image/png",
+                prompt,
+                target,
+                operation,
+                request_timeout_seconds=IMAGE_TIMEOUT_SECONDS,
+            ),
+            timeout=IMAGE_TIMEOUT_SECONDS,
+        )
+    except (TimeoutError, GeminiImageTimeoutError) as error:
+        logger.warning("Gemini image generation exceeded %.1f seconds", IMAGE_TIMEOUT_SECONDS)
+        raise HTTPException(504, "Gemini image generation timed out.") from error
     except GeminiImageQuotaError as error:
         logger.warning("Gemini image generation is blocked by project quota")
         raise HTTPException(503, str(error)) from error
@@ -337,9 +379,14 @@ async def style_apply(
 async def coach(request: CoachRequest) -> CoachResponse:
     if provider.configured:
         try:
-            response = await provider.coach(request)
+            response = await asyncio.wait_for(
+                provider.coach(request, request_timeout_seconds=COACH_TIMEOUT_SECONDS),
+                timeout=COACH_TIMEOUT_SECONDS,
+            )
             if response:
                 return response
+        except TimeoutError:
+            logger.warning("Gemini Coach exceeded %.1f seconds; returning the local response", COACH_TIMEOUT_SECONDS)
         except Exception:
             logger.exception("Gemini Coach request failed")
     selected_issue = next(

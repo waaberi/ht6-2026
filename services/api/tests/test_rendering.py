@@ -186,6 +186,51 @@ def test_canvas_space_patch_fills_an_expanded_edge() -> None:
     assert tuple(rendered[6, 23]) == (238, 189, 168)
 
 
+def test_referenced_canvas_expansion_and_patch_scale_to_the_render_resolution() -> None:
+    source = Image.new("RGB", (10, 6), "#335577")
+    source_bytes = io.BytesIO()
+    source.save(source_bytes, format="PNG")
+
+    # The donor patch was generated against a 20x12 content canvas with a
+    # four-pixel right expansion. Rendering a half-size source must produce a
+    # two-pixel edge and proportionally resize the full-canvas patch.
+    patch = Image.new("RGBA", (24, 12), (0, 0, 0, 0))
+    patch_pixels = np.asarray(patch).copy()
+    patch_pixels[:, 20:] = (238, 189, 168, 255)
+    patch_bytes = io.BytesIO()
+    Image.fromarray(patch_pixels, "RGBA").save(patch_bytes, format="PNG")
+    expansion = {
+        "top": 0,
+        "right": 4,
+        "bottom": 0,
+        "left": 0,
+        "referenceWidth": 20,
+        "referenceHeight": 12,
+    }
+    layer = {
+        "id": "scaled-outpaint",
+        "type": "generative-patch",
+        "enabled": True,
+        "opacity": 1,
+        "patchAssetId": "patch",
+        "canvasSpace": True,
+        "canvasExpansion": expansion,
+    }
+
+    rendered = np.asarray(render_layer_stack(
+        source_bytes.getvalue(),
+        LayerStack.model_validate({
+            "canvasTransform": {**IDENTITY, "expansion": expansion},
+            "layers": [layer],
+        }),
+        {"patch": patch_bytes.getvalue()},
+    ).convert("RGB"))
+
+    assert rendered.shape[:2] == (6, 12)
+    assert tuple(rendered[3, 5]) == (51, 85, 119)
+    assert np.allclose(rendered[3, 11], (238, 189, 168), atol=5)
+
+
 def test_collective_adjustments_run_after_canvas_space_generated_patches() -> None:
     source = Image.new("RGB", (8, 6), (20, 30, 40))
     source_bytes = io.BytesIO()

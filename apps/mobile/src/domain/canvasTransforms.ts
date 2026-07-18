@@ -1,4 +1,4 @@
-import type { CanvasTransform, Region } from './types';
+import type { CanvasExpansion, CanvasTransform, Region } from './types';
 
 const IDENTITY_PERSPECTIVE: CanvasTransform['perspective'] = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 export const ROTATION_ADJUSTMENT_LIMIT = 45;
@@ -101,6 +101,36 @@ export const visibleCropAspect = (
   const canvas = visibleRotatedCanvasSize(width, height, transform.rotationDegrees);
   const crop = transform.crop ?? { x: 0, y: 0, width: 1, height: 1 };
   return (canvas.width * crop.width) / Math.max(1e-9, canvas.height * crop.height);
+};
+
+/**
+ * Resolves stored expansion pixels for the canvas currently being rendered.
+ * Older stacks omitted reference dimensions and intentionally retain their raw
+ * pixel behavior.
+ */
+export const resolveCanvasExpansion = (
+  expansion: CanvasExpansion | undefined,
+  contentWidth: number,
+  contentHeight: number,
+): CanvasExpansion => {
+  const source = expansion ?? { top: 0, right: 0, bottom: 0, left: 0 };
+  const hasReference = (
+    Number.isFinite(source.referenceWidth)
+    && Number.isFinite(source.referenceHeight)
+    && (source.referenceWidth ?? 0) > 0
+    && (source.referenceHeight ?? 0) > 0
+  );
+  if (!hasReference) {
+    return { top: source.top, right: source.right, bottom: source.bottom, left: source.left };
+  }
+  const horizontalScale = Math.max(0, contentWidth) / source.referenceWidth!;
+  const verticalScale = Math.max(0, contentHeight) / source.referenceHeight!;
+  return {
+    top: source.top * verticalScale,
+    right: source.right * horizontalScale,
+    bottom: source.bottom * verticalScale,
+    left: source.left * horizontalScale,
+  };
 };
 
 export const restoreManualTransform = (transform: CanvasTransform): CanvasTransform => ({

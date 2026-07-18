@@ -13,7 +13,7 @@ import {
 import React, { useMemo, useRef, useState } from 'react';
 import { PanResponder, StyleSheet, View } from 'react-native';
 
-import { quarterTurnsForRotation } from '../domain/canvasTransforms';
+import { quarterTurnsForRotation, resolveCanvasExpansion } from '../domain/canvasTransforms';
 import type { AdjustmentValues, AnalysisResult, LayerStack, Region } from '../domain/types';
 import { colors } from './theme';
 import { CropOverlay } from './studio/CropOverlay';
@@ -101,13 +101,14 @@ export const PhotoCanvas = ({
     const imageWidth = image?.width() ?? 1;
     const imageHeight = image?.height() ?? 1;
     const crop = editingCrop ? { x: 0, y: 0, width: 1, height: 1 } : stack.canvasTransform.crop ?? { x: 0, y: 0, width: 1, height: 1 };
-    const expansion = stack.canvasTransform.expansion ?? { top: 0, right: 0, bottom: 0, left: 0 };
+    const expansionSource = stack.canvasTransform.expansion;
     const rotatedWidth = swapsDimensions ? imageHeight : imageWidth;
     const rotatedHeight = swapsDimensions ? imageWidth : imageHeight;
     const croppedWidth = rotatedWidth * crop.width;
     const croppedHeight = rotatedHeight * crop.height;
     const contentWidth = croppedWidth;
     const contentHeight = croppedHeight;
+    const expansion = resolveCanvasExpansion(expansionSource, contentWidth, contentHeight);
     const expandedWidth = contentWidth + expansion.left + expansion.right;
     const expandedHeight = contentHeight + expansion.top + expansion.bottom;
     const scale = Math.min(size.width / expandedWidth, size.height / expandedHeight);
@@ -138,6 +139,7 @@ export const PhotoCanvas = ({
     );
     return {
       expansion,
+      expansionSource,
       scale,
       contentWidth,
       contentHeight,
@@ -261,7 +263,11 @@ export const PhotoCanvas = ({
             </Group>
             {stack.layers.map((layer) => {
               if (!layer.enabled || layer.type !== 'generative-patch' || !layer.canvasSpace) return null;
-              const snapshot = layer.canvasExpansion ?? geometry.expansion;
+              const snapshot = resolveCanvasExpansion(
+                layer.canvasExpansion ?? geometry.expansionSource,
+                geometry.contentWidth,
+                geometry.contentHeight,
+              );
               const rect = {
                 x: geometry.display.x + (geometry.expansion.left - snapshot.left) * geometry.scale,
                 y: geometry.display.y + (geometry.expansion.top - snapshot.top) * geometry.scale,

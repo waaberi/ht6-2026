@@ -25,12 +25,23 @@ export type AdjustmentValues = Partial<{
   vignette: number;
 }>;
 
+export type CanvasExpansion = {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+  /** Post-rotation/crop canvas width where these pixel insets were measured. */
+  referenceWidth?: number;
+  /** Post-rotation/crop canvas height where these pixel insets were measured. */
+  referenceHeight?: number;
+};
+
 export type CanvasTransform = {
   /** Normalized to the visible, rotated canvas before any generative expansion. */
   crop?: Region;
   rotationDegrees: number;
   perspective: [number, number, number, number, number, number, number, number, number];
-  expansion?: { top: number; right: number; bottom: number; left: number };
+  expansion?: CanvasExpansion;
 };
 
 export const identityCanvasTransform = (): CanvasTransform => ({
@@ -85,7 +96,7 @@ export type GenerativePatchLayer = LayerBase & {
   target: Region;
   prompt: string;
   canvasSpace?: boolean;
-  canvasExpansion?: { top: number; right: number; bottom: number; left: number };
+  canvasExpansion?: CanvasExpansion;
   provenance: { model: string; sourceVersionId: Id; driftScore: number };
 };
 

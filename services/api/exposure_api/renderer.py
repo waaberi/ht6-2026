@@ -9,6 +9,49 @@ from PIL import Image, ImageChops, ImageEnhance, ImageFilter, ImageOps
 
 from .models import LayerStack
 
+_EXPANSION_SIDES = ("top", "right", "bottom", "left")
+
+
+def resolve_canvas_expansion(
+    expansion: dict[str, Any] | None,
+    content_size: tuple[int, int],
+) -> dict[str, int]:
+    """Scale referenced insets to this render; preserve raw legacy pixels."""
+    source = expansion or {}
+    try:
+        reference_width = float(source.get("referenceWidth", 0))
+        reference_height = float(source.get("referenceHeight", 0))
+    except (TypeError, ValueError):
+        reference_width = reference_height = 0
+    has_reference = (
+        math.isfinite(reference_width)
+        and math.isfinite(reference_height)
+        and reference_width > 0
+        and reference_height > 0
+    )
+    horizontal_scale = content_size[0] / reference_width if has_reference else 1
+    vertical_scale = content_size[1] / reference_height if has_reference else 1
+    resolved: dict[str, int] = {}
+    for side in _EXPANSION_SIDES:
+        try:
+            value = max(0, float(source.get(side, 0)))
+        except (TypeError, ValueError):
+            value = 0
+        if has_reference:
+            value *= vertical_scale if side in {"top", "bottom"} else horizontal_scale
+            resolved[side] = max(0, round(value))
+        else:
+            resolved[side] = max(0, int(value))
+    return resolved
+
+
+def canvas_content_size(image_bytes: bytes, transform: dict[str, Any]) -> tuple[int, int]:
+    """Post-perspective/rotation/crop size before generative expansion."""
+    with Image.open(io.BytesIO(image_bytes)) as source:
+        image = ImageOps.exif_transpose(source).convert("RGB")
+    without_expansion = {key: value for key, value in transform.items() if key != "expansion"}
+    return _apply_canvas_transform(image, without_expansion).size
+
 
 def _adjust(image: Image.Image, values: dict[str, Any]) -> Image.Image:
     result = image.convert("RGB")
@@ -139,16 +182,24 @@ def _composite_canvas_asset(
     layer: dict[str, Any],
     assets: dict[str, bytes],
     current_expansion: dict[str, Any],
+    content_size: tuple[int, int],
 ) -> Image.Image:
     asset_id = layer.get("patchAssetId")
     if not asset_id or asset_id not in assets:
         return base
     overlay = Image.open(io.BytesIO(assets[asset_id])).convert("RGBA")
-    alpha = _overlay_alpha(overlay, layer, assets, overlay.size)
-    overlay.putalpha(alpha)
+    current_pixels = resolve_canvas_expansion(current_expansion, content_size)
     snapshot = layer.get("canvasExpansion") or current_expansion
-    x = int(current_expansion.get("left", 0)) - int(snapshot.get("left", 0))
-    y = int(current_expansion.get("top", 0)) - int(snapshot.get("top", 0))
+    snapshot_pixels = resolve_canvas_expansion(snapshot, content_size)
+    snapshot_size = (
+        content_size[0] + snapshot_pixels["left"] + snapshot_pixels["right"],
+        content_size[1] + snapshot_pixels["top"] + snapshot_pixels["bottom"],
+    )
+    overlay = overlay.resize(snapshot_size, Image.Resampling.LANCZOS)
+    alpha = _overlay_alpha(overlay, layer, assets, snapshot_size)
+    overlay.putalpha(alpha)
+    x = current_pixels["left"] - snapshot_pixels["left"]
+    y = current_pixels["top"] - snapshot_pixels["top"]
     canvas = Image.new("RGBA", base.size, (0, 0, 0, 0))
     canvas.alpha_composite(overlay, (x, y))
     return Image.alpha_composite(base.convert("RGBA"), canvas).convert("RGB")
@@ -211,7 +262,12 @@ def _apply_canvas_transform(image: Image.Image, transform: dict[str, Any]) -> Im
         result = result.crop((left, top, right, bottom))
     expansion = transform.get("expansion")
     if expansion:
-        result = ImageOps.expand(result, border=(int(expansion.get("left", 0)), int(expansion.get("top", 0)), int(expansion.get("right", 0)), int(expansion.get("bottom", 0))), fill="black")
+        pixels = resolve_canvas_expansion(expansion, result.size)
+        result = ImageOps.expand(
+            result,
+            border=(pixels["left"], pixels["top"], pixels["right"], pixels["bottom"]),
+            fill="black",
+        )
     return result
 
 
@@ -221,6 +277,10 @@ def render_layer_stack(image_bytes: bytes, stack: LayerStack, assets: dict[str, 
         rendered = ImageOps.exif_transpose(source).convert("RGB")
     canvas_applied = False
     current_expansion = stack.canvas_transform.get("expansion") or {}
+    content_size = _apply_canvas_transform(
+        rendered,
+        {key: value for key, value in stack.canvas_transform.items() if key != "expansion"},
+    ).size
     for layer in stack.layers:
         if not layer.get("enabled", True):
             continue
@@ -229,7 +289,7 @@ def render_layer_stack(image_bytes: bytes, stack: LayerStack, assets: dict[str, 
             if not canvas_applied:
                 rendered = _apply_canvas_transform(rendered, stack.canvas_transform)
                 canvas_applied = True
-            rendered = _composite_canvas_asset(rendered, layer, assets, current_expansion)
+            rendered = _composite_canvas_asset(rendered, layer, assets, current_expansion, content_size)
             continue
         opacity = max(0, min(1, float(layer.get("opacity", 1))))
         if layer_type in {"adjustment", "style"}:

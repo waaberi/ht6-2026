@@ -4,7 +4,10 @@ import asyncio
 import base64
 import json
 import os
-from typing import Any
+import re
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, TypeVar
 
 from google import genai
 
@@ -36,6 +39,84 @@ class GeminiImageError(RuntimeError):
 
 class GeminiImageQuotaError(GeminiImageError):
     pass
+
+
+class GeminiImageTimeoutError(GeminiImageError):
+    pass
+
+
+@dataclass(frozen=True)
+class SemanticProviderResult:
+    analysis: SemanticAnalysis
+    model: str
+
+
+T = TypeVar("T")
+
+
+def _configured_model_chain(primary: str, fallbacks: str) -> tuple[str, ...]:
+    models: list[str] = []
+    for candidate in (primary, *fallbacks.split(",")):
+        model = candidate.strip()
+        if model and model not in models:
+            models.append(model)
+    return tuple(models)
+
+
+def _error_status(error: Exception) -> int | None:
+    candidates = [
+        getattr(error, "status_code", None),
+        getattr(error, "code", None),
+        getattr(getattr(error, "response", None), "status_code", None),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, int):
+            return candidate
+        text = str(candidate or "").upper()
+        match = re.search(r"\b(400|404|408|429|504)\b", text)
+        if match:
+            return int(match.group(1))
+        if "INVALID_ARGUMENT" in text:
+            return 400
+        if "NOT_FOUND" in text:
+            return 404
+        if "RESOURCE_EXHAUSTED" in text:
+            return 429
+    return None
+
+
+def _can_try_fallback_model(error: Exception) -> bool:
+    status = _error_status(error)
+    if status in {404, 429}:
+        return True
+    message = str(error).lower()
+    quota_markers = (
+        "quota exceeded",
+        "rate limit",
+        "too many requests",
+        "resource exhausted",
+        "resource_exhausted",
+    )
+    model_markers = (
+        "model not found",
+        "model is not found",
+        "not found for api version",
+        "model is not available",
+        "model not available",
+        "model is unavailable",
+        "model is not supported",
+        "not supported for",
+        "unsupported model",
+    )
+    return any(marker in message for marker in (*quota_markers, *model_markers))
+
+
+def _is_timeout_error(error: Exception) -> bool:
+    if _error_status(error) in {408, 504}:
+        return True
+    name = type(error).__name__.lower()
+    message = str(error).lower()
+    return "timeout" in name or "timed out" in message
 
 
 _UNSUPPORTED_GEMINI_SCHEMA_KEYS = {
@@ -212,12 +293,26 @@ class GeminiProvider:
     def __init__(self) -> None:
         self.api_key = os.getenv("GEMINI_API_KEY")
         self.semantic_model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+        self.semantic_models = _configured_model_chain(
+            self.semantic_model,
+            os.getenv("GEMINI_FALLBACK_MODELS", ""),
+        )
         self.image_model = os.getenv("NANO_BANANA_MODEL", "gemini-3.1-flash-image")
         self._client = genai.Client(api_key=self.api_key) if self.api_key else None
 
     @property
     def configured(self) -> bool:
         return self._client is not None
+
+    def _request_with_text_model_fallback(self, request: Callable[[str], T]) -> tuple[T, str]:
+        for index, model in enumerate(self.semantic_models):
+            try:
+                return request(model), model
+            except Exception as error:
+                is_last_model = index == len(self.semantic_models) - 1
+                if is_last_model or not _can_try_fallback_model(error):
+                    raise
+        raise RuntimeError("Gemini text model chain is empty")
 
     async def analyze_semantics(
         self,
@@ -226,7 +321,8 @@ class GeminiProvider:
         deterministic: AnalysisResult,
         exif: dict[str, Any],
         coaching: dict[str, str],
-    ) -> SemanticAnalysis | None:
+        request_timeout_seconds: float | None = None,
+    ) -> SemanticProviderResult | None:
         if not self._client:
             return None
         signals = [signal.model_dump(mode="json", by_alias=True) for signal in deterministic.signals]
@@ -254,10 +350,11 @@ class GeminiProvider:
             f"User coaching preferences: {json.dumps(coaching, separators=(',', ':'))}"
         )
 
-        def request() -> SemanticAnalysis:
+        def request_model(model: str) -> SemanticAnalysis:
             assert self._client is not None
+            options = {"timeout": request_timeout_seconds} if request_timeout_seconds is not None else {}
             interaction = self._client.interactions.create(
-                model=self.semantic_model,
+                model=model,
                 input=[
                     {"type": "text", "text": prompt},
                     {"type": "image", "data": base64.b64encode(image_bytes).decode(), "mime_type": mime_type},
@@ -267,32 +364,40 @@ class GeminiProvider:
                     "mime_type": "application/json",
                     "schema": _gemini_json_schema(SemanticAnalysis),
                 },
+                **options,
             )
             return SemanticAnalysis.model_validate_json(interaction.output_text)
 
-        return await asyncio.to_thread(request)
+        analysis, model = await asyncio.to_thread(self._request_with_text_model_fallback, request_model)
+        return SemanticProviderResult(analysis=analysis, model=model)
 
-    async def coach(self, request: CoachRequest) -> CoachResponse | None:
+    async def coach(
+        self,
+        request: CoachRequest,
+        request_timeout_seconds: float | None = None,
+    ) -> CoachResponse | None:
         if not self._client:
             return None
         available_tools = list(request.available_tools)
         prompt = _coach_prompt(request, available_tools)
 
-        def make_request() -> CoachResponse:
+        def request_model(model: str) -> CoachResponse:
             assert self._client is not None
+            options = {"timeout": request_timeout_seconds} if request_timeout_seconds is not None else {}
             interaction = self._client.interactions.create(
-                model=self.semantic_model,
+                model=model,
                 input=prompt,
                 response_format={
                     "type": "text",
                     "mime_type": "application/json",
                     "schema": _gemini_json_schema(CoachResponse),
                 },
+                **options,
             )
-            result = CoachResponse.model_validate_json(interaction.output_text)
-            return _ground_coach_response(request, result).model_copy(update={"model": self.semantic_model})
+            return CoachResponse.model_validate_json(interaction.output_text)
 
-        return await asyncio.to_thread(make_request)
+        result, model = await asyncio.to_thread(self._request_with_text_model_fallback, request_model)
+        return _ground_coach_response(request, result).model_copy(update={"model": model})
 
     async def generate_candidate(
         self,
@@ -301,6 +406,7 @@ class GeminiProvider:
         prompt: str,
         target: Region,
         operation: str,
+        request_timeout_seconds: float | None = None,
     ) -> bytes:
         if not self._client:
             raise RuntimeError("GEMINI_API_KEY is required for generative layers")
@@ -322,6 +428,7 @@ class GeminiProvider:
 
         def request() -> bytes:
             assert self._client is not None
+            options = {"timeout": request_timeout_seconds} if request_timeout_seconds is not None else {}
             interaction = self._client.interactions.create(
                 model=self.image_model,
                 input=[
@@ -329,6 +436,7 @@ class GeminiProvider:
                     {"type": "image", "data": base64.b64encode(image_bytes).decode(), "mime_type": mime_type},
                 ],
                 response_format={"type": "image", "mime_type": "image/jpeg"},
+                **options,
             )
             data = interaction.output_image.data
             return base64.b64decode(data) if isinstance(data, str) else bytes(data)
@@ -337,8 +445,9 @@ class GeminiProvider:
             return await asyncio.to_thread(request)
         except Exception as error:
             message = str(error).lower()
-            status = getattr(error, "status_code", None) or getattr(error, "code", None)
-            if status == 429 or "quota exceeded" in message or "rate limit" in message:
+            if _is_timeout_error(error):
+                raise GeminiImageTimeoutError("Gemini image generation timed out.") from error
+            if _error_status(error) == 429 or "quota exceeded" in message or "rate limit" in message:
                 raise GeminiImageQuotaError(
                     "The configured Gemini project has no available image-generation quota."
                 ) from error

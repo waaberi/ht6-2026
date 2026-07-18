@@ -10,6 +10,7 @@ from PIL import Image, ImageDraw
 
 from exposure_api import main
 from exposure_api.models import SemanticAnalysis
+from exposure_api.providers import SemanticProviderResult
 
 
 def test_analysis_returns_validated_evidence_without_mutating_source(client: TestClient, image_bytes: bytes) -> None:
@@ -123,6 +124,34 @@ def test_semantic_timeout_does_not_poison_the_retry_cache(client: TestClient, mo
     assert provider.calls == 2
 
 
+def test_analysis_reports_the_text_model_that_succeeded(client: TestClient, monkeypatch) -> None:
+    class FallbackProvider:
+        configured = True
+        semantic_model = "primary-fixture"
+        semantic_models = (semantic_model, "fallback-fixture")
+
+        async def analyze_semantics(self, *_args, **_kwargs):
+            return SemanticProviderResult(
+                analysis=SemanticAnalysis(summary="Fallback model succeeded."),
+                model="fallback-fixture",
+            )
+
+    image = Image.new("RGB", (141, 95), "#526b63")
+    encoded = io.BytesIO()
+    image.save(encoded, format="PNG")
+    monkeypatch.setattr(main, "provider", FallbackProvider())
+
+    response = client.post(
+        "/v1/analyze",
+        files={"image": ("fallback-semantic.png", encoded.getvalue(), "image/png")},
+        data={"version_id": "fallback-semantic"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["semanticModel"] == "fallback-fixture"
+    assert response.json()["summary"] == "Fallback model succeeded."
+
+
 def test_camera_advice_does_not_invent_missing_exif(client: TestClient, image_bytes: bytes) -> None:
     response = client.post("/v1/analyze", files={"image": ("photo.png", image_bytes, "image/png")}, data={"version_id": "v", "exif_json": "{}"})
     assert response.status_code == 200
@@ -219,3 +248,65 @@ def test_coach_returns_structured_fallback(client: TestClient, image_bytes: byte
     assert isinstance(payload["evidence"], list)
     assert isinstance(payload["captureAdvice"], list)
     assert len(payload["actions"]) <= 2
+
+
+def test_coach_timeout_returns_structured_local_response(
+    client: TestClient,
+    image_bytes: bytes,
+    monkeypatch,
+) -> None:
+    analysis = client.post(
+        "/v1/analyze",
+        files={"image": ("photo.png", image_bytes, "image/png")},
+        data={"version_id": "coach-timeout"},
+    ).json()
+
+    class SlowCoachProvider:
+        configured = True
+        semantic_model = "slow-coach"
+        semantic_models = (semantic_model,)
+        image_model = "image-fixture"
+
+        async def coach(self, *_args, **_kwargs):
+            await asyncio.sleep(0.05)
+            raise AssertionError("Coach should have timed out")
+
+    monkeypatch.setattr(main, "provider", SlowCoachProvider())
+    monkeypatch.setattr(main, "COACH_TIMEOUT_SECONDS", 0.01)
+
+    response = client.post("/v1/coach", json={"analysis": analysis, "question": "What should I change?"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["model"] == "exposure-fallback-coach-1"
+
+
+def test_image_generation_timeout_is_bounded(
+    client: TestClient,
+    image_bytes: bytes,
+    monkeypatch,
+) -> None:
+    class SlowImageProvider:
+        configured = True
+        semantic_model = "semantic-fixture"
+        semantic_models = (semantic_model,)
+        image_model = "slow-image"
+
+        async def generate_candidate(self, *_args, **_kwargs):
+            await asyncio.sleep(0.05)
+            raise AssertionError("image generation should have timed out")
+
+    monkeypatch.setattr(main, "provider", SlowImageProvider())
+    monkeypatch.setattr(main, "IMAGE_TIMEOUT_SECONDS", 0.01)
+
+    response = client.post(
+        "/v1/layers/generative",
+        files={"image": ("photo.png", image_bytes, "image/png")},
+        data={
+            "target_json": '{"x":0.25,"y":0.25,"width":0.5,"height":0.5}',
+            "prompt": "Remove the center detail.",
+            "source_version_id": "image-timeout",
+        },
+    )
+
+    assert response.status_code == 504, response.text
+    assert response.json()["detail"] == "Gemini image generation timed out."
