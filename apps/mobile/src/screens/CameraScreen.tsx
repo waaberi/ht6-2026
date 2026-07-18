@@ -22,7 +22,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { colors } from '../components/theme';
-import { clampZoom, horizonRollForOrientation, normalizeFlashMode, zoomFromPinch } from '../domain/cameraControls';
+import { captureControlsForSession, clampZoom, horizonRollForOrientation, normalizeFlashMode, zoomFromPinch } from '../domain/cameraControls';
 import {
   defaultPreferences,
   loadPreferences,
@@ -84,9 +84,11 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
 
   useEffect(() => {
     void loadPreferences().then(({ camera: saved }) => {
-      preferencesRef.current = saved;
-      zoomRef.current = saved.zoom;
-      setCameraPreferences(saved);
+      const sessionControls = captureControlsForSession(saved, defaultPreferences.camera);
+      const next = { ...saved, ...sessionControls };
+      preferencesRef.current = next;
+      zoomRef.current = next.zoom;
+      setCameraPreferences(next);
     });
   }, []);
 

@@ -14,6 +14,7 @@ import {
   type ExposurePreferences,
 } from '../data/preferences';
 import { resolveApiUrl } from '../domain/apiConfiguration';
+import { captureControlsForSession } from '../domain/cameraControls';
 import { sendMagicLink, signOut } from '../services/auth';
 import { supabase } from '../services/supabase';
 import { persistPreferences as persistPreferencesToCloud } from '../services/sync';
@@ -191,7 +192,15 @@ export const SettingsScreen = () => {
         <SettingRow label="Grid" value={preferences.camera.showGrid} onChange={(showGrid) => updateCamera({ showGrid })} />
         <SettingRow label="Level guide" value={preferences.camera.showLevel} onChange={updateLevel} />
         <SettingRow label="Mirror selfies" value={preferences.camera.mirrorSelfies} onChange={(mirrorSelfies) => updateCamera({ mirrorSelfies })} />
-        <SettingRow label="Preserve capture controls" value={preferences.camera.preserveCaptureSettings} onChange={(preserveCaptureSettings) => updateCamera({ preserveCaptureSettings })} last />
+        <SettingRow
+          label="Preserve capture controls"
+          value={preferences.camera.preserveCaptureSettings}
+          onChange={(preserveCaptureSettings) => updateCamera(captureControlsForSession(
+            { ...preferencesRef.current.camera, preserveCaptureSettings },
+            defaultPreferences.camera,
+          ))}
+          last
+        />
         {cameraMessage ? <Text accessibilityRole="alert" style={styles.message}>{cameraMessage}</Text> : null}
       </Section>
 
@@ -216,12 +225,16 @@ export const SettingsScreen = () => {
           label="Include camera metadata"
           detail="Camera, lens, exposure and capture time"
           value={preferences.exportMetadata}
-          onChange={(exportMetadata) => updatePreferences({ exportMetadata })}
+          onChange={(exportMetadata) => updatePreferences({
+            exportMetadata,
+            exportGps: exportMetadata ? preferencesRef.current.exportGps : false,
+          })}
         />
         <SettingRow
           label="Include location"
           value={preferences.exportGps}
           onChange={(exportGps) => updatePreferences({ exportGps })}
+          disabled={!preferences.exportMetadata}
           last
         />
       </Section>
@@ -281,14 +294,15 @@ const ChoiceRow = ({ label, value, options, onChange, last = false }: {
   </View>
 );
 
-const SettingRow = ({ label, detail, value, onChange, last = false }: {
+const SettingRow = ({ label, detail, value, onChange, disabled = false, last = false }: {
   label: string;
   detail?: string;
   value: boolean;
   onChange: (value: boolean) => void;
+  disabled?: boolean;
   last?: boolean;
 }) => (
-  <View style={[styles.settingRow, last && styles.lastRow]}>
+  <View style={[styles.settingRow, disabled && styles.disabledRow, last && styles.lastRow]}>
     <View style={styles.settingCopy}>
       <Text style={styles.rowLabel}>{label}</Text>
       {detail ? <Text style={styles.rowDetail}>{detail}</Text> : null}
@@ -296,6 +310,7 @@ const SettingRow = ({ label, detail, value, onChange, last = false }: {
     <Switch
       value={value}
       onValueChange={onChange}
+      disabled={disabled}
       trackColor={{ false: colors.outline, true: colors.primary }}
       thumbColor={value ? colors.onPrimary : colors.textSecondary}
       accessibilityLabel={label}
@@ -333,6 +348,7 @@ const styles = StyleSheet.create({
   segmentLabel: { width: '100%', color: colors.muted, fontSize: 12, lineHeight: 16, fontWeight: '700', textAlign: 'center' },
   segmentLabelSelected: { color: colors.onPrimary },
   settingRow: { minHeight: 60, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
+  disabledRow: { opacity: 0.46 },
   settingCopy: { flex: 1, paddingRight: 14 },
   lastRow: { borderBottomWidth: 0 },
   developerInput: { marginBottom: 12 },

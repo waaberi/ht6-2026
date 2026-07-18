@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { clampZoom, horizonRollForOrientation, normalizeFlashMode, zoomFromPinch } from './cameraControls';
+import { captureControlsForSession, clampZoom, horizonRollForOrientation, normalizeFlashMode, zoomFromPinch } from './cameraControls';
 
 test('pinch zoom is monotonic and clamped to the camera range', () => {
   assert.ok(zoomFromPinch(0.2, 100, 160) > 0.2);
@@ -26,4 +26,34 @@ test('unknown or stale flash values fail closed', () => {
   assert.equal(normalizeFlashMode('off'), 'off');
   assert.equal(normalizeFlashMode('torch'), 'off');
   assert.equal(normalizeFlashMode(undefined), 'off');
+});
+
+test('non-preserved capture controls cannot return on the next camera session', () => {
+  const defaults = {
+    defaultFlash: 'off' as const,
+    timerSeconds: 0 as const,
+    photoRatio: '4:3' as const,
+    zoom: 0,
+    preserveCaptureSettings: false,
+  };
+  assert.deepEqual(captureControlsForSession({
+    defaultFlash: 'on',
+    timerSeconds: 10,
+    photoRatio: '16:9',
+    zoom: 0.8,
+    preserveCaptureSettings: false,
+  }, defaults), defaults);
+  assert.deepEqual(captureControlsForSession({
+    defaultFlash: 'auto',
+    timerSeconds: 3,
+    photoRatio: '16:9',
+    zoom: 0.4,
+    preserveCaptureSettings: true,
+  }, defaults), {
+    defaultFlash: 'auto',
+    timerSeconds: 3,
+    photoRatio: '16:9',
+    zoom: 0.4,
+    preserveCaptureSettings: true,
+  });
 });

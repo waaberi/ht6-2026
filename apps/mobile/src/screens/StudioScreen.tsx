@@ -44,6 +44,7 @@ import { identityCanvasTransform } from '../domain/types';
 const CENTER_TARGET: Region = { x: 0.3, y: 0.3, width: 0.4, height: 0.4 };
 const UPPER_TARGET: Region = { x: 0.2, y: 0.08, width: 0.6, height: 0.34 };
 const LOWER_TARGET: Region = { x: 0.2, y: 0.58, width: 0.6, height: 0.34 };
+const INITIAL_FREEFORM_CROP: Region = { x: 0.04, y: 0.04, width: 0.92, height: 0.92 };
 type ExpansionDirection = 'top' | 'right' | 'bottom' | 'left';
 type GenerativeDraft = {
   sourcePhotoId: string;
@@ -260,19 +261,27 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
       && isCoachEditPreviewCurrent(coachEditDraft, selectedPhoto?.id, version.id)
     ) return coachPreviewComparison === 'after' ? coachEditDraft.preview.stack : version.stack;
     if (
+      tool === 'ai'
+      &&
       generativeDraft
       && generativeDraft.sourcePhotoId === selectedPhoto?.id
       && generativeDraft.sourceVersionId === version.id
     ) return generativeDraft.stack;
-    const collectiveStack = setCollectiveAdjustments(version.stack, draftAdjustments);
-    const adjustedStack: LayerStack = {
-      ...collectiveStack,
-      canvasTransform: tool === 'adjust' ? draftTransform : collectiveStack.canvasTransform,
-      layers: collectiveStack.layers.map((layer) => ({
-        ...layer,
-        opacity: draftLayerOpacities[layer.id] ?? layer.opacity,
-      })),
-    };
+    const collectiveStack = tool === 'adjust'
+      ? setCollectiveAdjustments(version.stack, draftAdjustments)
+      : version.stack;
+    const transformedStack: LayerStack = tool === 'adjust'
+      ? { ...collectiveStack, canvasTransform: draftTransform }
+      : collectiveStack;
+    const adjustedStack: LayerStack = tool === 'layers'
+      ? {
+          ...transformedStack,
+          layers: transformedStack.layers.map((layer) => ({
+            ...layer,
+            opacity: draftLayerOpacities[layer.id] ?? layer.opacity,
+          })),
+        }
+      : transformedStack;
     if (tool !== 'looks' || !selectedLook) return adjustedStack;
     return applyStyleLayer(
       adjustedStack,
@@ -534,6 +543,13 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     void commitTransform(next, aspect === undefined ? 'Original crop' : `Crop ${aspectLabel(aspect)}`);
   };
 
+  const startFreeformCrop = () => {
+    setCropAspect(undefined);
+    setDraftTransform((current) => current.crop
+      ? current
+      : { ...current, crop: INITIAL_FREEFORM_CROP });
+  };
+
   const commitLayerOpacity = async (layerId: string, value: number) => {
     if (layerBusyId) return;
     const layer = version.stack.layers.find((candidate) => candidate.id === layerId);
@@ -642,7 +658,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     setMessage(undefined);
     setExporting(true);
     try {
-      await exportAndShare(selectedPhoto, version.stack);
+      await exportAndShare(selectedPhoto, previewStack);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Export failed.');
     } finally {
@@ -838,7 +854,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
               onAngleChange={(degrees) => setDraftTransform((current) => withStraighten(current, degrees))}
               onAngleCommit={(degrees) => void commitTransform(withStraighten(draftTransform, degrees), 'Rotate angle')}
               onCrop={cropPhoto}
-              onFreeformCrop={() => setCropAspect(undefined)}
+              onFreeformCrop={startFreeformCrop}
               lockedCropAspect={cropAspect}
               onRotate={() => {
                 setCropAspect((current) => current ? 1 / current : undefined);
@@ -918,8 +934,15 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
           active={tool}
           onChange={(nextTool) => {
             if (coachEditCommitRef.current) return;
-            if (tool === 'adjust' && nextTool !== 'adjust') setDraftTransform(version.stack.canvasTransform);
+            if (tool === 'adjust' && nextTool !== 'adjust') {
+              setDraftAdjustments(savedAdjustments);
+              setDraftTransform(version.stack.canvasTransform);
+            }
             if (coachEditDraft && nextTool !== 'coach') releaseCoachEditDraft();
+            if (generativeDraft && nextTool !== 'ai') releaseGenerativeDraft(true);
+            if (tool === 'layers' && nextTool !== 'layers') {
+              setDraftLayerOpacities(Object.fromEntries(version.stack.layers.map((layer) => [layer.id, layer.opacity])));
+            }
             if (nextTool === 'ai') setGenerativeRecommendationId(undefined);
             setTool(nextTool);
           }}

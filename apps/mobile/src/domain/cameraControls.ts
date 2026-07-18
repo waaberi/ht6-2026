@@ -1,10 +1,30 @@
 export type MotionRotation = { beta: number; gamma: number };
 export type CaptureFlashMode = 'off' | 'auto' | 'on';
+export type CaptureSessionControls = {
+  defaultFlash: CaptureFlashMode;
+  timerSeconds: 0 | 3 | 10;
+  photoRatio: '4:3' | '16:9';
+  zoom: number;
+  preserveCaptureSettings: boolean;
+};
 
 export const normalizeFlashMode = (value: unknown): CaptureFlashMode =>
   value === 'on' || value === 'auto' ? value : 'off';
 
 export const clampZoom = (zoom: number) => Math.max(0, Math.min(1, zoom));
+
+export const captureControlsForSession = (
+  saved: CaptureSessionControls,
+  defaults: CaptureSessionControls,
+): CaptureSessionControls => saved.preserveCaptureSettings
+  ? { ...saved, defaultFlash: normalizeFlashMode(saved.defaultFlash), zoom: clampZoom(saved.zoom) }
+  : {
+      ...saved,
+      defaultFlash: defaults.defaultFlash,
+      timerSeconds: defaults.timerSeconds,
+      photoRatio: defaults.photoRatio,
+      zoom: defaults.zoom,
+    };
 
 export const zoomFromPinch = (
   startZoom: number,
