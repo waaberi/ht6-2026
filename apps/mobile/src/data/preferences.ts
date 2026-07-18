@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const PREFERENCES_KEY = 'exposure.preferences.v1';
+const PREFERENCES_KEY = 'exposure.preferences.v2';
+const LEGACY_PREFERENCES_KEY = 'exposure.preferences.v1';
 
 export type ExposurePreferences = {
   apiUrl: string;
@@ -13,7 +14,7 @@ export type ExposurePreferences = {
 };
 
 export const defaultPreferences: ExposurePreferences = {
-  apiUrl: process.env.EXPO_PUBLIC_API_URL ?? '',
+  apiUrl: '',
   detail: 'detailed',
   skillLevel: 'enthusiast',
   desiredMood: '',
@@ -24,7 +25,21 @@ export const defaultPreferences: ExposurePreferences = {
 
 export const loadPreferences = async (): Promise<ExposurePreferences> => {
   const stored = await AsyncStorage.getItem(PREFERENCES_KEY);
-  if (!stored) return defaultPreferences;
+  if (!stored) {
+    const legacy = await AsyncStorage.getItem(LEGACY_PREFERENCES_KEY);
+    if (!legacy) return defaultPreferences;
+    try {
+      const migrated = {
+        ...defaultPreferences,
+        ...(JSON.parse(legacy) as Partial<ExposurePreferences>),
+        apiUrl: '',
+      };
+      await AsyncStorage.setItem(PREFERENCES_KEY, JSON.stringify(migrated));
+      return migrated;
+    } catch {
+      return defaultPreferences;
+    }
+  }
   try {
     return { ...defaultPreferences, ...(JSON.parse(stored) as Partial<ExposurePreferences>) };
   } catch {

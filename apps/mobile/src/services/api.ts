@@ -2,6 +2,7 @@ import { File } from 'expo-file-system';
 
 import { exifForRemoteAnalysis } from '../data/photoRepository';
 import { loadPreferences } from '../data/preferences';
+import { resolveApiUrl } from '../domain/apiConfiguration';
 import { layerAssetsForStack } from '../domain/assets';
 import type { AdjustmentValues, AnalysisResult, LayerStack, PhotoRecord, Region } from '../domain/types';
 
@@ -9,7 +10,7 @@ export class ApiUnavailableError extends Error {}
 
 const requireApiUrl = async () => {
   const preferences = await loadPreferences();
-  const apiUrl = preferences.apiUrl.trim().replace(/\/$/, '');
+  const apiUrl = resolveApiUrl(process.env.EXPO_PUBLIC_API_URL, preferences.apiUrl);
   if (!apiUrl) throw new ApiUnavailableError('Set the Exposure API URL in Settings to enable analysis and export.');
   return apiUrl;
 };

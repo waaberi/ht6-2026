@@ -12,7 +12,7 @@ export const SettingsScreen = () => {
   const { photos } = useExposure();
   const [session, setSession] = useState<Session | null>(null);
   const [email, setEmail] = useState('');
-  const [apiUrl, setApiUrl] = useState(process.env.EXPO_PUBLIC_API_URL ?? '');
+  const [apiUrl, setApiUrl] = useState('');
   const [detail, setDetail] = useState<'concise' | 'detailed'>('detailed');
   const [skillLevel, setSkillLevel] = useState<ExposurePreferences['skillLevel']>('enthusiast');
   const [desiredMood, setDesiredMood] = useState('');
@@ -62,8 +62,8 @@ export const SettingsScreen = () => {
         {message ? <Text style={styles.message}>{message}</Text> : null}
       </Section>
       <Section title="Compute service">
-        <Text style={styles.body}>Use 10.0.2.2 for an Android emulator, or this machine’s LAN address for a physical device.</Text>
-        <TextInput value={apiUrl} onChangeText={setApiUrl} onEndEditing={() => updatePreferences({ apiUrl })} autoCapitalize="none" autoCorrect={false} keyboardType="url" placeholder="http://10.0.2.2:8000" placeholderTextColor={colors.muted} style={styles.input} />
+        <Text style={styles.body}>The development launcher configures this automatically. Enter a URL only to override it.</Text>
+        <TextInput value={apiUrl} onChangeText={setApiUrl} onEndEditing={() => updatePreferences({ apiUrl })} autoCapitalize="none" autoCorrect={false} keyboardType="url" placeholder={process.env.EXPO_PUBLIC_API_URL ?? 'https://api.example.com'} placeholderTextColor={colors.muted} style={styles.input} />
       </Section>
       <Section title="Coaching">
         <Text style={styles.label}>SKILL LEVEL</Text>
@@ -82,7 +82,7 @@ export const SettingsScreen = () => {
         <View style={styles.statRow}><Text style={styles.statValue}>{photos.length}</Text><Text style={styles.statLabel}>originals</Text><Text style={styles.statValue}>{photos.reduce((sum, photo) => sum + photo.versions.length, 0)}</Text><Text style={styles.statLabel}>versions</Text></View>
         <Text style={styles.body}>{photos.filter((photo) => photo.syncState !== 'synced').length} item(s) queued for sync. Local capture remains available offline.</Text>
       </Section>
-      <Text style={styles.footer}>Exposure · com.ht62026.exposure{apiUrl ? ' · API configured' : ' · local mode'}</Text>
+      <Text style={styles.footer}>Exposure · com.ht62026.exposure{apiUrl || process.env.EXPO_PUBLIC_API_URL ? ' · API configured' : ' · local mode'}</Text>
     </ScrollView>
   );
 };
