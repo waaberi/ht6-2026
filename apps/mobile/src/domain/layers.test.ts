@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  assertCurrentVersion,
   collectiveAdjustmentValues,
   commitVersion,
   emptyLayerStack,
@@ -10,6 +11,7 @@ import {
   restoreVersion,
   setCollectiveAdjustments,
   setLayerOpacity,
+  StalePhotoVersionError,
 } from './layers';
 import type { PhotoRecord } from './types';
 
@@ -59,6 +61,17 @@ test('restoring history creates a new current version and keeps intervening hist
   assert.equal(restored.currentVersionId, 'restore');
   assert.equal(restored.versions[2].restoredFromVersionId, 'original');
   assert.equal(restored.versions[2].parentVersionId, 'edit');
+});
+
+test('delayed edits cannot commit against a stale photo version', () => {
+  const original = photoFixture();
+  const edited = commitVersion(original, 'manual-edit', emptyLayerStack(), 'Manual edit');
+
+  assert.equal(assertCurrentVersion(edited, 'manual-edit').id, 'manual-edit');
+  assert.throws(
+    () => assertCurrentVersion(edited, 'original'),
+    (error) => error instanceof StalePhotoVersionError,
+  );
 });
 
 test('collective adjustments fold legacy global layers without touching advanced layers', () => {

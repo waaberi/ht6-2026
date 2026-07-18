@@ -34,3 +34,8 @@ test('uses a saved fallback only when the launcher and environment have no URL',
 test('returns an empty URL when no source is configured', () => {
   assert.equal(resolveApiUrl(undefined, undefined, '  '), '');
 });
+
+test('rejects build placeholders and malformed endpoints', () => {
+  assert.equal(resolveApiUrl(undefined, 'https://replace-with-exposure-api.example.com', undefined), '');
+  assert.equal(resolveApiUrl(undefined, 'api.internal:8000', undefined), '');
+});

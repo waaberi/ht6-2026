@@ -50,7 +50,8 @@
         }
       ],
       "./plugins/withAndroidNinja",
-      "./plugins/withAndroidCleartextTraffic"
+      "./plugins/withAndroidCleartextTraffic",
+      "expo-video"
     ]
   }
 }

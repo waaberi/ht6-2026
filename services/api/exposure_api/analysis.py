@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import io
+import hashlib
+import json
 import math
-import uuid
 from typing import Any
 
 import numpy as np
 from PIL import Image, ImageOps
 
 from .models import (
+    AnalysisSignal,
     AnalysisResult,
-    CameraRecommendation,
     Fix,
     Issue,
     LightingAnalysis,
@@ -34,6 +35,24 @@ def _number(value: Any) -> float | None:
         return None
 
 
+def _stable_issue_id(
+    namespace: str,
+    identity: str,
+    evidence: dict[str, float | str | bool | None],
+    location: Region,
+) -> str:
+    payload = json.dumps(
+        {
+            "identity": identity,
+            "evidence": evidence,
+            "location": location.model_dump(mode="json", by_alias=True, exclude_none=True),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"{namespace}-{hashlib.sha256(payload.encode()).hexdigest()[:20]}"
+
+
 def _issue(
     category: str,
     title: str,
@@ -45,9 +64,11 @@ def _issue(
     *,
     location: Region = FULL_FRAME,
     fix: Fix | None = None,
+    id_namespace: str = "semantic",
+    identity: str | None = None,
 ) -> Issue:
     return Issue(
-        id=str(uuid.uuid4()),
+        id=_stable_issue_id(id_namespace, identity or title, evidence, location),
         category=category,
         title=title,
         explanation=explanation,
@@ -56,6 +77,28 @@ def _issue(
         confidence=max(0, min(1, confidence)),
         location=location,
         recommended_action=action,
+        fix=fix,
+    )
+
+
+def _signal(
+    signal_key: str,
+    category: str,
+    evidence: dict[str, float | str | bool | None],
+    severity: float,
+    confidence: float,
+    *,
+    location: Region = FULL_FRAME,
+    fix: Fix | None = None,
+) -> AnalysisSignal:
+    return AnalysisSignal(
+        id=_stable_issue_id("signal", signal_key, evidence, location),
+        signal_key=signal_key,
+        category=category,
+        evidence=evidence,
+        severity=max(0, min(1, severity)),
+        confidence=max(0, min(1, confidence)),
+        location=location,
         fix=fix,
     )
 
@@ -160,7 +203,10 @@ def analyze_deterministic(
         for tx in (1 / 3, 2 / 3)
         for ty in (1 / 3, 2 / 3)
     )
-    symmetry = float(np.mean(np.abs(luminance[:, : image.width // 2] - np.fliplr(luminance[:, -image.width // 2 :]))))
+    symmetry_half_width = max(1, image.width // 2)
+    left_half = luminance[:, :symmetry_half_width]
+    right_half = luminance[:, image.width - symmetry_half_width:]
+    symmetry = float(np.mean(np.abs(left_half - np.fliplr(right_half))))
     edge_threshold = np.percentile(edges, 82)
     occupied_ratio = float(np.mean(edges >= edge_threshold))
     half_height = max(1, image.height // 2)
@@ -205,71 +251,63 @@ def analyze_deterministic(
         "brightestLightingDirection": brightest_direction,
         "borderOutlierRatio": round(border_outlier_ratio, 5),
     }
-    issues: list[Issue] = []
+    signals: list[AnalysisSignal] = []
 
     if mean_luminance < 0.28:
         severity = min(1, (0.34 - mean_luminance) / 0.28)
-        issues.append(_issue("lighting", "Frame is underexposed", "Most tones sit below the useful midtone range.", {"meanLuminance": mean_luminance}, severity, 0.94, "Lift exposure while watching bright areas.", fix=Fix(kind="adjustment", adjustments={"exposure": min(0.8, 0.45 - mean_luminance)})))
+        signals.append(_signal("luminance.below-threshold", "lighting", {"meanLuminance": mean_luminance, "threshold": 0.28}, severity, 0.94, fix=Fix(kind="adjustment", adjustments={"exposure": min(0.8, 0.45 - mean_luminance)})))
     elif mean_luminance > 0.72:
         severity = min(1, (mean_luminance - 0.66) / 0.28)
-        issues.append(_issue("lighting", "Frame is very bright", "The tonal center is high enough to reduce highlight detail.", {"meanLuminance": mean_luminance}, severity, 0.9, "Lower exposure before recovering highlights.", fix=Fix(kind="adjustment", adjustments={"exposure": max(-0.8, 0.55 - mean_luminance)})))
+        signals.append(_signal("luminance.above-threshold", "lighting", {"meanLuminance": mean_luminance, "threshold": 0.72}, severity, 0.9, fix=Fix(kind="adjustment", adjustments={"exposure": max(-0.8, 0.55 - mean_luminance)})))
 
     if clipped_highlights > 0.012:
-        issues.append(_issue("lighting", "Highlights are clipped", "Bright pixels have reached the file limit and may contain no recoverable detail.", {"clippedHighlights": clipped_highlights}, min(1, clipped_highlights * 8), 0.99, "Reduce exposure or highlights; reshoot if the clipped area is important.", fix=Fix(kind="adjustment", adjustments={"highlights": -min(0.75, clipped_highlights * 5)})))
+        signals.append(_signal("luminance.highlight-clipping", "lighting", {"clippedHighlights": clipped_highlights, "threshold": 0.012}, min(1, clipped_highlights * 8), 0.99, fix=Fix(kind="adjustment", adjustments={"highlights": -min(0.75, clipped_highlights * 5)})))
     if clipped_shadows > 0.06:
-        issues.append(_issue("lighting", "Shadows are blocked", "A meaningful part of the frame is at or near black.", {"clippedShadows": clipped_shadows}, min(1, clipped_shadows * 3), 0.98, "Open shadows selectively and check noise before committing.", fix=Fix(kind="adjustment", adjustments={"shadows": min(0.7, clipped_shadows * 3)})))
+        signals.append(_signal("luminance.shadow-clipping", "lighting", {"clippedShadows": clipped_shadows, "threshold": 0.06}, min(1, clipped_shadows * 3), 0.98, fix=Fix(kind="adjustment", adjustments={"shadows": min(0.7, clipped_shadows * 3)})))
     if contrast < 0.12:
-        issues.append(_issue("color", "Low tonal separation", "The luminance distribution is compressed, so adjacent forms may merge.", {"contrastStd": contrast}, min(1, (0.14 - contrast) * 5), 0.86, "Add a small contrast curve rather than crushing the endpoints.", fix=Fix(kind="adjustment", adjustments={"contrast": 0.12})))
+        signals.append(_signal("luminance.low-contrast", "color", {"contrastStd": contrast, "threshold": 0.12}, min(1, (0.14 - contrast) * 5), 0.86, fix=Fix(kind="adjustment", adjustments={"contrast": 0.12})))
     if sharpness < 0.0012:
-        issues.append(_issue("focus", "Low edge sharpness", "High-frequency detail is weak across the analysis proxy; focus error or motion may be responsible.", {"laplacianVariance": sharpness}, min(1, (0.0015 - sharpness) * 500), 0.84, "Inspect the intended subject at 100%. If it is soft, stabilize and retake.", location=subject, fix=Fix(kind="retake")))
+        signals.append(_signal("detail.low-edge-variance", "focus", {"laplacianVariance": sharpness, "threshold": 0.0012}, min(1, (0.0015 - sharpness) * 500), 0.84, location=subject, fix=Fix(kind="retake")))
     if max(abs(float(value)) for value in color_cast) > 0.045:
-        dominant = ("red", "green", "blue")[int(np.argmax(np.abs(color_cast)))]
-        issues.append(_issue("color", "Visible color cast", f"The {dominant} channel departs from the channel average.", {"redCast": float(color_cast[0]), "greenCast": float(color_cast[1]), "blueCast": float(color_cast[2])}, min(1, max(abs(float(value)) for value in color_cast) * 5), 0.78, "Correct temperature and tint while protecting deliberate ambient color.", fix=Fix(kind="adjustment", adjustments={"temperature": float(-color_cast[0] + color_cast[2])})))
+        signals.append(_signal("color.channel-mean-deviation", "color", {"redCast": float(color_cast[0]), "greenCast": float(color_cast[1]), "blueCast": float(color_cast[2]), "threshold": 0.045}, min(1, max(abs(float(value)) for value in color_cast) * 5), 0.78, fix=Fix(kind="adjustment", adjustments={"temperature": float(-color_cast[0] + color_cast[2])})))
     if thirds_distance > 0.24 and symmetry > 0.09:
-        issues.append(_issue("composition", "Subject lacks a clear anchor", "The strongest edge cluster is neither near a thirds intersection nor supported by strong symmetry.", {"thirdsDistance": thirds_distance, "mirrorDifference": symmetry}, min(1, thirds_distance), 0.63, "Try a reversible crop that gives the main subject a deliberate anchor.", location=subject, fix=Fix(kind="crop")))
+        signals.append(_signal("composition.edge-cluster-offset", "composition", {"thirdsDistance": thirds_distance, "thirdsThreshold": 0.24, "mirrorDifference": symmetry, "symmetryThreshold": 0.09}, min(1, thirds_distance), 0.63, location=subject, fix=Fix(kind="crop")))
     if abs(line_tilt) > 3.0 and line_confidence > 0.08:
-        issues.append(_issue(
+        signals.append(_signal(
+            "composition.dominant-line-offset",
             "composition",
-            "Strong lines appear tilted",
-            "The dominant high-contrast line family is measurably offset from its nearest horizontal or vertical axis.",
-            {"estimatedTiltDegrees": line_tilt, "lineOrientationConfidence": line_confidence},
+            {"estimatedTiltDegrees": line_tilt, "lineOrientationConfidence": line_confidence, "tiltThresholdDegrees": 3.0},
             min(1, abs(line_tilt) / 15),
             min(0.9, 0.55 + line_confidence),
-            "Straighten only if the tilt does not support the apparent intent.",
             fix=Fix(kind="transform", canvas_transform={"rotationDegrees": line_tilt}),
         ))
     if illumination_unevenness > 0.26:
         darkest_index = int(np.argmin(quadrant_means))
         dark_x = 0 if darkest_index % 2 == 0 else 0.5
         dark_y = 0 if darkest_index < 2 else 0.5
-        issues.append(_issue(
+        signals.append(_signal(
+            "lighting.quadrant-unevenness",
             "lighting",
-            "Illumination is uneven",
-            "Large image quadrants differ enough in luminance to pull attention toward the brightest side.",
-            {"illuminationUnevenness": illumination_unevenness, "brightestDirection": brightest_direction},
+            {"illuminationUnevenness": illumination_unevenness, "brightestDirection": brightest_direction, "threshold": 0.26},
             min(1, illumination_unevenness),
             0.72,
-            "Use fill or a masked exposure lift if the darker area contains the subject.",
             location=Region(x=dark_x, y=dark_y, width=0.5, height=0.5),
             fix=Fix(kind="masked-adjustment", adjustments={"exposure": min(0.35, illumination_unevenness * 0.7)}),
         ))
     if border_outlier_ratio > 1.65 and border_peak > 0.12:
         border_values = np.where(border_mask, saliency, -1)
         peak_y, peak_x = np.unravel_index(int(np.argmax(border_values)), border_values.shape)
-        issues.append(_issue(
+        signals.append(_signal(
+            "composition.border-saliency-outlier",
             "distraction",
-            "Bright edge detail competes with the subject",
-            "A saliency outlier touches the frame edge and may pull the eye out of the composition.",
-            {"borderOutlierRatio": border_outlier_ratio},
+            {"borderOutlierRatio": border_outlier_ratio, "threshold": 1.65},
             min(1, (border_outlier_ratio - 1) / 1.5),
             0.7,
-            "Inspect the marked edge; crop it or use a localized retouch only if it is accidental.",
             location=_region_around_pixel(int(peak_x), int(peak_y), image.width, image.height),
             fix=Fix(kind="retouch"),
         ))
 
     exif = supplied_exif or {}
-    recommendations: list[CameraRecommendation] = []
     iso = _number(exif.get("ISO") or exif.get("ISOSpeedRatings") or exif.get("PhotographicSensitivity"))
     aperture = _number(exif.get("FNumber"))
     shutter = _number(exif.get("ExposureTime"))
@@ -292,30 +330,16 @@ def analyze_deterministic(
         value = next((exif.get(key) for key in keys if exif.get(key)), None)
         if value is not None:
             metrics[metric_name] = str(value)[:160]
-    if sharpness < 0.0012:
-        recommendations.append(CameraRecommendation(setting="stability", value="Brace or use a tripod", explanation="The proxy has weak edge definition. Stability is the first change that does not require an invented exposure value.", based_on=["sharpnessLaplacianVariance"]))
-        if shutter is not None and focal_length is not None and focal_length > 0:
-            denominator = max(30, round(focal_length * 2))
-            if shutter > 1 / denominator:
-                recommendations.append(CameraRecommendation(setting="shutter", value=f"1/{denominator} s or faster", explanation="The supplied shutter time is slow relative to the supplied focal length. Raising shutter speed may require more light, a wider aperture, or higher ISO.", based_on=["EXIF.ExposureTime", "EXIF.FocalLength", "sharpnessLaplacianVariance"]))
-    if clipped_highlights > 0.012:
-        recommendations.append(CameraRecommendation(setting="lighting", value="Reduce highlight intensity", explanation="Diffuse, move, or lower the brightest source before changing the scene's intent.", based_on=["clippedHighlights"]))
-    if iso is not None and iso >= 1600 and noise > 0.012:
-        recommendations.append(CameraRecommendation(setting="iso", value=f"Below ISO {int(iso)} if motion permits", explanation="The supplied EXIF reports high ISO and the image shows high-frequency noise. A slower shutter requires stabilization.", based_on=["EXIF.ISO", "estimatedNoise"]))
-
-    if issues:
-        ordered = sorted(issues, key=lambda item: item.severity * item.confidence, reverse=True)
-        summary = f"The highest-impact finding is {ordered[0].title.lower()}. {len(issues)} evidence-backed item{'s' if len(issues) != 1 else ''} are localized below."
-    else:
-        summary = "No strong technical fault crossed the deterministic thresholds. Preserve the intent and use small, reversible changes."
+    summary = "Measurements ready. AI unavailable."
 
     return AnalysisResult(
         version_id=version_id,
         checksum=checksum,
         metrics=metrics,
         lighting=LightingAnalysis(exposure=mean_luminance - 0.5, contrast=contrast, clipped_shadows=clipped_shadows, clipped_highlights=clipped_highlights, color_cast={"red": float(color_cast[0]), "green": float(color_cast[1]), "blue": float(color_cast[2])}),
-        issues=sorted(issues, key=lambda item: item.severity * item.confidence, reverse=True),
-        camera_recommendations=recommendations,
+        signals=sorted(signals, key=lambda item: item.severity * item.confidence, reverse=True),
+        issues=[],
+        camera_recommendations=[],
         summary=summary,
     )
 
@@ -323,23 +347,61 @@ def analyze_deterministic(
 def merge_semantic(result: AnalysisResult, semantic: SemanticAnalysis | None, model: str | None) -> AnalysisResult:
     if semantic is None:
         return result
+    known_references = {
+        *(f"metrics.{key}" for key in result.metrics),
+        *(f"signals.{signal.id}" for signal in result.signals),
+    }
+    assessments = {assessment.signal_id: assessment for assessment in semantic.assessments}
+    assessed_issues: list[Issue] = []
+    for signal in result.signals:
+        assessment = assessments.get(signal.id)
+        if assessment is None:
+            continue
+        signal_reference = f"signals.{signal.id}"
+        if (
+            signal_reference not in assessment.based_on
+            or any(reference not in known_references for reference in assessment.based_on)
+        ):
+            continue
+        assessed_issues.append(Issue(
+            id=signal.id,
+            category=assessment.category,
+            title=assessment.title,
+            explanation=assessment.explanation,
+            evidence={
+                **signal.evidence,
+                "signalKey": signal.signal_key,
+                "semanticDisposition": assessment.disposition,
+                "semanticConfidence": assessment.confidence,
+            },
+            severity=signal.severity,
+            confidence=min(signal.confidence, assessment.confidence),
+            location=signal.location,
+            recommended_action=assessment.recommended_action,
+            fix=signal.fix if assessment.disposition == "support" else None,
+        ))
+
     semantic_issues: list[Issue] = []
     for finding in semantic.issues:
-        ymin, xmin, ymax, xmax = (max(0, min(1000, value)) for value in finding.box_2d)
-        if ymax <= ymin or xmax <= xmin:
+        if any(reference not in known_references for reference in finding.based_on):
             continue
+        ymin, xmin, ymax, xmax = finding.box_2d
         semantic_issues.append(_issue(
             finding.category,
             finding.title,
             finding.explanation,
-            {"source": "gemini", "apparentIntent": semantic.apparent_intent},
-            finding.severity,
+            {
+                "source": "gemini",
+                "basedOn": ",".join(finding.based_on),
+            },
+            finding.confidence,
             finding.confidence,
             finding.recommended_action,
             location=Region(x=xmin / 1000, y=ymin / 1000, width=(xmax - xmin) / 1000, height=(ymax - ymin) / 1000),
+            id_namespace="semantic",
         ))
     return result.model_copy(update={
         "semantic_model": model,
         "summary": semantic.summary,
-        "issues": sorted([*result.issues, *semantic_issues], key=lambda item: item.severity * item.confidence, reverse=True),
+        "issues": sorted([*assessed_issues, *semantic_issues], key=lambda item: item.severity * item.confidence, reverse=True),
     })

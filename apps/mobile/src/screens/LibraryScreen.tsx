@@ -5,6 +5,7 @@ import * as ImagePicker from 'expo-image-picker';
 import React, { useMemo, useState } from 'react';
 import {
   AccessibilityInfo,
+  ActivityIndicator,
   Alert,
   Image,
   Pressable,
@@ -207,10 +208,10 @@ export const LibraryScreen = ({ onOpenStudio, onOpenCamera }: LibraryScreenProps
         title={view === 'select' ? 'Select' : 'Library'}
         detail={headerDetail}
         actions={photos.length ? view === 'select' ? [
+          ...(selection.length ? [{ label: 'Clear selection', icon: 'remove-circle-outline' as const, onPress: () => setSelection([]) }] : []),
           { label: 'Cancel selection', icon: 'close', onPress: leaveSelection },
         ] : [
           { label: 'Select photos', icon: 'checkmark-circle-outline', onPress: enterSelection },
-          { label: 'Import photo', icon: 'add', onPress: showImportMenu, busy: importing, tone: 'primary' as const },
         ] : undefined}
       />
 
@@ -247,29 +248,14 @@ export const LibraryScreen = ({ onOpenStudio, onOpenCamera }: LibraryScreenProps
         />
       ) : (
         <View style={styles.browser}>
-          {view === 'select' ? (
-            <View style={styles.selectionHeader}>
-              <Text style={styles.instruction}>Choose photos</Text>
-              {selection.length ? (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="Clear selection"
-                  onPress={() => setSelection([])}
-                  style={({ pressed }) => [styles.clearButton, pressed && styles.pressed]}
-                >
-                  <Text style={styles.clearLabel}>Clear</Text>
-                </Pressable>
-              ) : null}
-            </View>
-          ) : null}
-          {notice ? <Text accessibilityLiveRegion="polite" style={styles.notice}>{notice}</Text> : null}
-          {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
+          {notice ? <Text accessibilityLiveRegion="polite" numberOfLines={2} style={styles.notice}>{notice}</Text> : null}
+          {error ? <Text accessibilityRole="alert" numberOfLines={3} style={styles.error}>{error}</Text> : null}
           <FlashList
             key={`library-${view}-${columnCount}`}
             data={photos}
             extraData={selection}
             numColumns={columnCount}
-            contentContainerStyle={[styles.grid, view === 'select' && styles.selectionGrid]}
+            contentContainerStyle={[styles.grid, view === 'select' && styles.selectionGrid, view === 'browse' && styles.browseGrid]}
             keyExtractor={(item) => item.id}
             renderItem={({ item }) => (
               <PhotoTile
@@ -284,6 +270,19 @@ export const LibraryScreen = ({ onOpenStudio, onOpenCamera }: LibraryScreenProps
         </View>
       )}
 
+      {photos.length > 0 && view === 'browse' ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Import photo"
+          accessibilityState={{ disabled: importing, busy: importing }}
+          disabled={importing}
+          onPress={showImportMenu}
+          style={({ pressed }) => [styles.importFab, pressed && styles.pressed, importing && styles.disabled]}
+        >
+          {importing ? <ActivityIndicator color={colors.onPrimary} /> : <Ionicons name="add" size={28} color={colors.onPrimary} />}
+        </Pressable>
+      ) : null}
+
       {photos.length > 0 && view === 'select' ? (
         <StickyActionBar>
           <View style={styles.taskActions}>
@@ -297,8 +296,8 @@ export const LibraryScreen = ({ onOpenStudio, onOpenCamera }: LibraryScreenProps
             >
               <Ionicons name="trash-outline" size={22} color={colors.danger} />
             </Pressable>
-            <ActionButton label="Portfolio" icon="albums-outline" style={styles.taskAction} onPress={() => void runPortfolioReview()} disabled={selection.length < 2 || Boolean(busy)} loading={busy === 'portfolio'} />
-            <ActionButton label="Look" icon="color-palette-outline" variant="tonal" style={styles.taskAction} onPress={() => void createLook()} disabled={selection.length < 3 || selection.length > 8 || Boolean(busy)} loading={busy === 'look'} />
+            <ActionButton label="Review 2+" accessibilityHint="Select at least two photos" icon="albums-outline" style={styles.taskAction} onPress={() => void runPortfolioReview()} disabled={selection.length < 2 || Boolean(busy)} loading={busy === 'portfolio'} />
+            <ActionButton label="Look 3–8" accessibilityHint="Select three to eight photos" icon="color-palette-outline" variant="tonal" style={styles.taskAction} onPress={() => void createLook()} disabled={selection.length < 3 || selection.length > 8 || Boolean(busy)} loading={busy === 'look'} />
           </View>
         </StickyActionBar>
       ) : null}
@@ -345,7 +344,7 @@ const PortfolioResult = ({ review, photoById, onReset }: {
 }) => (
   <ScrollView contentContainerStyle={styles.resultContent}>
     <Text accessibilityRole="header" style={styles.resultTitle}>Recommended order</Text>
-    {review.summary ? <Text style={styles.resultSummary}>{review.summary}</Text> : null}
+    {review.summary ? <Text numberOfLines={3} style={styles.resultSummary}>{review.summary}</Text> : null}
     <View style={styles.ranking}>
       {review.orderedPhotoIds.map((id, index) => {
         const photo = photoById.get(id);
@@ -354,7 +353,7 @@ const PortfolioResult = ({ review, photoById, onReset }: {
           <View key={id} style={styles.rankRow}>
             <Text style={styles.rankNumber}>{index + 1}</Text>
             <Image source={{ uri: photo.thumbnailUri }} style={styles.rankImage} accessible={false} />
-            <Text style={styles.rankText}>{review.explanations[id] ?? photo.originalName}</Text>
+            <Text numberOfLines={2} style={styles.rankText}>{review.explanations[id] ?? photo.originalName}</Text>
           </View>
         );
       })}
@@ -374,7 +373,7 @@ const LookResult = ({
 }) => (
   <ScrollView contentContainerStyle={styles.resultContent}>
     <Text accessibilityRole="header" style={styles.resultTitle}>{style.name}</Text>
-    {style.mood ? <Text style={styles.resultSummary}>{style.mood}</Text> : null}
+    {style.mood ? <Text numberOfLines={2} style={styles.resultSummary}>{style.mood}</Text> : null}
     <View style={styles.palette} accessibilityLabel={`${style.name} color palette`}>
       {style.palette.map((color, index) => (
         <View key={`${color}-${index}`} style={[styles.swatch, { backgroundColor: color }]} />
@@ -390,23 +389,6 @@ const LookResult = ({
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.background },
   browser: { flex: 1 },
-  selectionHeader: {
-    minHeight: layout.minTouchTarget,
-    paddingLeft: layout.screenPadding,
-    paddingRight: spacing.sm,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  instruction: { color: colors.textSecondary, ...typography.label },
-  clearButton: {
-    minWidth: layout.minTouchTarget,
-    minHeight: layout.minTouchTarget,
-    paddingHorizontal: spacing.sm,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  clearLabel: { color: colors.text, ...typography.label, fontWeight: '700' },
   notice: {
     color: colors.text,
     ...typography.label,
@@ -419,6 +401,7 @@ const styles = StyleSheet.create({
     marginBottom: spacing.sm,
   },
   grid: { paddingHorizontal: spacing.xxs, paddingBottom: spacing.md },
+  browseGrid: { paddingBottom: layout.stickyActionHeight + spacing.md },
   selectionGrid: { paddingBottom: layout.stickyActionHeight + spacing.md },
   tile: {
     flex: 1,
@@ -483,6 +466,18 @@ const styles = StyleSheet.create({
   palette: { height: 48, flexDirection: 'row', marginTop: spacing.lg, borderRadius: radii.sm, overflow: 'hidden' },
   swatch: { flex: 1 },
   taskActions: { flexDirection: 'row', gap: spacing.sm },
+  importFab: {
+    position: 'absolute',
+    right: layout.screenPadding,
+    bottom: spacing.md,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.primary,
+    zIndex: 10,
+  },
   deleteAction: {
     width: layout.minTouchTarget,
     minHeight: layout.minTouchTarget,

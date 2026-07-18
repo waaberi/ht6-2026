@@ -2,7 +2,12 @@ export const resolveApiUrl = (
   launcherUrl: string | undefined,
   configuredUrl: string | undefined,
   fallbackUrl: string | undefined,
-) => (launcherUrl?.trim() || configuredUrl?.trim() || fallbackUrl?.trim() || '').replace(/\/$/, '');
+) => {
+  const normalized = (launcherUrl?.trim() || configuredUrl?.trim() || fallbackUrl?.trim() || '').replace(/\/$/, '');
+  if (!/^https?:\/\//i.test(normalized)) return '';
+  if (/replace-with|your-api|example\.com/i.test(normalized)) return '';
+  return normalized;
+};
 
 export const apiErrorMessage = (body: string, status: number) => {
   try {

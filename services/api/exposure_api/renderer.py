@@ -1,12 +1,56 @@
 from __future__ import annotations
 
 import io
+import math
 from typing import Any
 
 import numpy as np
 from PIL import Image, ImageChops, ImageEnhance, ImageFilter, ImageOps
 
 from .models import LayerStack
+
+_EXPANSION_SIDES = ("top", "right", "bottom", "left")
+
+
+def resolve_canvas_expansion(
+    expansion: dict[str, Any] | None,
+    content_size: tuple[int, int],
+) -> dict[str, int]:
+    """Scale referenced insets to this render; preserve raw legacy pixels."""
+    source = expansion or {}
+    try:
+        reference_width = float(source.get("referenceWidth", 0))
+        reference_height = float(source.get("referenceHeight", 0))
+    except (TypeError, ValueError):
+        reference_width = reference_height = 0
+    has_reference = (
+        math.isfinite(reference_width)
+        and math.isfinite(reference_height)
+        and reference_width > 0
+        and reference_height > 0
+    )
+    horizontal_scale = content_size[0] / reference_width if has_reference else 1
+    vertical_scale = content_size[1] / reference_height if has_reference else 1
+    resolved: dict[str, int] = {}
+    for side in _EXPANSION_SIDES:
+        try:
+            value = max(0, float(source.get(side, 0)))
+        except (TypeError, ValueError):
+            value = 0
+        if has_reference:
+            value *= vertical_scale if side in {"top", "bottom"} else horizontal_scale
+            resolved[side] = max(0, round(value))
+        else:
+            resolved[side] = max(0, int(value))
+    return resolved
+
+
+def canvas_content_size(image_bytes: bytes, transform: dict[str, Any]) -> tuple[int, int]:
+    """Post-perspective/rotation/crop size before generative expansion."""
+    with Image.open(io.BytesIO(image_bytes)) as source:
+        image = ImageOps.exif_transpose(source).convert("RGB")
+    without_expansion = {key: value for key, value in transform.items() if key != "expansion"}
+    return _apply_canvas_transform(image, without_expansion).size
 
 
 def _adjust(image: Image.Image, values: dict[str, Any]) -> Image.Image:
@@ -83,6 +127,31 @@ def _mask_for(layer: dict[str, Any], size: tuple[int, int], assets: dict[str, by
     return Image.new("L", size, 255)
 
 
+def _overlay_alpha(
+    overlay: Image.Image,
+    layer: dict[str, Any],
+    assets: dict[str, bytes],
+    size: tuple[int, int],
+) -> Image.Image:
+    alpha = overlay.getchannel("A").resize(size, Image.Resampling.LANCZOS)
+    mask_id = layer.get("maskAssetId")
+    if mask_id and mask_id in assets:
+        supplied = Image.open(io.BytesIO(assets[mask_id])).convert("L").resize(size, Image.Resampling.LANCZOS)
+        if layer.get("type") == "generative-patch":
+            # Generative extraction embeds this same mask in patch alpha for
+            # immediate local preview and stores it separately for authoritative
+            # rendering. The stored mask replaces, rather than multiplies, the
+            # embedded copy so feathered edges are applied exactly once.
+            alpha = supplied
+        else:
+            alpha = Image.fromarray(
+                (np.asarray(alpha, dtype=np.float32) * np.asarray(supplied, dtype=np.float32) / 255).astype(np.uint8),
+                "L",
+            )
+    opacity = max(0, min(1, float(layer.get("opacity", 1))))
+    return alpha.point(lambda value: round(value * opacity))
+
+
 def _composite_asset(base: Image.Image, layer: dict[str, Any], assets: dict[str, bytes]) -> Image.Image:
     asset_id = layer.get("assetId") or layer.get("patchAssetId")
     if not asset_id or asset_id not in assets:
@@ -92,12 +161,7 @@ def _composite_asset(base: Image.Image, layer: dict[str, Any], assets: dict[str,
     if transform:
         overlay = _apply_canvas_transform(overlay, transform).convert("RGBA")
     overlay = overlay.resize(base.size, Image.Resampling.LANCZOS)
-    opacity = max(0, min(1, float(layer.get("opacity", 1))))
-    alpha = overlay.getchannel("A").point(lambda value: round(value * opacity))
-    mask_id = layer.get("maskAssetId")
-    if mask_id and mask_id in assets:
-        supplied = Image.open(io.BytesIO(assets[mask_id])).convert("L").resize(base.size, Image.Resampling.LANCZOS)
-        alpha = Image.fromarray((np.asarray(alpha, dtype=np.float32) * np.asarray(supplied, dtype=np.float32) / 255).astype(np.uint8), "L")
+    alpha = _overlay_alpha(overlay, layer, assets, base.size)
     overlay.putalpha(alpha)
     base_rgb = base.convert("RGB")
     overlay_rgb = overlay.convert("RGB")
@@ -118,51 +182,41 @@ def _composite_canvas_asset(
     layer: dict[str, Any],
     assets: dict[str, bytes],
     current_expansion: dict[str, Any],
+    content_size: tuple[int, int],
 ) -> Image.Image:
     asset_id = layer.get("patchAssetId")
     if not asset_id or asset_id not in assets:
         return base
     overlay = Image.open(io.BytesIO(assets[asset_id])).convert("RGBA")
-    opacity = max(0, min(1, float(layer.get("opacity", 1))))
-    alpha = overlay.getchannel("A").point(lambda value: round(value * opacity))
-    mask_id = layer.get("maskAssetId")
-    if mask_id and mask_id in assets:
-        supplied = Image.open(io.BytesIO(assets[mask_id])).convert("L").resize(overlay.size, Image.Resampling.LANCZOS)
-        alpha = Image.fromarray(
-            (np.asarray(alpha, dtype=np.float32) * np.asarray(supplied, dtype=np.float32) / 255).astype(np.uint8),
-            "L",
-        )
-    overlay.putalpha(alpha)
+    current_pixels = resolve_canvas_expansion(current_expansion, content_size)
     snapshot = layer.get("canvasExpansion") or current_expansion
-    x = int(current_expansion.get("left", 0)) - int(snapshot.get("left", 0))
-    y = int(current_expansion.get("top", 0)) - int(snapshot.get("top", 0))
+    snapshot_pixels = resolve_canvas_expansion(snapshot, content_size)
+    snapshot_size = (
+        content_size[0] + snapshot_pixels["left"] + snapshot_pixels["right"],
+        content_size[1] + snapshot_pixels["top"] + snapshot_pixels["bottom"],
+    )
+    overlay = overlay.resize(snapshot_size, Image.Resampling.LANCZOS)
+    alpha = _overlay_alpha(overlay, layer, assets, snapshot_size)
+    overlay.putalpha(alpha)
+    x = current_pixels["left"] - snapshot_pixels["left"]
+    y = current_pixels["top"] - snapshot_pixels["top"]
     canvas = Image.new("RGBA", base.size, (0, 0, 0, 0))
     canvas.alpha_composite(overlay, (x, y))
     return Image.alpha_composite(base.convert("RGBA"), canvas).convert("RGB")
 
 
-def _apply_canvas_transform(image: Image.Image, transform: dict[str, Any]) -> Image.Image:
+def _quarter_turns_for_rotation(rotation: float) -> int:
+    turns = rotation / 90
+    nearest = math.floor(turns + 0.5)
+    if abs(abs(turns - nearest) - 0.5) < 1e-9:
+        return math.trunc(turns)
+    return nearest
+
+
+def _apply_rotation(image: Image.Image, rotation: float) -> Image.Image:
     result = image
-    perspective = transform.get("perspective")
-    if isinstance(perspective, list) and len(perspective) == 9 and perspective != [1, 0, 0, 0, 1, 0, 0, 0, 1]:
-        matrix = np.asarray(perspective, dtype=np.float64).reshape(3, 3)
-        try:
-            inverse = np.linalg.inv(matrix)
-            inverse /= inverse[2, 2]
-            coefficients = tuple(inverse.reshape(-1)[:8])
-            result = result.transform(result.size, Image.Transform.PERSPECTIVE, coefficients, resample=Image.Resampling.BICUBIC)
-        except np.linalg.LinAlgError:
-            pass
-    crop = transform.get("crop")
-    if crop:
-        left = max(0, min(result.width - 1, round(float(crop.get("x", 0)) * result.width)))
-        top = max(0, min(result.height - 1, round(float(crop.get("y", 0)) * result.height)))
-        right = max(left + 1, min(result.width, round((float(crop.get("x", 0)) + float(crop.get("width", 1))) * result.width)))
-        bottom = max(top + 1, min(result.height, round((float(crop.get("y", 0)) + float(crop.get("height", 1))) * result.height)))
-        result = result.crop((left, top, right, bottom))
-    rotation = float(transform.get("rotationDegrees", 0))
     if rotation:
-        quarter_turns = round(rotation / 90)
+        quarter_turns = _quarter_turns_for_rotation(rotation)
         quarter_degrees = quarter_turns * 90
         straighten = rotation - quarter_degrees
         if quarter_turns % 4:
@@ -181,9 +235,39 @@ def _apply_canvas_transform(image: Image.Image, transform: dict[str, Any]) -> Im
             left = max(0, (rotated.width - width) // 2)
             top = max(0, (rotated.height - height) // 2)
             result = rotated.crop((left, top, left + width, top + height))
+    return result
+
+
+def _apply_canvas_transform(image: Image.Image, transform: dict[str, Any]) -> Image.Image:
+    result = image
+    perspective = transform.get("perspective")
+    if isinstance(perspective, list) and len(perspective) == 9 and perspective != [1, 0, 0, 0, 1, 0, 0, 0, 1]:
+        matrix = np.asarray(perspective, dtype=np.float64).reshape(3, 3)
+        try:
+            inverse = np.linalg.inv(matrix)
+            inverse /= inverse[2, 2]
+            coefficients = tuple(inverse.reshape(-1)[:8])
+            result = result.transform(result.size, Image.Transform.PERSPECTIVE, coefficients, resample=Image.Resampling.BICUBIC)
+        except np.linalg.LinAlgError:
+            pass
+    result = _apply_rotation(result, float(transform.get("rotationDegrees", 0)))
+    # Crop coordinates are normalized to the visible canvas after rotation and
+    # before expansion. Keep this order in parity with the mobile preview.
+    crop = transform.get("crop")
+    if crop:
+        left = max(0, min(result.width - 1, round(float(crop.get("x", 0)) * result.width)))
+        top = max(0, min(result.height - 1, round(float(crop.get("y", 0)) * result.height)))
+        right = max(left + 1, min(result.width, round((float(crop.get("x", 0)) + float(crop.get("width", 1))) * result.width)))
+        bottom = max(top + 1, min(result.height, round((float(crop.get("y", 0)) + float(crop.get("height", 1))) * result.height)))
+        result = result.crop((left, top, right, bottom))
     expansion = transform.get("expansion")
     if expansion:
-        result = ImageOps.expand(result, border=(int(expansion.get("left", 0)), int(expansion.get("top", 0)), int(expansion.get("right", 0)), int(expansion.get("bottom", 0))), fill="black")
+        pixels = resolve_canvas_expansion(expansion, result.size)
+        result = ImageOps.expand(
+            result,
+            border=(pixels["left"], pixels["top"], pixels["right"], pixels["bottom"]),
+            fill="black",
+        )
     return result
 
 
@@ -192,8 +276,11 @@ def render_layer_stack(image_bytes: bytes, stack: LayerStack, assets: dict[str, 
     with Image.open(io.BytesIO(image_bytes)) as source:
         rendered = ImageOps.exif_transpose(source).convert("RGB")
     canvas_applied = False
-    adjustments_applied = False
     current_expansion = stack.canvas_transform.get("expansion") or {}
+    content_size = _apply_canvas_transform(
+        rendered,
+        {key: value for key, value in stack.canvas_transform.items() if key != "expansion"},
+    ).size
     for layer in stack.layers:
         if not layer.get("enabled", True):
             continue
@@ -202,10 +289,7 @@ def render_layer_stack(image_bytes: bytes, stack: LayerStack, assets: dict[str, 
             if not canvas_applied:
                 rendered = _apply_canvas_transform(rendered, stack.canvas_transform)
                 canvas_applied = True
-            if stack.adjustments and not adjustments_applied:
-                rendered = _adjust(rendered, stack.adjustments)
-                adjustments_applied = True
-            rendered = _composite_canvas_asset(rendered, layer, assets, current_expansion)
+            rendered = _composite_canvas_asset(rendered, layer, assets, current_expansion, content_size)
             continue
         opacity = max(0, min(1, float(layer.get("opacity", 1))))
         if layer_type in {"adjustment", "style"}:
@@ -223,7 +307,10 @@ def render_layer_stack(image_bytes: bytes, stack: LayerStack, assets: dict[str, 
             rendered = _composite_asset(rendered, layer, assets)
     if not canvas_applied:
         rendered = _apply_canvas_transform(rendered, stack.canvas_transform)
-    if stack.adjustments and not adjustments_applied:
+    # Collective sliders are a photo-wide final composition stage, not an
+    # ordered layer. Running them after transforms and every layer guarantees
+    # that manual and Coach global targets also affect generated canvas pixels.
+    if stack.adjustments:
         rendered = _adjust(rendered, stack.adjustments)
     return rendered
 

@@ -12,11 +12,10 @@ type LooksPanelProps = {
   strength: number;
   loading: boolean;
   busy: boolean;
-  canApply: boolean;
   canRestore: boolean;
   onSelect: (look: SavedStyleProfile) => void;
   onStrengthChange: (strength: number) => void;
-  onApply: () => void;
+  onStrengthCommit: (strength: number) => void;
   onRestore: () => void;
 };
 
@@ -26,11 +25,10 @@ export const LooksPanel = ({
   strength,
   loading,
   busy,
-  canApply,
   canRestore,
   onSelect,
   onStrengthChange,
-  onApply,
+  onStrengthCommit,
   onRestore,
 }: LooksPanelProps) => {
   const selectedLook = looks.find((look) => look.id === selectedLookId);
@@ -46,24 +44,26 @@ export const LooksPanel = ({
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.looks}
       >
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Restore original look"
-          accessibilityState={{ selected: !selectedLookId, disabled: busy || !canRestore }}
-          disabled={busy || !canRestore}
-          onPress={onRestore}
-          style={({ pressed }) => [
-            styles.look,
-            !selectedLookId && styles.lookSelected,
-            !canRestore && styles.lookDisabled,
-            pressed && styles.pressed,
-          ]}
-        >
-          <View style={styles.originalPreview}>
-            <MaterialCommunityIcons name="image-off-outline" size={22} color={colors.textSecondary} />
-          </View>
-          <Text numberOfLines={1} style={[styles.lookName, !selectedLookId && styles.lookNameSelected]}>Original</Text>
-        </Pressable>
+        {looks.length > 0 || canRestore ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Restore original look"
+            accessibilityState={{ selected: !selectedLookId, disabled: busy || !canRestore }}
+            disabled={busy || !canRestore}
+            onPress={onRestore}
+            style={({ pressed }) => [
+              styles.look,
+              !selectedLookId && styles.lookSelected,
+              !canRestore && styles.lookDisabled,
+              pressed && styles.pressed,
+            ]}
+          >
+            <View style={styles.originalPreview}>
+              <MaterialCommunityIcons name="image-off-outline" size={22} color={colors.textSecondary} />
+            </View>
+            <Text numberOfLines={1} style={[styles.lookName, !selectedLookId && styles.lookNameSelected]}>Original</Text>
+          </Pressable>
+        ) : null}
 
         {looks.map((look) => {
           const selected = look.id === selectedLookId;
@@ -94,7 +94,10 @@ export const LooksPanel = ({
         <View style={styles.controls}>
           <View style={styles.strengthHeader}>
             <Text style={styles.strengthLabel}>Strength</Text>
-            <Text style={styles.strengthValue}>{Math.round(strength * 100)}%</Text>
+            <View style={styles.strengthStatus}>
+              {busy ? <ActivityIndicator size="small" color={colors.primary} /> : null}
+              <Text style={styles.strengthValue}>{Math.round(strength * 100)}%</Text>
+            </View>
           </View>
           <Slider
             accessibilityLabel={`${selectedLook.name} strength`}
@@ -110,27 +113,12 @@ export const LooksPanel = ({
             step={0.01}
             value={strength}
             onValueChange={onStrengthChange}
+            onSlidingComplete={onStrengthCommit}
             minimumTrackTintColor={colors.primary}
             maximumTrackTintColor={colors.outlineStrong}
             thumbTintColor={colors.text}
             disabled={busy}
           />
-          <Pressable
-            accessibilityRole="button"
-            accessibilityState={{ disabled: !canApply || busy }}
-            disabled={!canApply || busy}
-            onPress={onApply}
-            style={({ pressed }) => [styles.apply, (!canApply || busy) && styles.applyDisabled, pressed && styles.pressed]}
-          >
-            {busy ? (
-              <ActivityIndicator size="small" color={colors.onPrimary} />
-            ) : (
-              <>
-                <MaterialCommunityIcons name="check" size={20} color={colors.onPrimary} />
-                <Text style={styles.applyLabel}>Apply</Text>
-              </>
-            )}
-          </Pressable>
         </View>
       ) : null}
     </>
@@ -143,13 +131,13 @@ const styles = StyleSheet.create({
   look: {
     width: 104,
     minHeight: 78,
-    padding: 8,
-    borderWidth: 1,
+    padding: 7,
+    borderWidth: 2,
     borderColor: colors.outline,
     borderRadius: 10,
     backgroundColor: colors.surface,
   },
-  lookSelected: { borderColor: colors.primary, borderWidth: 2, padding: 7 },
+  lookSelected: { borderColor: colors.primary },
   lookDisabled: { opacity: 0.46 },
   palette: { height: 36, flexDirection: 'row', overflow: 'hidden', borderRadius: 6 },
   swatch: { flex: 1 },
@@ -165,19 +153,9 @@ const styles = StyleSheet.create({
   empty: { color: colors.textSecondary, fontSize: 13, textAlign: 'center', paddingVertical: 24 },
   controls: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.outline, paddingTop: 14 },
   strengthHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  strengthStatus: { minWidth: 60, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 6 },
   strengthLabel: { color: colors.text, fontSize: 13, fontWeight: '700' },
   strengthValue: { color: colors.textSecondary, fontSize: 12, fontVariant: ['tabular-nums'] },
   slider: { width: '100%', height: 48 },
-  apply: {
-    minHeight: 48,
-    flexDirection: 'row',
-    gap: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 8,
-    backgroundColor: colors.primary,
-  },
-  applyDisabled: { opacity: 0.42 },
-  applyLabel: { color: colors.onPrimary, fontSize: 13, fontWeight: '800' },
   pressed: { opacity: 0.72 },
 });

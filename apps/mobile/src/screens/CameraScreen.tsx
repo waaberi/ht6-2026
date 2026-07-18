@@ -254,7 +254,6 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
       <View style={[styles.permission, { paddingTop: insets.top + 24, paddingBottom: insets.bottom + 24 }]}>
         <MaterialCommunityIcons name="camera-outline" size={42} color={colors.lime} />
         <Text style={styles.permissionTitle}>Camera access</Text>
-        <Text style={styles.permissionBody}>Allow access to take photos. You can still import from your library.</Text>
         <Pressable
           accessibilityRole="button"
           style={({ pressed }) => [styles.primaryButton, pressed && styles.pressed]}
@@ -330,7 +329,7 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
       ) : null}
 
       <View style={[styles.bottomPanel, { paddingBottom: panelBottomPadding }]}>
-        {error ? <Text accessibilityLiveRegion="polite" style={styles.error}>{error}</Text> : null}
+        {error ? <Text accessibilityLiveRegion="polite" numberOfLines={2} style={styles.error}>{error}</Text> : null}
 
         <View style={styles.zoomRow}>
           <MaterialCommunityIcons name="magnify-minus-outline" size={20} color={colors.muted} />
@@ -402,7 +401,7 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={cameraPreferences.timerSeconds ? `Take photo with ${cameraPreferences.timerSeconds} second timer` : 'Take photo'}
-            style={({ pressed }) => [styles.shutter, (!ready || busy || flashSettling) && styles.disabled, pressed && styles.shutterPressed]}
+            style={({ pressed }) => [styles.shutter, (!ready || busy || flashSettling) && styles.disabled, pressed && styles.pressed]}
             onPress={capture}
             disabled={!ready || busy || flashSettling}
           >
@@ -462,14 +461,12 @@ const styles = StyleSheet.create({
   recentImage: { width: '100%', height: '100%' },
   shutter: { width: 82, height: 82, borderRadius: 41, borderWidth: 3, borderColor: colors.ink, padding: 6, alignItems: 'center', justifyContent: 'center' },
   shutterCore: { width: '100%', height: '100%', borderRadius: 34, backgroundColor: colors.ink },
-  shutterPressed: { transform: [{ scale: 0.95 }] },
   flipButton: { width: 58, height: 58, borderRadius: 29, backgroundColor: colors.surfaceStrong, alignItems: 'center', justifyContent: 'center' },
   disabled: { opacity: 0.45 },
   pressed: { opacity: 0.7 },
   permission: { flex: 1, paddingHorizontal: 28, backgroundColor: colors.canvas, justifyContent: 'center' },
   permissionTitle: { color: colors.ink, fontFamily: 'ZenOldMincho_700Bold', fontSize: 30, lineHeight: 38, marginTop: 22 },
-  permissionBody: { color: colors.muted, fontSize: 15, lineHeight: 22, marginTop: 8, marginBottom: 24 },
-  primaryButton: { backgroundColor: colors.lime, minHeight: 52, alignItems: 'center', justifyContent: 'center', borderRadius: 12 },
+  primaryButton: { backgroundColor: colors.lime, minHeight: 52, alignItems: 'center', justifyContent: 'center', borderRadius: 12, marginTop: 24 },
   primaryButtonText: { color: colors.limeInk, fontWeight: '800', fontSize: 15 },
   secondaryButton: { minHeight: 52, alignItems: 'center', justifyContent: 'center', marginTop: 4 },
   secondaryButtonText: { color: colors.ink, fontWeight: '700', fontSize: 14 },

@@ -29,7 +29,7 @@ export type ExposurePreferences = {
 
 export const defaultPreferences: ExposurePreferences = {
   apiUrl: '',
-  detail: 'detailed',
+  detail: 'concise',
   skillLevel: 'enthusiast',
   desiredMood: '',
   exportMetadata: true,

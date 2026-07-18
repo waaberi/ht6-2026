@@ -48,7 +48,7 @@ export const ActionButton = ({
     ) : (
       <>
         {icon ? <Ionicons name={icon} size={20} color={variant === 'filled' ? colors.onPrimary : colors.text} /> : null}
-        <Text style={[styles.label, variant === 'filled' ? styles.filledLabel : styles.secondaryLabel]}>{label}</Text>
+        <Text numberOfLines={1} style={[styles.label, variant === 'filled' ? styles.filledLabel : styles.secondaryLabel]}>{label}</Text>
       </>
     )}
   </Pressable>
@@ -67,7 +67,7 @@ const styles = StyleSheet.create({
   filled: { backgroundColor: colors.primary },
   tonal: { backgroundColor: colors.surface },
   outlined: { borderWidth: 1, borderColor: colors.outlineStrong, backgroundColor: colors.background },
-  label: { ...typography.label, fontWeight: '700' },
+  label: { flexShrink: 1, ...typography.label, fontWeight: '700', textAlign: 'center' },
   filledLabel: { color: colors.onPrimary },
   secondaryLabel: { color: colors.text },
   pressed: { opacity: 0.82 },

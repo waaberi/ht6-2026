@@ -2,12 +2,30 @@ from __future__ import annotations
 
 import asyncio
 import io
+from typing import Any
 
+import httpx
 import pytest
-from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
 
 from exposure_api.main import app
+
+
+class ApiTestClient:
+    """Synchronous facade over HTTPX's ASGI transport.
+
+    Starlette's threaded TestClient can deadlock on the Python 3.14 runtime used
+    by the workspace. Driving the ASGI app on the calling thread also makes the
+    timeout tests deterministic.
+    """
+
+    async def _post(self, url: str, **kwargs: Any) -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post(url, **kwargs)
+
+    def post(self, url: str, **kwargs: Any) -> httpx.Response:
+        return asyncio.run(self._post(url, **kwargs))
 
 
 @pytest.fixture(autouse=True)
@@ -20,8 +38,8 @@ def run_worker_calls_inline(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def client() -> TestClient:
-    return TestClient(app)
+def client() -> ApiTestClient:
+    return ApiTestClient()
 
 
 @pytest.fixture

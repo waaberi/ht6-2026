@@ -24,9 +24,9 @@ export const ScreenHeader = ({ title, detail, action, actions }: {
 
   return (
     <View style={[styles.header, { paddingTop: insets.top + spacing.base }]}>
-      <Text accessibilityRole="header" style={styles.title}>{title}</Text>
+      <Text accessibilityRole="header" numberOfLines={1} style={styles.title}>{title}</Text>
       <View style={styles.trailing}>
-        {detail ? <Text style={styles.detail}>{detail}</Text> : null}
+        {detail ? <Text numberOfLines={1} style={styles.detail}>{detail}</Text> : null}
         {visibleActions.map((item) => (
           <Pressable
             key={item.label}
@@ -62,16 +62,19 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
   },
   title: {
+    flex: 1,
+    flexShrink: 1,
     color: colors.text,
     fontFamily: typography.displayFamily,
     ...typography.display,
   },
   detail: {
+    flexShrink: 1,
     color: colors.textSecondary,
     ...typography.label,
     fontWeight: '600',
   },
-  trailing: { minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
+  trailing: { minHeight: 48, flexShrink: 0, flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
   action: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface, overflow: 'hidden' },
   primaryAction: { backgroundColor: colors.primary },
   pressed: { backgroundColor: colors.pressed },

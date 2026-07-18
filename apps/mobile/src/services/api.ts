@@ -6,10 +6,13 @@ import { loadPreferences } from '../data/preferences';
 import { ensureLocalOriginal } from './cloudOriginal';
 import { apiErrorMessage, resolveApiUrl } from '../domain/apiConfiguration';
 import { layerAssetsForStack } from '../domain/assets';
+import { parseCoachResponse } from '../domain/coachResponse';
 import { currentVersion } from '../domain/layers';
+import { supabase } from './supabase';
 import type {
   AdjustmentValues,
   AnalysisResult,
+  CanvasExpansion,
   CoachResponse,
   GenerativeOperation,
   LayerStack,
@@ -26,7 +29,7 @@ const requireApiUrl = async () => {
     process.env.EXPO_PUBLIC_API_URL,
     preferences.apiUrl,
   );
-  if (!apiUrl) throw new ApiUnavailableError('Set the Exposure API URL in Settings to enable analysis and export.');
+  if (!apiUrl) throw new ApiUnavailableError('Online tools are not configured.');
   return apiUrl;
 };
 
@@ -38,11 +41,15 @@ const apiFetch = async (path: string, init: Parameters<typeof fetch>[1]) => {
     path === '/v1/layers/generative' ? 180_000 : path === '/v1/render' ? 120_000 : 45_000,
   );
   try {
-    return await fetch(`${apiUrl}${path}`, { ...init, signal: controller.signal });
+    const headers = new Headers(init?.headers);
+    const session = await supabase?.auth.getSession();
+    if (session?.data.session?.access_token) {
+      headers.set('Authorization', `Bearer ${session.data.session.access_token}`);
+    }
+    return await fetch(`${apiUrl}${path}`, { ...init, headers, signal: controller.signal });
   } catch (error) {
-    if (controller.signal.aborted) throw new ApiUnavailableError('The Exposure service timed out. Try again when the connection is stable.');
-    const detail = error instanceof Error ? error.message : 'Network request failed.';
-    throw new ApiUnavailableError(`Could not reach the Exposure API at ${apiUrl}. ${detail}`);
+    if (controller.signal.aborted) throw new ApiUnavailableError('Request timed out. Try again.');
+    throw new ApiUnavailableError('Exposure is offline. Check your connection.');
   } finally {
     clearTimeout(timeout);
   }
@@ -105,7 +112,7 @@ export const askCoach = async (
       availableTools: ['adjust_global', 'adjust_masked', 'crop', 'straighten', 'remove', 'add', 'expand', 'retake'],
     }),
   });
-  return parseResponse<CoachResponse>(response);
+  return parseCoachResponse(await parseResponse<unknown>(response));
 };
 
 export const requestRender = async (
@@ -137,7 +144,7 @@ export type GenerativePatchResult = {
   driftScore: number;
   model: string;
   sourceVersionId: string;
-  expansion?: { top: number; right: number; bottom: number; left: number };
+  expansion?: CanvasExpansion;
 };
 
 export const createGenerativePatch = async (
@@ -147,6 +154,7 @@ export const createGenerativePatch = async (
   prompt: string,
   operation: GenerativeOperation = 'remove',
   expansionDirection: 'top' | 'right' | 'bottom' | 'left' = 'right',
+  expansionFraction = 0.25,
 ): Promise<GenerativePatchResult> => {
   const form = new FormData();
   const original = await ensureLocalOriginal(photo);
@@ -155,7 +163,10 @@ export const createGenerativePatch = async (
   form.append('prompt', prompt);
   form.append('operation', operation);
   if (operation === 'expand') {
-    form.append('expansion_json', JSON.stringify({ direction: expansionDirection, fraction: 0.25 }));
+    if (expansionFraction < 0.1 || expansionFraction > 0.5) {
+      throw new Error('Canvas expansion must be between 10% and 50%.');
+    }
+    form.append('expansion_json', JSON.stringify({ direction: expansionDirection, fraction: expansionFraction }));
   }
   form.append('source_version_id', photo.currentVersionId);
   form.append('layer_stack_json', JSON.stringify(stack));
