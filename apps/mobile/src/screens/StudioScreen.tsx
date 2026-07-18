@@ -117,7 +117,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   const [cropAspect, setCropAspect] = useState<number>();
   const [message, setMessage] = useState<string>();
   const [coachResponse, setCoachResponse] = useState<CoachResponse>();
-  const [coachQuestion, setCoachQuestion] = useState('What is the highest-impact change?');
+  const [coachQuestion, setCoachQuestion] = useState('');
   const [coachBusy, setCoachBusy] = useState(false);
   const [selectedIssueId, setSelectedIssueId] = useState<string>();
   const [dismissedIssueIds, setDismissedIssueIds] = useState<string[]>([]);
@@ -1055,14 +1055,11 @@ const CoachPanel = ({
 
       {selectedIssue ? (
         <View style={styles.focusedFinding}>
-          <View style={styles.findingHeading}>
-            <Text numberOfLines={1} style={styles.findingTitle}>{selectedIssue.title}</Text>
-          </View>
-          <Text numberOfLines={3} style={styles.body}>{selectedIssue.explanation}</Text>
+          <Text numberOfLines={2} style={styles.body}>{selectedIssue.explanation}</Text>
           <View style={styles.findingActions}>
             {fixable ? (
               <Pressable accessibilityRole="button" style={styles.inlineAction} onPress={() => onApplyIssue(selectedIssue)} disabled={applying}>
-                <Text style={styles.inlineActionText}>{selectedIssue.fix?.kind === 'retouch' || selectedIssue.fix?.kind === 'generative' || selectedIssue.fix?.kind === 'crop' ? 'Review' : selectedIssue.fix?.kind === 'retake' ? 'Retake' : 'Apply'}</Text>
+                <Text style={styles.inlineActionText}>{selectedIssue.fix?.kind === 'retake' ? 'Retake' : 'Review'}</Text>
               </Pressable>
             ) : null}
             <Pressable accessibilityRole="button" style={styles.inlineAction} onPress={() => onDismissIssue(selectedIssue)} disabled={applying}>
@@ -1092,7 +1089,7 @@ const CoachPanel = ({
         <View key={action.id} style={styles.actionRow}>
           <View style={styles.actionCopy}><Text numberOfLines={1} style={styles.findingTitle}>{action.label}</Text><Text numberOfLines={2} style={styles.caption}>{action.reason}</Text></View>
           <Pressable accessibilityRole="button" style={styles.smallPrimary} onPress={() => onApplyAction(action)}>
-            <Text style={styles.smallPrimaryText}>{action.tool === 'remove' || action.tool === 'add' || action.tool === 'expand' ? 'Review' : 'Apply'}</Text>
+            <Text style={styles.smallPrimaryText}>{action.tool === 'retake' ? 'Retake' : 'Review'}</Text>
           </Pressable>
         </View>
       ))}
@@ -1338,7 +1335,7 @@ const styles = StyleSheet.create({
   body: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 4 },
   caption: { color: colors.muted, fontSize: 12, lineHeight: 17 },
   chips: { gap: 8, paddingVertical: 12 },
-  chip: { minHeight: 48, maxWidth: 180, borderRadius: 24, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.line },
+  chip: { minHeight: 48, maxWidth: 240, borderRadius: 24, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.line },
   chipActive: { backgroundColor: colors.lime, borderColor: colors.lime },
   chipText: { color: colors.muted, fontSize: 12, fontWeight: '700' },
   chipTextActive: { color: colors.limeInk },
@@ -1346,7 +1343,6 @@ const styles = StyleSheet.create({
   directionButton: { flex: 1, minHeight: 48, borderRadius: 8, borderWidth: 1, borderColor: colors.line, alignItems: 'center', justifyContent: 'center' },
   expansionAmountRow: { minHeight: 48, flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
   focusedFinding: { paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
-  findingHeading: { flexDirection: 'row', justifyContent: 'space-between', gap: 12 },
   findingTitle: { flex: 1, color: colors.ink, fontSize: 13, fontWeight: '800' },
   findingActions: { flexDirection: 'row', gap: 18 },
   inlineAction: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', marginTop: 4 },

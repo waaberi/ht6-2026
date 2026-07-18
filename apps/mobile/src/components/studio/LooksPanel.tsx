@@ -44,24 +44,26 @@ export const LooksPanel = ({
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.looks}
       >
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Restore original look"
-          accessibilityState={{ selected: !selectedLookId, disabled: busy || !canRestore }}
-          disabled={busy || !canRestore}
-          onPress={onRestore}
-          style={({ pressed }) => [
-            styles.look,
-            !selectedLookId && styles.lookSelected,
-            !canRestore && styles.lookDisabled,
-            pressed && styles.pressed,
-          ]}
-        >
-          <View style={styles.originalPreview}>
-            <MaterialCommunityIcons name="image-off-outline" size={22} color={colors.textSecondary} />
-          </View>
-          <Text numberOfLines={1} style={[styles.lookName, !selectedLookId && styles.lookNameSelected]}>Original</Text>
-        </Pressable>
+        {looks.length > 0 || canRestore ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Restore original look"
+            accessibilityState={{ selected: !selectedLookId, disabled: busy || !canRestore }}
+            disabled={busy || !canRestore}
+            onPress={onRestore}
+            style={({ pressed }) => [
+              styles.look,
+              !selectedLookId && styles.lookSelected,
+              !canRestore && styles.lookDisabled,
+              pressed && styles.pressed,
+            ]}
+          >
+            <View style={styles.originalPreview}>
+              <MaterialCommunityIcons name="image-off-outline" size={22} color={colors.textSecondary} />
+            </View>
+            <Text numberOfLines={1} style={[styles.lookName, !selectedLookId && styles.lookNameSelected]}>Original</Text>
+          </Pressable>
+        ) : null}
 
         {looks.map((look) => {
           const selected = look.id === selectedLookId;
