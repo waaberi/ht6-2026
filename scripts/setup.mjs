@@ -34,7 +34,9 @@ const run = (command, args) => {
 };
 
 ensureEnvironmentFile('apps/mobile/.env.example', 'apps/mobile/.env.local');
-ensureEnvironmentFile('services/api/.env.example', 'services/api/.env');
+ensureEnvironmentFile('apps/mobile/.env.example', 'apps/mobile/.env.production');
+ensureEnvironmentFile('services/api/.env.example', 'services/api/.env.local');
+ensureEnvironmentFile('services/api/.env.example', 'services/api/.env.production');
 run('pnpm', ['install']);
 run('uv', ['--directory', 'services/api', 'sync']);
 

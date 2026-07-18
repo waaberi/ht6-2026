@@ -11,7 +11,7 @@
     "bootstrap": "node scripts/setup.mjs",
     "android": "pnpm --filter exposure run android",
     "dev": "pnpm --filter exposure run dev:android",
-    "api": "uv --directory services/api run uvicorn exposure_api.main:app --reload",
+    "api": "uv --directory services/api run uvicorn exposure_api.main:app --reload --env-file .env.local",
     "db:start": "supabase start",
     "db:reset": "supabase db reset",
     "db:test": "supabase test db",
