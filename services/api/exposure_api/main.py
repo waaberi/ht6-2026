@@ -9,13 +9,15 @@ import re
 from collections import OrderedDict
 from typing import Annotated
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from PIL import ImageOps
 from pydantic import ValidationError
 
+from . import auth
 from .analysis import analyze_deterministic, merge_semantic
+from .auth import require_authenticated_user
 from .curation import create_style_profile, review_portfolio
 from .generative import ExcessiveDriftError, extract_localized_patch
 from .models import (
@@ -120,10 +122,12 @@ async def health() -> dict[str, object]:
         "geminiConfigured": provider.configured,
         "semanticModel": provider.semantic_model,
         "imageModel": provider.image_model,
+        "authRequired": auth.AUTH_REQUIRED,
+        "authConfigured": auth.auth_configured(),
     }
 
 
-@app.post("/v1/analyze", response_model=AnalysisResult)
+@app.post("/v1/analyze", response_model=AnalysisResult, dependencies=[Depends(require_authenticated_user)])
 async def analyze(
     image: Annotated[UploadFile, File()],
     version_id: Annotated[str, Form(min_length=1)],
@@ -191,7 +195,7 @@ async def analyze(
     return result
 
 
-@app.post("/v1/render")
+@app.post("/v1/render", dependencies=[Depends(require_authenticated_user)])
 async def render(
     image: Annotated[UploadFile, File()],
     layer_stack_json: Annotated[str, Form()],
@@ -213,7 +217,7 @@ async def render(
     return Response(body, media_type=media_type, headers={"Cache-Control": "private, no-store"})
 
 
-@app.post("/v1/layers/generative", response_model=GenerativePatchResult)
+@app.post("/v1/layers/generative", response_model=GenerativePatchResult, dependencies=[Depends(require_authenticated_user)])
 async def generative_layer(
     image: Annotated[UploadFile, File()],
     target_json: Annotated[str, Form()],
@@ -288,7 +292,7 @@ async def generative_layer(
         raise HTTPException(422, str(error)) from error
 
 
-@app.post("/v1/portfolio-review", response_model=PortfolioReview)
+@app.post("/v1/portfolio-review", response_model=PortfolioReview, dependencies=[Depends(require_authenticated_user)])
 async def portfolio_review(
     images: Annotated[list[UploadFile], File(min_length=2, max_length=20)],
     photo_ids_json: Annotated[str, Form()],
@@ -303,13 +307,13 @@ async def portfolio_review(
     return await asyncio.to_thread(review_portfolio, image_bytes, [str(value) for value in photo_ids])
 
 
-@app.post("/v1/style-profile", response_model=StyleProfile)
+@app.post("/v1/style-profile", response_model=StyleProfile, dependencies=[Depends(require_authenticated_user)])
 async def style_profile(images: Annotated[list[UploadFile], File(min_length=3, max_length=8)]) -> StyleProfile:
     image_bytes = await asyncio.gather(*(_read_image(image) for image in images))
     return await asyncio.to_thread(create_style_profile, image_bytes)
 
 
-@app.post("/v1/style-apply")
+@app.post("/v1/style-apply", dependencies=[Depends(require_authenticated_user)])
 async def style_apply(
     image: Annotated[UploadFile, File()],
     style_json: Annotated[str, Form()],
@@ -329,7 +333,7 @@ async def style_apply(
     return Response(body, media_type=media_type, headers={"Cache-Control": "private, no-store"})
 
 
-@app.post("/v1/coach", response_model=CoachResponse)
+@app.post("/v1/coach", response_model=CoachResponse, dependencies=[Depends(require_authenticated_user)])
 async def coach(request: CoachRequest) -> CoachResponse:
     if provider.configured:
         try:
