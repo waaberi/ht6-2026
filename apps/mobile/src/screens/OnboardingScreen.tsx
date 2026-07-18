@@ -6,6 +6,7 @@ import {
   AccessibilityInfo,
   ActivityIndicator,
   Animated,
+  AppState,
   BackHandler,
   Easing,
   KeyboardAvoidingView,
@@ -45,14 +46,9 @@ export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => 
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ text: string; tone: 'info' | 'error' }>();
   const [reduceMotion, setReduceMotion] = useState(true);
-  const [videoPaused, setVideoPaused] = useState(false);
   const completedRef = useRef(false);
   const transitioningRef = useRef(false);
   const pageMotion = useRef(new Animated.Value(1)).current;
-  const videoPlayer = useVideoPlayer(ONBOARDING_VIDEO, (player) => {
-    player.loop = true;
-    player.muted = true;
-  });
 
   const finish = async () => {
     if (completedRef.current) return;
@@ -117,15 +113,6 @@ export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => 
       subscription.remove();
     };
   }, []);
-
-  useEffect(() => {
-    if (reduceMotion || videoPaused || step !== 0) {
-      videoPlayer.pause();
-    } else {
-      videoPlayer.play();
-    }
-    return () => videoPlayer.pause();
-  }, [reduceMotion, step, videoPaused, videoPlayer]);
 
   useEffect(() => {
     if (step === 0) return;
@@ -199,32 +186,7 @@ export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => 
                   <View
                     style={styles.videoFrame}
                   >
-                    <VideoView
-                      accessibilityElementsHidden
-                      contentFit="contain"
-                      importantForAccessibility="no-hide-descendants"
-                      nativeControls={false}
-                      player={videoPlayer}
-                      pointerEvents="none"
-                      style={styles.video}
-                    />
-                    {!reduceMotion ? (
-                      <Pressable
-                        accessibilityLabel={videoPaused ? 'Play animation' : 'Pause animation'}
-                        accessibilityRole="button"
-                        hitSlop={8}
-                        onPress={() => setVideoPaused((paused) => !paused)}
-                        style={({ pressed }) => [styles.videoControl, pressed && styles.pressed]}
-                        testID="onboarding-video-control"
-                      >
-                        <Ionicons
-                          accessibilityElementsHidden
-                          name={videoPaused ? 'play' : 'pause'}
-                          size={18}
-                          color={colors.text}
-                        />
-                      </Pressable>
-                    ) : null}
+                    <OnboardingVideo reduceMotion={reduceMotion} />
                   </View>
                   <View style={styles.welcomeCopy}>
                     <Text accessibilityRole="header" style={styles.title}>A camera that teaches.</Text>
@@ -368,6 +330,47 @@ export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => 
   );
 };
 
+const OnboardingVideo = ({ reduceMotion }: { reduceMotion: boolean }) => {
+  const videoPlayer = useVideoPlayer(ONBOARDING_VIDEO, (player) => {
+    player.loop = false;
+    player.muted = true;
+  });
+
+  useEffect(() => {
+    const syncPlayback = (state: string | null) => {
+      if (state !== 'active') {
+        videoPlayer.pause();
+        videoPlayer.currentTime = 0;
+        return;
+      }
+
+      if (reduceMotion) {
+        videoPlayer.pause();
+        return;
+      }
+
+      videoPlayer.play();
+    };
+
+    syncPlayback(AppState.currentState);
+    const subscription = AppState.addEventListener('change', syncPlayback);
+    return () => subscription.remove();
+  }, [reduceMotion, videoPlayer]);
+
+  return (
+    <VideoView
+      accessibilityElementsHidden
+      contentFit="contain"
+      importantForAccessibility="no-hide-descendants"
+      nativeControls={false}
+      player={videoPlayer}
+      pointerEvents="none"
+      style={styles.video}
+      surfaceType={Platform.OS === 'android' ? 'textureView' : undefined}
+    />
+  );
+};
+
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: colors.background },
   keyboard: { flex: 1 },
@@ -396,17 +399,6 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
   },
   video: { width: '100%', height: '100%' },
-  videoControl: {
-    position: 'absolute',
-    top: spacing.sm,
-    right: spacing.sm,
-    width: 44,
-    height: 44,
-    borderRadius: radii.pill,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.overlay,
-  },
   welcomeCopy: { flex: 1, justifyContent: 'center', minHeight: 176, paddingVertical: spacing.lg },
   promiseHeader: { paddingTop: spacing.xl, paddingBottom: spacing.lg },
   accountHeader: { paddingTop: spacing.xl, paddingBottom: spacing.lg },
