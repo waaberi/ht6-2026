@@ -5,6 +5,7 @@ import {
   FractalNoise,
   Group,
   Image as SkiaImage,
+  Paint,
   RadialGradient,
   Rect,
   useImage,
@@ -219,39 +220,56 @@ export const PhotoCanvas = ({
     >
       <Canvas style={StyleSheet.absoluteFill}>
         <Group clip={geometry.display}>
-          <Group clip={geometry.content}>
-            <Group origin={geometry.center} transform={[{ scale: geometry.straightenScale }, { rotate: rotation }]}>
-              <SkiaImage image={image} {...geometry.full} fit="fill">
+          <Group
+            layer={(
+              <Paint>
                 <ColorMatrix matrix={matrix} />
                 {denoise > 0 ? <Blur blur={denoise * 1.5} /> : null}
-              </SkiaImage>
-              {stack.layers.map((layer) => {
-                if (!layer.enabled || layer.type !== 'masked-adjustment' || !layer.mask.region) return null;
-                const maskedValues = { ...adjustments };
-                addAdjustments(maskedValues, layer.adjustments, layer.opacity);
-                const region = layer.mask.region;
-                const clip = {
-                  x: geometry.full.x + region.x * geometry.full.width,
-                  y: geometry.full.y + region.y * geometry.full.height,
-                  width: region.width * geometry.full.width,
-                  height: region.height * geometry.full.height,
-                };
-                return (
-                  <Group key={layer.id} clip={clip}>
-                    <SkiaImage image={image} {...geometry.full} fit="fill">
-                      <ColorMatrix matrix={adjustmentMatrix(maskedValues)} />
-                    </SkiaImage>
-                  </Group>
-                );
-              })}
-              {stack.layers.map((layer) => {
-                if (!layer.enabled) return null;
-                if (layer.type === 'image') return <OverlayImage key={layer.id} uri={layer.uri} opacity={layer.opacity} rect={geometry.full} />;
-                if (layer.type === 'retouch') return <OverlayImage key={layer.id} uri={layer.patchUri} opacity={layer.opacity} rect={geometry.full} />;
-                if (layer.type === 'generative-patch' && !layer.canvasSpace) return <OverlayImage key={layer.id} uri={layer.patchUri} opacity={layer.opacity} rect={geometry.full} />;
-                return null;
-              })}
+              </Paint>
+            )}
+          >
+            <Group clip={geometry.content}>
+              <Group origin={geometry.center} transform={[{ scale: geometry.straightenScale }, { rotate: rotation }]}>
+                <SkiaImage image={image} {...geometry.full} fit="fill" />
+                {stack.layers.map((layer) => {
+                  if (!layer.enabled || layer.type !== 'masked-adjustment' || !layer.mask.region) return null;
+                  const maskedValues: AdjustmentValues = {};
+                  addAdjustments(maskedValues, layer.adjustments, layer.opacity);
+                  const region = layer.mask.region;
+                  const clip = {
+                    x: geometry.full.x + region.x * geometry.full.width,
+                    y: geometry.full.y + region.y * geometry.full.height,
+                    width: region.width * geometry.full.width,
+                    height: region.height * geometry.full.height,
+                  };
+                  return (
+                    <Group key={layer.id} clip={clip}>
+                      <SkiaImage image={image} {...geometry.full} fit="fill">
+                        <ColorMatrix matrix={adjustmentMatrix(maskedValues)} />
+                      </SkiaImage>
+                    </Group>
+                  );
+                })}
+                {stack.layers.map((layer) => {
+                  if (!layer.enabled) return null;
+                  if (layer.type === 'image') return <OverlayImage key={layer.id} uri={layer.uri} opacity={layer.opacity} blendMode={layer.blendMode} rect={geometry.full} />;
+                  if (layer.type === 'retouch') return <OverlayImage key={layer.id} uri={layer.patchUri} opacity={layer.opacity} rect={geometry.full} />;
+                  if (layer.type === 'generative-patch' && !layer.canvasSpace) return <OverlayImage key={layer.id} uri={layer.patchUri} opacity={layer.opacity} rect={geometry.full} />;
+                  return null;
+                })}
+              </Group>
             </Group>
+            {stack.layers.map((layer) => {
+              if (!layer.enabled || layer.type !== 'generative-patch' || !layer.canvasSpace) return null;
+              const snapshot = layer.canvasExpansion ?? geometry.expansion;
+              const rect = {
+                x: geometry.display.x + (geometry.expansion.left - snapshot.left) * geometry.scale,
+                y: geometry.display.y + (geometry.expansion.top - snapshot.top) * geometry.scale,
+                width: (geometry.contentWidth + snapshot.left + snapshot.right) * geometry.scale,
+                height: (geometry.contentHeight + snapshot.top + snapshot.bottom) * geometry.scale,
+              };
+              return <OverlayImage key={layer.id} uri={layer.patchUri} opacity={layer.opacity} rect={rect} />;
+            })}
           </Group>
           {grain > 0 ? (
             <Group opacity={grain * 0.16} blendMode="overlay">
@@ -272,17 +290,6 @@ export const PhotoCanvas = ({
               </Rect>
             </Group>
           ) : null}
-          {stack.layers.map((layer) => {
-            if (!layer.enabled || layer.type !== 'generative-patch' || !layer.canvasSpace) return null;
-            const snapshot = layer.canvasExpansion ?? geometry.expansion;
-            const rect = {
-              x: geometry.display.x + (geometry.expansion.left - snapshot.left) * geometry.scale,
-              y: geometry.display.y + (geometry.expansion.top - snapshot.top) * geometry.scale,
-              width: (geometry.contentWidth + snapshot.left + snapshot.right) * geometry.scale,
-              height: (geometry.contentHeight + snapshot.top + snapshot.bottom) * geometry.scale,
-            };
-            return <OverlayImage key={layer.id} uri={layer.patchUri} opacity={layer.opacity} rect={rect} />;
-          })}
           {showIssues ? analysis?.issues.slice(0, 4).map((issue) => (
             <Rect
               key={issue.id}
@@ -332,10 +339,21 @@ export const PhotoCanvas = ({
   );
 };
 
-const OverlayImage = ({ uri, opacity, rect }: { uri: string; opacity: number; rect: { x: number; y: number; width: number; height: number } }) => {
+const OverlayImage = ({
+  uri,
+  opacity,
+  blendMode = 'normal',
+  rect,
+}: {
+  uri: string;
+  opacity: number;
+  blendMode?: 'normal' | 'multiply' | 'screen' | 'overlay';
+  rect: { x: number; y: number; width: number; height: number };
+}) => {
   const image = useImage(uri);
+  const skiaBlendMode = blendMode === 'normal' ? 'srcOver' : blendMode;
   return (
-    <Group opacity={opacity}>
+    <Group opacity={opacity} blendMode={skiaBlendMode}>
       <SkiaImage image={image} {...rect} fit="fill" />
     </Group>
   );
