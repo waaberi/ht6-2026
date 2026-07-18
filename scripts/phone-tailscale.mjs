@@ -1,6 +1,7 @@
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
+import { createConnection } from 'node:net';
 import process from 'node:process';
 
 const workspaceRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -28,6 +29,28 @@ if (!tailscaleAddress) {
 const apiUrl = `http://${tailscaleAddress}:8000`;
 console.log(`Tailscale ready at ${tailscaleAddress}.`);
 console.log('Teammates must install Tailscale and join the same tailnet.');
+
+const portIsOpen = (port) => new Promise((resolve) => {
+  const socket = createConnection({ host: tailscaleAddress, port });
+  let settled = false;
+  const finish = (open) => {
+    if (settled) return;
+    settled = true;
+    socket.destroy();
+    resolve(open);
+  };
+  socket.setTimeout(500);
+  socket.once('connect', () => finish(true));
+  socket.once('error', () => finish(false));
+  socket.once('timeout', () => finish(false));
+});
+
+for (const [name, port] of [['Exposure API', 8000], ['Metro', 8081]]) {
+  if (await portIsOpen(port)) {
+    console.error(`${name} port ${port} is already in use at ${tailscaleAddress}. Stop the existing phone stack with Ctrl+C before starting another.`);
+    process.exit(1);
+  }
+}
 
 const env = {
   ...process.env,

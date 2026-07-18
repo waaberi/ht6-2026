@@ -15,6 +15,16 @@ const requireApiUrl = async () => {
   return apiUrl;
 };
 
+const apiFetch = async (path: string, init: RequestInit) => {
+  const apiUrl = await requireApiUrl();
+  try {
+    return await fetch(`${apiUrl}${path}`, init);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : 'Network request failed.';
+    throw new ApiUnavailableError(`Could not reach the Exposure API at ${apiUrl}. ${detail}`);
+  }
+};
+
 const parseResponse = async <T>(response: Response): Promise<T> => {
   if (!response.ok) {
     const body = await response.text();
@@ -37,12 +47,12 @@ export const analyzePhoto = async (photo: PhotoRecord): Promise<AnalysisResult> 
     desiredMood: preferences.desiredMood,
   }));
 
-  const response = await fetch(`${await requireApiUrl()}/v1/analyze`, { method: 'POST', body: form });
+  const response = await apiFetch('/v1/analyze', { method: 'POST', body: form });
   return parseResponse<AnalysisResult>(response);
 };
 
 export const askCoach = async (analysis: AnalysisResult, question: string) => {
-  const response = await fetch(`${await requireApiUrl()}/v1/coach`, {
+  const response = await apiFetch('/v1/coach', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ analysis, question }),
@@ -67,7 +77,7 @@ export const requestRender = async (
     form.append('assets', file as unknown as Blob, file.name);
   }
   form.append('asset_ids_json', JSON.stringify(assets.map((asset) => asset.id)));
-  const response = await fetch(`${await requireApiUrl()}/v1/render`, { method: 'POST', body: form });
+  const response = await apiFetch('/v1/render', { method: 'POST', body: form });
   if (!response.ok) throw new Error(await response.text());
   return response.blob();
 };
@@ -100,7 +110,7 @@ export const createGenerativePatch = async (
     form.append('assets', file as unknown as Blob, file.name);
   }
   form.append('asset_ids_json', JSON.stringify(assets.map((asset) => asset.id)));
-  const response = await fetch(`${await requireApiUrl()}/v1/layers/generative`, { method: 'POST', body: form });
+  const response = await apiFetch('/v1/layers/generative', { method: 'POST', body: form });
   return parseResponse<GenerativePatchResult>(response);
 };
 
@@ -119,7 +129,7 @@ export const reviewPortfolio = async (photos: PhotoRecord[]) => {
     form.append('images', file as unknown as Blob, `${photo.id}.jpg`);
   });
   form.append('photo_ids_json', JSON.stringify(photos.map((photo) => photo.id)));
-  const response = await fetch(`${await requireApiUrl()}/v1/portfolio-review`, { method: 'POST', body: form });
+  const response = await apiFetch('/v1/portfolio-review', { method: 'POST', body: form });
   return parseResponse<PortfolioReview>(response);
 };
 
@@ -137,6 +147,6 @@ export const createStyleProfile = async (photos: PhotoRecord[]) => {
     const file = new File(photo.analysisProxyUri);
     form.append('images', file as unknown as Blob, `${photo.id}.jpg`);
   });
-  const response = await fetch(`${await requireApiUrl()}/v1/style-profile`, { method: 'POST', body: form });
+  const response = await apiFetch('/v1/style-profile', { method: 'POST', body: form });
   return parseResponse<StyleProfileResult>(response);
 };

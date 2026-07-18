@@ -62,7 +62,7 @@ export const SettingsScreen = () => {
         {message ? <Text style={styles.message}>{message}</Text> : null}
       </Section>
       <Section title="Compute service">
-        <Text style={styles.body}>The development launcher configures this automatically. Enter a URL only to override it.</Text>
+        <Text style={styles.body}>The app or development launcher configures this automatically. This fallback is used only when no service URL is configured.</Text>
         <TextInput value={apiUrl} onChangeText={setApiUrl} onEndEditing={() => updatePreferences({ apiUrl })} autoCapitalize="none" autoCorrect={false} keyboardType="url" placeholder={process.env.EXPO_PUBLIC_API_URL ?? 'https://api.example.com'} placeholderTextColor={colors.muted} style={styles.input} />
       </Section>
       <Section title="Coaching">
