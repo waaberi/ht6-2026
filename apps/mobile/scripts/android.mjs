@@ -78,18 +78,69 @@ const adb = join(sdkRoot, 'platform-tools', process.platform === 'win32' ? 'adb.
 const emulator = join(sdkRoot, 'emulator', process.platform === 'win32' ? 'emulator.exe' : 'emulator');
 const packageName = 'com.ht62026.exposure';
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+let adbWasRestarted = false;
+
+const adbSync = (args, timeout = 15000) => {
+  const execute = () => spawnSync(adb, args, { env, encoding: 'utf8', timeout });
+  let result = execute();
+  if (result.error?.code !== 'ETIMEDOUT') return result;
+
+  console.log(`ADB timed out while running "adb ${args.join(' ')}". Restarting the ADB server...`);
+  if (process.platform === 'win32') {
+    spawnSync('taskkill.exe', ['/im', 'adb.exe', '/f'], { stdio: 'ignore', timeout: 5000 });
+  } else {
+    spawnSync(adb, ['kill-server'], { env, stdio: 'ignore', timeout: 5000 });
+  }
+  const restart = spawnSync(adb, ['start-server'], { env, encoding: 'utf8', timeout: 15000 });
+  if (restart.status !== 0) return restart;
+  adbWasRestarted = true;
+  result = execute();
+  return result;
+};
+
+const ninjaIsModern = (candidate) => {
+  if (!candidate || !existsSync(candidate)) return false;
+  const result = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
+  const [major, minor] = (result.stdout ?? '').trim().split('.').map(Number);
+  return result.status === 0 && (major > 1 || (major === 1 && minor >= 12));
+};
+
+const windowsNinja = () => {
+  const bundledNinja = join(sdkRoot, 'cmake', '3.22.1', 'bin', 'ninja.exe');
+  if (ninjaIsModern(bundledNinja)) return bundledNinja;
+
+  const result = spawnSync('uv', [
+    'run', '--isolated', '--with', 'ninja==1.13.0', 'python', '-c',
+    'import shutil; print(shutil.which("ninja") or "")',
+  ], { encoding: 'utf8' });
+  const candidate = (result.stdout ?? '').trim();
+
+  if (result.error || result.status !== 0 || !ninjaIsModern(candidate)) {
+    console.error('A long-path-capable Ninja could not be prepared with uv. Run `pnpm bootstrap` and try again.');
+    if (result.error) console.error(result.error.message);
+    else if (result.stderr) console.error(result.stderr.trim());
+    process.exit(result.status ?? 1);
+  }
+
+  return candidate;
+};
+
+if (process.platform === 'win32' && mode === 'install') {
+  env.EXPOSURE_NINJA = windowsNinja().replaceAll('\\', '/');
+  console.log(`Android Ninja: ${env.EXPOSURE_NINJA}`);
+}
 
 const runAdb = (args, description) => {
-  const result = spawnSync(adb, args, { env, encoding: 'utf8' });
+  const result = adbSync(args, args[0] === 'install' ? 120000 : 15000);
   if (result.status !== 0) {
     console.error(`${description} failed.`);
-    console.error(result.stderr || result.stdout);
+    console.error(result.error?.message || result.stderr || result.stdout);
     process.exit(result.status ?? 1);
   }
 };
 
 const listedDevices = () => {
-  const result = spawnSync(adb, ['devices'], { env, encoding: 'utf8' });
+  const result = adbSync(['devices']);
   if (result.status !== 0) return [];
   return result.stdout
     .split('\n')
@@ -103,29 +154,14 @@ const onlineDevices = () => listedDevices()
   .filter(({ state }) => state === 'device')
   .map(({ serial }) => serial);
 
-const bootStatus = (serial) => spawnSync(
-  adb,
+const bootStatus = (serial) => adbSync(
   ['-s', serial, 'shell', 'getprop', 'sys.boot_completed'],
-  { env, encoding: 'utf8' },
 );
 
 const emulatorConsoleIsAvailable = (serial) => {
-  const result = spawnSync(adb, ['-s', serial, 'emu', 'avd', 'name'], { env, encoding: 'utf8' });
+  const result = adbSync(['-s', serial, 'emu', 'avd', 'name']);
   const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
   return result.status === 0 && !/could not connect to TCP port/i.test(output);
-};
-
-const refreshStaleEmulatorConnections = async () => {
-  const staleEmulators = listedDevices()
-    .map(({ serial }) => serial)
-    .filter((serial) => serial.startsWith('emulator-') && !emulatorConsoleIsAvailable(serial));
-
-  if (!staleEmulators.length) return;
-
-  console.log(`Refreshing ADB to remove stale emulator connection(s): ${staleEmulators.join(', ')}`);
-  runAdb(['kill-server'], 'Stopping the stale ADB server');
-  runAdb(['start-server'], 'Restarting the ADB server');
-  await delay(500);
 };
 
 const waitForBoot = async () => {
@@ -150,7 +186,14 @@ const waitForBoot = async () => {
 };
 
 const ensureAndroidDevice = async () => {
-  const devices = listedDevices();
+  let devices = listedDevices();
+  if (adbWasRestarted && !devices.length) {
+    console.log('Waiting for the existing Android emulator to reconnect...');
+    for (let attempt = 0; attempt < 20 && !devices.length; attempt += 1) {
+      await delay(250);
+      devices = listedDevices();
+    }
+  }
   const deviceIsAvailableOrBooting = devices.some(({ serial, state }) => {
     if (serial.startsWith('emulator-')) return emulatorConsoleIsAvailable(serial);
     return state === 'device' && bootStatus(serial).status === 0;
@@ -181,16 +224,28 @@ const ensureAndroidDevice = async () => {
   await waitForBoot();
 };
 
-const expoCli = join(dirname(require.resolve('expo/package.json')), 'bin', 'cli');
-const commands = {
-  install: [
-    ['prebuild', '--platform', 'android', '--no-install'],
-    ['run:android', '--variant', 'debug', '--no-bundler'],
-  ],
-  dev: [['start', '--dev-client', '--android', '--localhost']],
+const deviceArchitectures = () => {
+  const result = adbSync(['shell', 'getprop', 'ro.product.cpu.abilist']);
+  const supported = new Set(['armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64']);
+  const architectures = (result.stdout ?? '')
+    .trim()
+    .split(',')
+    .map((architecture) => architecture.trim())
+    .filter((architecture) => supported.has(architecture));
+
+  if (result.status !== 0 || !architectures.length) {
+    console.error('Could not determine the Android device architecture.');
+    if (result.stderr) console.error(result.stderr.trim());
+    process.exit(result.status ?? 1);
+  }
+
+  return [...new Set(architectures)].join(',');
 };
 
-if (!(mode in commands)) {
+const expoCli = join(dirname(require.resolve('expo/package.json')), 'bin', 'cli');
+const gradleWrapper = join(projectRoot, 'android', process.platform === 'win32' ? 'gradlew.bat' : 'gradlew');
+
+if (!['install', 'dev'].includes(mode)) {
   console.error('Usage: node scripts/android.mjs <install|dev>');
   process.exit(1);
 }
@@ -198,8 +253,37 @@ if (!(mode in commands)) {
 console.log(`Android SDK: ${sdkRoot}`);
 console.log(`Android JDK: ${javaHome}`);
 
-await refreshStaleEmulatorConnections();
 await ensureAndroidDevice();
+
+const gradleArgs = [
+  'app:assembleDebug',
+  '-x', 'lint',
+  '-x', 'test',
+  '--configure-on-demand',
+  '--build-cache',
+  '-PreactNativeDevServerPort=8081',
+  `-PreactNativeArchitectures=${mode === 'install' ? deviceArchitectures() : ''}`,
+];
+const gradleCommand = process.platform === 'win32'
+  ? {
+      executable: process.env.ComSpec ?? 'cmd.exe',
+      args: ['/d', '/s', '/c', gradleWrapper, ...gradleArgs],
+      cwd: join(projectRoot, 'android'),
+    }
+  : { executable: gradleWrapper, args: gradleArgs, cwd: join(projectRoot, 'android') };
+const commands = {
+  install: [
+    {
+      executable: process.execPath,
+      args: [expoCli, 'prebuild', '--platform', 'android', '--no-install'],
+    },
+    gradleCommand,
+  ],
+  dev: [{
+    executable: process.execPath,
+    args: [expoCli, 'start', '--dev-client', '--localhost'],
+  }],
+};
 
 if (mode === 'dev') {
   runAdb(['shell', 'am', 'force-stop', packageName], 'Stopping the stale development session');
@@ -208,11 +292,13 @@ if (mode === 'dev') {
 
 let activeChild;
 let shuttingDown = false;
+let shutdownExitCode = 0;
 
-const stopActiveChild = (signal) => {
+const stopActiveChild = (signal, exitCode = 0) => {
   if (shuttingDown) return;
   shuttingDown = true;
-  if (!activeChild || activeChild.exitCode !== null) process.exit(0);
+  shutdownExitCode = exitCode;
+  if (!activeChild || activeChild.exitCode !== null) process.exit(exitCode);
   activeChild.kill(signal);
   const forceStop = setTimeout(() => activeChild?.kill('SIGKILL'), 5000);
   forceStop.unref();
@@ -221,18 +307,56 @@ const stopActiveChild = (signal) => {
 process.on('SIGINT', () => stopActiveChild('SIGINT'));
 process.on('SIGTERM', () => stopActiveChild('SIGTERM'));
 
+const openDevelopmentClient = async () => {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    if (activeChild.exitCode !== null) return;
+    try {
+      const response = await fetch('http://127.0.0.1:8081/status', { signal: AbortSignal.timeout(500) });
+      if (response.ok && (await response.text()).includes('packager-status:running')) {
+        const manifestUrl = 'http://localhost:8081';
+        const developmentUrl = `exposure://expo-development-client/?url=${encodeURIComponent(manifestUrl)}`;
+        const result = adbSync([
+          'shell', 'am', 'start', '-a', 'android.intent.action.VIEW',
+          '-d', developmentUrl, `${packageName}/.MainActivity`,
+        ]);
+        if (result.status !== 0) {
+          throw new Error((result.stderr || result.stdout || 'ADB could not open Exposure.').trim());
+        }
+        console.log('Metro ready. Exposure opened on Android.');
+        return;
+      }
+    } catch (error) {
+      if (error.name !== 'TimeoutError' && !error.message.includes('fetch failed')) throw error;
+    }
+    await delay(250);
+  }
+  throw new Error('Metro did not become ready on http://127.0.0.1:8081 within 30 seconds.');
+};
+
 const run = (index) => {
   if (index >= commands[mode].length) {
-    if (mode === 'install') runAdb(['shell', 'am', 'force-stop', packageName], 'Stopping the unserved development session');
+    if (mode === 'install') {
+      const apk = join(projectRoot, 'android', 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk');
+      runAdb(['install', '-r', '-d', apk], 'Installing the Android development client');
+      runAdb(['shell', 'am', 'force-stop', packageName], 'Stopping the unserved development session');
+      console.log(`Installed Android development client: ${apk}`);
+    }
     process.exit(0);
   }
-  activeChild = spawn(process.execPath, [expoCli, ...commands[mode][index]], {
-    cwd: projectRoot,
+  const command = commands[mode][index];
+  activeChild = spawn(command.executable, command.args, {
+    cwd: command.cwd ?? projectRoot,
     env,
     stdio: 'inherit',
   });
+  if (mode === 'dev') {
+    openDevelopmentClient().catch((error) => {
+      console.error(`Android development client failed to open: ${error.message}`);
+      stopActiveChild('SIGTERM', 1);
+    });
+  }
   activeChild.on('exit', (code, signal) => {
-    if (shuttingDown) process.exit(0);
+    if (shuttingDown) process.exit(shutdownExitCode);
     if (signal) process.exit(1);
     if (code) process.exit(code);
     run(index + 1);

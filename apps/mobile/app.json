@@ -49,6 +49,7 @@
           "motionPermission": "Allow Exposure to show a live camera level"
         }
       ],
+      "./plugins/withAndroidNinja",
       "./plugins/withAndroidCleartextTraffic"
     ]
   }

@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 
 const isWindows = process.platform === 'win32';
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
