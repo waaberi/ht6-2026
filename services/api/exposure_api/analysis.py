@@ -330,7 +330,7 @@ def analyze_deterministic(
         value = next((exif.get(key) for key in keys if exif.get(key)), None)
         if value is not None:
             metrics[metric_name] = str(value)[:160]
-    summary = "AI interpretation unavailable. Measurements are still ready."
+    summary = "Measurements ready. AI unavailable."
 
     return AnalysisResult(
         version_id=version_id,

@@ -184,6 +184,10 @@ def _coach_prompt(request: CoachRequest, available_tools: list[str]) -> str:
         f"- {tool}: {COACH_TOOL_GUIDANCE[tool]}."
         for tool in available_tools
     )
+    concise = request.preferences.detail != "detailed"
+    headline_limit = 6 if concise else 8
+    reason_limit = 16 if concise else 24
+    action_reason_limit = 14 if concise else 20
     return (
         "ROLE\n"
         "You are Exposure Coach, a rigorous and concise photography assistant. Help the photographer make the "
@@ -207,12 +211,12 @@ def _coach_prompt(request: CoachRequest, available_tools: list[str]) -> str:
         "Do not return a tool that is not listed above.\n\n"
         "OUTPUT CONTRACT\n"
         "Answer the exact question with only image-specific guidance. Return the supplied JSON schema only. headline "
-        "states the priority in at most 8 words. reason explains why it matters for this image in at most 24 words. "
+        f"states the priority in at most {headline_limit} words. reason explains why it matters for this image in at most {reason_limit} words. "
         "Normally include one decisive evidence item; include more only when the answer depends on them. captureAdvice "
         "must be empty unless capture choices directly answer the question; otherwise include at most three concrete "
         "choices, each with basedOn evidence paths and an explicit tradeoff for ISO, aperture, or shutter. "
         "actions normally contains zero or one reversible proposal; return two only when the user explicitly requests "
-        "distinct alternatives. Action labels use at most 6 words and reasons at most 20. Every action must include one "
+        f"distinct alternatives. Action labels use at most 6 words and reasons at most {action_reason_limit}. Every action must include one "
         "to four valid basedOn paths, and requiresConfirmation must be true. Never output a generic photography checklist, "
         "repeat the question, or restate evidence without a decision. Use "
         "remove only for a demonstrated accidental distraction; use add only for an explicit creative request. "
@@ -297,6 +301,8 @@ class GeminiProvider:
             self.semantic_model,
             os.getenv("GEMINI_FALLBACK_MODELS", ""),
         )
+        configured_thinking = os.getenv("GEMINI_THINKING_LEVEL", "low").strip().lower()
+        self.thinking_level = configured_thinking if configured_thinking in {"minimal", "low", "medium", "high"} else "low"
         self.image_model = os.getenv("NANO_BANANA_MODEL", "gemini-3.1-flash-image")
         self._client = genai.Client(api_key=self.api_key) if self.api_key else None
 
@@ -330,6 +336,11 @@ class GeminiProvider:
             *(f"metrics.{key}" for key in deterministic.metrics),
             *(f"signals.{signal.id}" for signal in deterministic.signals),
         ]
+        concise = coaching.get("detail") != "detailed"
+        summary_limit = 12 if concise else 18
+        title_limit = 4 if concise else 6
+        explanation_limit = 16 if concise else 22
+        action_limit = 8 if concise else 12
         prompt = (
             "You are Exposure, a rigorous photography editor. Convert measured signals into concise, image-specific "
             "judgments; the deterministic layer intentionally supplies no diagnosis copy. Assess a signal only by its "
@@ -339,9 +350,9 @@ class GeminiProvider:
             "issues must cite only supplied basedOn references; image-only observations still "
             "need one related measured reference. Unknown references are discarded. Do not contradict measurements, "
             "invent EXIF, infer GPS, apply generic rules, or duplicate a signal. Present only warranted findings, from "
-            "zero to three, ordered by impact. Summary: at most 24 words. Title: at most 7 words. Explanation: one "
-            "sentence, at most 24 words. "
-            "Action: at most 14 words. Every statement must name evidence or visible context specific to this image. "
+            f"zero to three, ordered by impact. Summary: at most {summary_limit} words. Title: at most {title_limit} words. "
+            f"Explanation: one sentence, at most {explanation_limit} words. Action: at most {action_limit} words. "
+            "Do not restate the summary in a finding. Every statement must name evidence or visible context specific to this image. "
             "Bounding boxes use [ymin,xmin,ymax,xmax] on a 0..1000 scale. Return JSON matching the schema only.\n\n"
             f"Measurements: {json.dumps(deterministic.metrics, separators=(',', ':'))}\n"
             f"Measured signals: {json.dumps(signals, separators=(',', ':'))}\n"
@@ -364,6 +375,7 @@ class GeminiProvider:
                     "mime_type": "application/json",
                     "schema": _gemini_json_schema(SemanticAnalysis),
                 },
+                generation_config={"thinking_level": self.thinking_level},
                 **options,
             )
             return SemanticAnalysis.model_validate_json(interaction.output_text)
@@ -392,6 +404,7 @@ class GeminiProvider:
                     "mime_type": "application/json",
                     "schema": _gemini_json_schema(CoachResponse),
                 },
+                generation_config={"thinking_level": self.thinking_level},
                 **options,
             )
             return CoachResponse.model_validate_json(interaction.output_text)

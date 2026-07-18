@@ -136,6 +136,7 @@ async def health() -> dict[str, object]:
         "geminiConfigured": provider.configured,
         "semanticModel": provider.semantic_model,
         "semanticFallbackModels": list(getattr(provider, "semantic_models", (provider.semantic_model,))[1:]),
+        "semanticThinkingLevel": getattr(provider, "thinking_level", "low"),
         "imageModel": provider.image_model,
         "authRequired": auth.AUTH_REQUIRED,
         "authConfigured": auth.auth_configured(),

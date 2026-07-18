@@ -65,7 +65,7 @@ def test_semantic_prompt_exposes_grounded_signals_and_concise_contract() -> None
         )],
         issues=[],
         camera_recommendations=[],
-        summary="AI interpretation unavailable. Measurements are still ready.",
+        summary="Measurements ready. AI unavailable.",
     )
     provider = GeminiProvider()
     provider._client = SimpleNamespace(interactions=Interactions())  # type: ignore[assignment]
@@ -79,8 +79,18 @@ def test_semantic_prompt_exposes_grounded_signals_and_concise_contract() -> None
     assert '"id":"signal-light"' in prompt
     assert "signals.signal-light" in prompt
     assert "zero to three" in prompt
-    assert "Summary: at most 24 words" in prompt
+    assert "Summary: at most 12 words" in prompt
+    assert "Title: at most 4 words" in prompt
+    assert "Explanation: one sentence, at most 16 words" in prompt
+    assert "Do not restate the summary" in prompt
     assert "Unknown references are discarded" in prompt
+    assert captured["generation_config"] == {"thinking_level": "low"}
+
+    asyncio.run(provider.analyze_semantics(b"image", "image/png", analysis, {}, {"detail": "detailed"}))
+    detailed_prompt = captured["input"][0]["text"]  # type: ignore[index]
+    assert "Summary: at most 18 words" in detailed_prompt
+    assert "Title: at most 6 words" in detailed_prompt
+    assert "Explanation: one sentence, at most 22 words" in detailed_prompt
 
 
 def test_gemini_schemas_use_only_the_supported_structured_output_shape() -> None:
@@ -290,6 +300,11 @@ def test_semantic_model_chain_does_not_mask_non_model_errors(monkeypatch: pytest
     assert calls == ["primary-model"]
 
 
+def test_invalid_thinking_level_falls_back_to_low(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GEMINI_THINKING_LEVEL", "unbounded")
+    assert GeminiProvider().thinking_level == "low"
+
+
 def test_coach_prompt_exposes_only_enabled_tools_and_photography_contract() -> None:
     captured: dict[str, object] = {}
 
@@ -350,6 +365,10 @@ def test_coach_prompt_exposes_only_enabled_tools_and_photography_contract() -> N
     assert "Every action must include one to four valid basedOn paths" in prompt
     assert "USE ONLY WHEN RELEVANT" in prompt
     assert "captureAdvice must be empty unless capture choices directly answer the question" in prompt
+    assert captured["generation_config"] == {"thinking_level": "low"}
+    assert "headline states the priority in at most 6 words" in prompt
+    assert "this image in at most 16 words" in prompt
+    assert "reasons at most 14" in prompt
     schema = captured["response_format"]["schema"]  # type: ignore[index]
     assert {"headline", "reason"}.issubset(schema["required"])
 

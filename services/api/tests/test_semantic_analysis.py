@@ -62,7 +62,7 @@ def _analysis_with_signals() -> AnalysisResult:
         ],
         issues=[],
         camera_recommendations=[],
-        summary="AI interpretation unavailable. Measurements are still ready.",
+        summary="Measurements ready. AI unavailable.",
     )
 
 
@@ -81,7 +81,7 @@ def test_deterministic_analysis_emits_signals_without_diagnosis_templates() -> N
     assert first.signals
     assert first.issues == []
     assert first.camera_recommendations == []
-    assert first.summary == "AI interpretation unavailable. Measurements are still ready."
+    assert first.summary == "Measurements ready. AI unavailable."
     assert [signal.id for signal in first.signals] == [signal.id for signal in second.signals]
     assert all(signal.id.startswith("signal-") for signal in first.signals)
     assert all(signal.signal_key and signal.evidence for signal in first.signals)
