@@ -1,0 +1,7 @@
+packages:
+  - apps/*
+
+onlyBuiltDependencies:
+  - "@shopify/react-native-skia"
+  - esbuild
+  - supabase

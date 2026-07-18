@@ -1,0 +1,27 @@
+{
+  "name": "exposure-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "packageManager": "pnpm@10.19.0",
+  "engines": {
+    "node": ">=22.13.0",
+    "pnpm": ">=10.19.0"
+  },
+  "scripts": {
+    "bootstrap": "node scripts/setup.mjs",
+    "android": "pnpm --filter exposure run android",
+    "dev": "pnpm --filter exposure run dev:android",
+    "api": "uv --directory services/api run uvicorn exposure_api.main:app --reload",
+    "db:start": "supabase start",
+    "db:reset": "supabase db reset",
+    "db:test": "supabase test db",
+    "db:stop": "supabase stop",
+    "test:mobile": "pnpm --filter exposure run typecheck && pnpm --filter exposure run test && pnpm --filter exposure run doctor",
+    "test:api": "uv --directory services/api run pytest",
+    "test:db": "node scripts/test-db.mjs",
+    "test": "pnpm test:mobile && pnpm test:api && pnpm test:db"
+  },
+  "devDependencies": {
+    "supabase": "2.109.1"
+  }
+}

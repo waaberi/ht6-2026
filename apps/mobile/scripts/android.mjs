@@ -1,11 +1,13 @@
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { createRequire } from 'node:module';
+import { delimiter, dirname, join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import process from 'node:process';
 
 const mode = process.argv[2];
 const projectRoot = new URL('..', import.meta.url).pathname;
+const require = createRequire(import.meta.url);
 
 const executable = (root, name) => root && existsSync(join(root, 'bin', name));
 const firstDirectory = (candidates, requiredPath) => candidates.find((candidate) => candidate && existsSync(join(candidate, requiredPath)));
@@ -71,7 +73,7 @@ const runAdb = (args, description) => {
   }
 };
 
-const expoCli = join(projectRoot, 'node_modules', 'expo', 'bin', 'cli');
+const expoCli = join(dirname(require.resolve('expo/package.json')), 'bin', 'cli');
 const commands = {
   install: [
     ['prebuild', '--platform', 'android', '--no-install'],

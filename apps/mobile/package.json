@@ -34,18 +34,14 @@
   },
   "scripts": {
     "start": "expo start --dev-client",
-    "android": "npm run android:setup",
+    "android": "pnpm android:setup",
     "android:setup": "node scripts/android.mjs install",
-    "android:debug": "npm run android:setup",
+    "android:debug": "pnpm android:setup",
     "dev:android": "node scripts/android.mjs dev",
     "ios": "expo run:ios",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test src/domain/*.test.ts",
     "doctor": "expo-doctor"
-  },
-  "allowScripts": {
-    "@shopify/react-native-skia@2.6.2": true,
-    "esbuild@0.28.1": true
   },
   "private": true
 }
