@@ -26,6 +26,7 @@ export type AdjustmentValues = Partial<{
 }>;
 
 export type CanvasTransform = {
+  /** Normalized to the visible, rotated canvas before any generative expansion. */
   crop?: Region;
   rotationDegrees: number;
   perspective: [number, number, number, number, number, number, number, number, number];

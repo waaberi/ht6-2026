@@ -12,8 +12,10 @@ import {
 import React, { useMemo, useRef, useState } from 'react';
 import { PanResponder, StyleSheet, View } from 'react-native';
 
+import { quarterTurnsForRotation } from '../domain/canvasTransforms';
 import type { AdjustmentValues, AnalysisResult, LayerStack, Region } from '../domain/types';
 import { colors } from './theme';
+import { CropOverlay } from './studio/CropOverlay';
 
 const addAdjustments = (target: AdjustmentValues, source: AdjustmentValues, weight = 1) => {
   for (const [key, value] of Object.entries(source) as Array<[keyof AdjustmentValues, number]>) {
@@ -64,6 +66,11 @@ export const PhotoCanvas = ({
   target,
   onTargetChange,
   showIssues = true,
+  editingCrop = false,
+  cropRegion,
+  cropAspect,
+  onCropChange,
+  onCropCommit,
 }: {
   uri: string;
   stack: LayerStack;
@@ -71,6 +78,11 @@ export const PhotoCanvas = ({
   target?: Region;
   onTargetChange?: (target: Region) => void;
   showIssues?: boolean;
+  editingCrop?: boolean;
+  cropRegion?: Region;
+  cropAspect?: number;
+  onCropChange?: (region: Region) => void;
+  onCropCommit?: (region: Region) => void;
 }) => {
   const image = useImage(uri);
   const [size, setSize] = useState({ width: 1, height: 1 });
@@ -80,19 +92,21 @@ export const PhotoCanvas = ({
   const grain = Math.max(0, adjustments.grain ?? 0);
   const vignette = Math.max(-1, Math.min(1, adjustments.vignette ?? 0));
   const rotationDegrees = stack.canvasTransform.rotationDegrees;
-  const quarterTurns = Math.round(rotationDegrees / 90);
+  const quarterTurns = quarterTurnsForRotation(rotationDegrees);
   const swapsDimensions = Math.abs(quarterTurns) % 2 === 1;
   const straightenDegrees = rotationDegrees - quarterTurns * 90;
   const rotation = -rotationDegrees * Math.PI / 180;
   const geometry = useMemo(() => {
     const imageWidth = image?.width() ?? 1;
     const imageHeight = image?.height() ?? 1;
-    const crop = stack.canvasTransform.crop ?? { x: 0, y: 0, width: 1, height: 1 };
+    const crop = editingCrop ? { x: 0, y: 0, width: 1, height: 1 } : stack.canvasTransform.crop ?? { x: 0, y: 0, width: 1, height: 1 };
     const expansion = stack.canvasTransform.expansion ?? { top: 0, right: 0, bottom: 0, left: 0 };
-    const croppedWidth = imageWidth * crop.width;
-    const croppedHeight = imageHeight * crop.height;
-    const contentWidth = swapsDimensions ? croppedHeight : croppedWidth;
-    const contentHeight = swapsDimensions ? croppedWidth : croppedHeight;
+    const rotatedWidth = swapsDimensions ? imageHeight : imageWidth;
+    const rotatedHeight = swapsDimensions ? imageWidth : imageHeight;
+    const croppedWidth = rotatedWidth * crop.width;
+    const croppedHeight = rotatedHeight * crop.height;
+    const contentWidth = croppedWidth;
+    const contentHeight = croppedHeight;
     const expandedWidth = contentWidth + expansion.left + expansion.right;
     const expandedHeight = contentHeight + expansion.top + expansion.bottom;
     const scale = Math.min(size.width / expandedWidth, size.height / expandedHeight);
@@ -107,35 +121,32 @@ export const PhotoCanvas = ({
       width: contentWidth * scale,
       height: contentHeight * scale,
     };
-    const center = { x: content.x + content.width / 2, y: content.y + content.height / 2 };
-    const cropped = {
-      x: center.x - croppedWidth * scale / 2,
-      y: center.y - croppedHeight * scale / 2,
-      width: croppedWidth * scale,
-      height: croppedHeight * scale,
+    const rotated = {
+      x: content.x - crop.x * rotatedWidth * scale,
+      y: content.y - crop.y * rotatedHeight * scale,
+      width: rotatedWidth * scale,
+      height: rotatedHeight * scale,
     };
+    const center = { x: rotated.x + rotated.width / 2, y: rotated.y + rotated.height / 2 };
     const straightenRadians = Math.abs(straightenDegrees) * Math.PI / 180;
     const cosine = Math.abs(Math.cos(straightenRadians));
     const sine = Math.abs(Math.sin(straightenRadians));
     const straightenScale = Math.max(
-      (contentWidth * cosine + contentHeight * sine) / Math.max(1, contentWidth),
-      (contentWidth * sine + contentHeight * cosine) / Math.max(1, contentHeight),
+      (rotatedWidth * cosine + rotatedHeight * sine) / Math.max(1, rotatedWidth),
+      (rotatedWidth * sine + rotatedHeight * cosine) / Math.max(1, rotatedHeight),
     );
     return {
-      crop,
       expansion,
       scale,
-      croppedWidth,
-      croppedHeight,
       contentWidth,
       contentHeight,
       display,
       content,
       center,
       straightenScale,
-      full: { x: cropped.x - crop.x * fullWidth, y: cropped.y - crop.y * fullHeight, width: fullWidth, height: fullHeight },
+      full: { x: center.x - fullWidth / 2, y: center.y - fullHeight / 2, width: fullWidth, height: fullHeight },
     };
-  }, [image, size, stack.canvasTransform.crop, stack.canvasTransform.expansion, straightenDegrees, swapsDimensions]);
+  }, [editingCrop, image, size, stack.canvasTransform.crop, stack.canvasTransform.expansion, straightenDegrees, swapsDimensions]);
   const selectionStart = useRef<{ x: number; y: number } | null>(null);
   const selectionResponder = useMemo(() => {
     const display = geometry.display;
@@ -295,6 +306,28 @@ export const PhotoCanvas = ({
           ) : null}
         </Group>
       </Canvas>
+      {editingCrop && onCropChange && onCropCommit ? (
+        <View
+          pointerEvents="box-none"
+          style={[
+            styles.cropViewport,
+            {
+              left: geometry.content.x,
+              top: geometry.content.y,
+              width: geometry.content.width,
+              height: geometry.content.height,
+            },
+          ]}
+        >
+          <CropOverlay
+            region={cropRegion ?? stack.canvasTransform.crop ?? { x: 0, y: 0, width: 1, height: 1 }}
+            lockedAspectRatio={cropAspect}
+            disabled={!image}
+            onChange={onCropChange}
+            onCommit={onCropCommit}
+          />
+        </View>
+      ) : null}
     </View>
   );
 };
@@ -310,4 +343,5 @@ const OverlayImage = ({ uri, opacity, rect }: { uri: string; opacity: number; re
 
 const styles = StyleSheet.create({
   frame: { flex: 1, overflow: 'hidden', backgroundColor: colors.canvas },
+  cropViewport: { position: 'absolute' },
 });

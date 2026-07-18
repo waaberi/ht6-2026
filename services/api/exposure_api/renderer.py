@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import math
 from typing import Any
 
 import numpy as np
@@ -141,28 +142,18 @@ def _composite_canvas_asset(
     return Image.alpha_composite(base.convert("RGBA"), canvas).convert("RGB")
 
 
-def _apply_canvas_transform(image: Image.Image, transform: dict[str, Any]) -> Image.Image:
+def _quarter_turns_for_rotation(rotation: float) -> int:
+    turns = rotation / 90
+    nearest = math.floor(turns + 0.5)
+    if abs(abs(turns - nearest) - 0.5) < 1e-9:
+        return math.trunc(turns)
+    return nearest
+
+
+def _apply_rotation(image: Image.Image, rotation: float) -> Image.Image:
     result = image
-    perspective = transform.get("perspective")
-    if isinstance(perspective, list) and len(perspective) == 9 and perspective != [1, 0, 0, 0, 1, 0, 0, 0, 1]:
-        matrix = np.asarray(perspective, dtype=np.float64).reshape(3, 3)
-        try:
-            inverse = np.linalg.inv(matrix)
-            inverse /= inverse[2, 2]
-            coefficients = tuple(inverse.reshape(-1)[:8])
-            result = result.transform(result.size, Image.Transform.PERSPECTIVE, coefficients, resample=Image.Resampling.BICUBIC)
-        except np.linalg.LinAlgError:
-            pass
-    crop = transform.get("crop")
-    if crop:
-        left = max(0, min(result.width - 1, round(float(crop.get("x", 0)) * result.width)))
-        top = max(0, min(result.height - 1, round(float(crop.get("y", 0)) * result.height)))
-        right = max(left + 1, min(result.width, round((float(crop.get("x", 0)) + float(crop.get("width", 1))) * result.width)))
-        bottom = max(top + 1, min(result.height, round((float(crop.get("y", 0)) + float(crop.get("height", 1))) * result.height)))
-        result = result.crop((left, top, right, bottom))
-    rotation = float(transform.get("rotationDegrees", 0))
     if rotation:
-        quarter_turns = round(rotation / 90)
+        quarter_turns = _quarter_turns_for_rotation(rotation)
         quarter_degrees = quarter_turns * 90
         straighten = rotation - quarter_degrees
         if quarter_turns % 4:
@@ -181,6 +172,31 @@ def _apply_canvas_transform(image: Image.Image, transform: dict[str, Any]) -> Im
             left = max(0, (rotated.width - width) // 2)
             top = max(0, (rotated.height - height) // 2)
             result = rotated.crop((left, top, left + width, top + height))
+    return result
+
+
+def _apply_canvas_transform(image: Image.Image, transform: dict[str, Any]) -> Image.Image:
+    result = image
+    perspective = transform.get("perspective")
+    if isinstance(perspective, list) and len(perspective) == 9 and perspective != [1, 0, 0, 0, 1, 0, 0, 0, 1]:
+        matrix = np.asarray(perspective, dtype=np.float64).reshape(3, 3)
+        try:
+            inverse = np.linalg.inv(matrix)
+            inverse /= inverse[2, 2]
+            coefficients = tuple(inverse.reshape(-1)[:8])
+            result = result.transform(result.size, Image.Transform.PERSPECTIVE, coefficients, resample=Image.Resampling.BICUBIC)
+        except np.linalg.LinAlgError:
+            pass
+    result = _apply_rotation(result, float(transform.get("rotationDegrees", 0)))
+    # Crop coordinates are normalized to the visible canvas after rotation and
+    # before expansion. Keep this order in parity with the mobile preview.
+    crop = transform.get("crop")
+    if crop:
+        left = max(0, min(result.width - 1, round(float(crop.get("x", 0)) * result.width)))
+        top = max(0, min(result.height - 1, round(float(crop.get("y", 0)) * result.height)))
+        right = max(left + 1, min(result.width, round((float(crop.get("x", 0)) + float(crop.get("width", 1))) * result.width)))
+        bottom = max(top + 1, min(result.height, round((float(crop.get("y", 0)) + float(crop.get("height", 1))) * result.height)))
+        result = result.crop((left, top, right, bottom))
     expansion = transform.get("expansion")
     if expansion:
         result = ImageOps.expand(result, border=(int(expansion.get("left", 0)), int(expansion.get("top", 0)), int(expansion.get("right", 0)), int(expansion.get("bottom", 0))), fill="black")

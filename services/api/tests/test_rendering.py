@@ -52,6 +52,53 @@ def test_crop_remains_a_canvas_transform(client: TestClient, image_bytes: bytes)
     assert Image.open(io.BytesIO(response.content)).size == (60, 40)
 
 
+def test_crop_coordinates_are_normalized_to_the_visible_rotated_canvas() -> None:
+    source = Image.new("RGB", (6, 4), "#225588")
+    pixels = np.asarray(source).copy()
+    pixels[:, :3] = (234, 189, 168)
+    source = Image.fromarray(pixels, "RGB")
+    encoded = io.BytesIO()
+    source.save(encoded, format="PNG")
+
+    rendered = render_layer_stack(
+        encoded.getvalue(),
+        LayerStack.model_validate({
+            "canvasTransform": {
+                **IDENTITY,
+                "rotationDegrees": 90,
+                "crop": {"x": 0, "y": 0, "width": 1, "height": 0.5},
+            },
+            "layers": [],
+        }),
+    )
+
+    assert rendered.size == (4, 3)
+    assert np.all(np.asarray(rendered) == (234, 189, 168))
+
+
+def test_rotated_crop_preset_keeps_its_output_ratio_and_expansion_order() -> None:
+    source = Image.new("RGB", (160, 120), "#61988e")
+    encoded = io.BytesIO()
+    source.save(encoded, format="PNG")
+
+    rendered = render_layer_stack(
+        encoded.getvalue(),
+        LayerStack.model_validate({
+            "canvasTransform": {
+                **IDENTITY,
+                "rotationDegrees": 90,
+                "crop": {"x": 0.125, "y": 0, "width": 0.75, "height": 1},
+                "expansion": {"top": 0, "right": 5, "bottom": 0, "left": 0},
+            },
+            "layers": [],
+        }),
+    )
+
+    assert rendered.size == (95, 160)
+    assert np.all(np.asarray(rendered)[:, :90] == (97, 152, 142))
+    assert np.all(np.asarray(rendered)[:, 90:] == 0)
+
+
 def test_jpeg_export_preserves_requested_metadata(client: TestClient) -> None:
     source = Image.new("RGB", (24, 16), "#7a5cff")
     metadata = Image.Exif()
@@ -203,6 +250,14 @@ def test_rotation_swaps_canvas_without_clipping_and_straighten_avoids_black_corn
     )
     assert straightened.size == source.size
     assert np.min(np.asarray(straightened)) > 0
+
+    for degrees in (-45, -37.5, 37.5, 45):
+        freely_rotated = render_layer_stack(
+            encoded.getvalue(),
+            LayerStack.model_validate({"canvasTransform": {**IDENTITY, "rotationDegrees": degrees}, "layers": []}),
+        )
+        assert freely_rotated.size == source.size
+        assert np.min(np.asarray(freely_rotated)) > 0
 
 
 def test_gps_is_excluded_from_export_unless_explicitly_enabled(client: TestClient) -> None:

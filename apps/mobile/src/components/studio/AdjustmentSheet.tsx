@@ -3,24 +3,33 @@ import Slider from '@react-native-community/slider';
 import React from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import type { AdjustmentValues } from '../../domain/types';
+import type { AdjustmentValues, CanvasTransform } from '../../domain/types';
 import { colors } from '../theme';
+import { TransformSheet } from './TransformSheet';
 
 type AdjustmentKey = keyof AdjustmentValues;
+export type AdjustmentSection = 'light' | 'color' | 'detail' | 'crop';
 
-const controls: Array<{ key: AdjustmentKey; label: string; minimum: number; maximum: number; step: number }> = [
-  { key: 'exposure', label: 'Exposure', minimum: -1, maximum: 1, step: 0.01 },
-  { key: 'contrast', label: 'Contrast', minimum: -1, maximum: 1, step: 0.01 },
-  { key: 'highlights', label: 'Highlights', minimum: -1, maximum: 1, step: 0.01 },
-  { key: 'shadows', label: 'Shadows', minimum: -1, maximum: 1, step: 0.01 },
-  { key: 'temperature', label: 'Temperature', minimum: -1, maximum: 1, step: 0.01 },
-  { key: 'tint', label: 'Tint', minimum: -1, maximum: 1, step: 0.01 },
-  { key: 'saturation', label: 'Saturation', minimum: -1, maximum: 1, step: 0.01 },
-  { key: 'vibrance', label: 'Vibrance', minimum: -1, maximum: 1, step: 0.01 },
-  { key: 'sharpening', label: 'Sharpen', minimum: 0, maximum: 1, step: 0.01 },
-  { key: 'denoise', label: 'Denoise', minimum: 0, maximum: 1, step: 0.01 },
-  { key: 'grain', label: 'Grain', minimum: 0, maximum: 1, step: 0.01 },
-  { key: 'vignette', label: 'Vignette', minimum: -1, maximum: 1, step: 0.01 },
+const controls: Array<{ key: AdjustmentKey; label: string; section: Exclude<AdjustmentSection, 'crop'>; minimum: number; maximum: number; step: number }> = [
+  { key: 'exposure', label: 'Exposure', section: 'light', minimum: -1, maximum: 1, step: 0.01 },
+  { key: 'contrast', label: 'Contrast', section: 'light', minimum: -1, maximum: 1, step: 0.01 },
+  { key: 'highlights', label: 'Highlights', section: 'light', minimum: -1, maximum: 1, step: 0.01 },
+  { key: 'shadows', label: 'Shadows', section: 'light', minimum: -1, maximum: 1, step: 0.01 },
+  { key: 'temperature', label: 'Temperature', section: 'color', minimum: -1, maximum: 1, step: 0.01 },
+  { key: 'tint', label: 'Tint', section: 'color', minimum: -1, maximum: 1, step: 0.01 },
+  { key: 'saturation', label: 'Saturation', section: 'color', minimum: -1, maximum: 1, step: 0.01 },
+  { key: 'vibrance', label: 'Vibrance', section: 'color', minimum: -1, maximum: 1, step: 0.01 },
+  { key: 'sharpening', label: 'Sharpen', section: 'detail', minimum: 0, maximum: 1, step: 0.01 },
+  { key: 'denoise', label: 'Denoise', section: 'detail', minimum: 0, maximum: 1, step: 0.01 },
+  { key: 'grain', label: 'Grain', section: 'detail', minimum: 0, maximum: 1, step: 0.01 },
+  { key: 'vignette', label: 'Vignette', section: 'detail', minimum: -1, maximum: 1, step: 0.01 },
+];
+
+const sections: Array<{ id: AdjustmentSection; label: string }> = [
+  { id: 'light', label: 'Light' },
+  { id: 'color', label: 'Color' },
+  { id: 'detail', label: 'Detail' },
+  { id: 'crop', label: 'Crop' },
 ];
 
 export const AdjustmentSheet = ({
@@ -30,6 +39,18 @@ export const AdjustmentSheet = ({
   onResetControl,
   onRestore,
   busy,
+  section,
+  onSectionChange,
+  transform,
+  imageWidth,
+  imageHeight,
+  onAngleChange,
+  onAngleCommit,
+  onCrop,
+  onFreeformCrop,
+  lockedCropAspect,
+  onRotate,
+  onRestoreTransform,
 }: {
   values: AdjustmentValues;
   onChange: (key: AdjustmentKey, value: number) => void;
@@ -37,11 +58,53 @@ export const AdjustmentSheet = ({
   onResetControl: (key: AdjustmentKey) => void;
   onRestore: () => void;
   busy: boolean;
+  section: AdjustmentSection;
+  onSectionChange: (section: AdjustmentSection) => void;
+  transform: CanvasTransform;
+  imageWidth?: number;
+  imageHeight?: number;
+  onAngleChange: (degrees: number) => void;
+  onAngleCommit: (degrees: number) => void;
+  onCrop: (aspect: number | undefined) => void;
+  onFreeformCrop: () => void;
+  lockedCropAspect?: number;
+  onRotate: () => void;
+  onRestoreTransform: () => void;
 }) => {
   const hasChanges = Object.values(values).some((value) => Math.abs(value ?? 0) > 0.0001);
   return (
     <View>
-      <View style={styles.toolbar}>
+      <View accessibilityRole="tablist" style={styles.sections}>
+        {sections.map((item) => (
+          <Pressable
+            key={item.id}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: item.id === section }}
+            style={({ pressed }) => [styles.section, item.id === section && styles.sectionSelected, pressed && styles.pressed]}
+            onPress={() => onSectionChange(item.id)}
+          >
+            <Text style={[styles.sectionText, item.id === section && styles.sectionTextSelected]}>{item.label}</Text>
+          </Pressable>
+        ))}
+      </View>
+
+      {section === 'crop' ? (
+        <TransformSheet
+          transform={transform}
+          width={imageWidth}
+          height={imageHeight}
+          busy={busy}
+          onStraightenChange={onAngleChange}
+          onStraightenCommit={onAngleCommit}
+          onCrop={onCrop}
+          onFreeform={onFreeformCrop}
+          lockedAspect={lockedCropAspect}
+          onRotate={onRotate}
+          onRestore={onRestoreTransform}
+        />
+      ) : null}
+
+      {section !== 'crop' ? <View style={styles.toolbar}>
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Restore all adjustments"
@@ -52,8 +115,9 @@ export const AdjustmentSheet = ({
           <MaterialCommunityIcons name="restore" size={19} color={hasChanges ? colors.text : colors.textSecondary} />
           <Text style={[styles.restoreText, !hasChanges && styles.disabledText]}>Restore</Text>
         </Pressable>
-      </View>
-      {controls.map((control) => {
+      </View> : null}
+
+      {controls.filter((control) => control.section === section).map((control) => {
         const value = values[control.key] ?? 0;
         const changed = Math.abs(value) > 0.0001;
         return (
@@ -96,6 +160,11 @@ export const AdjustmentSheet = ({
 };
 
 const styles = StyleSheet.create({
+  sections: { flexDirection: 'row', gap: 6, marginBottom: 10 },
+  section: { flex: 1, minHeight: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
+  sectionSelected: { backgroundColor: colors.surfaceRaised },
+  sectionText: { color: colors.textSecondary, fontSize: 12, fontWeight: '700' },
+  sectionTextSelected: { color: colors.primary },
   toolbar: { minHeight: 48, flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', marginBottom: 2 },
   restore: { minWidth: 96, minHeight: 48, borderRadius: 24, borderWidth: 1, borderColor: colors.outline, paddingHorizontal: 12, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center' },
   restoreText: { color: colors.text, fontSize: 13, fontWeight: '700' },

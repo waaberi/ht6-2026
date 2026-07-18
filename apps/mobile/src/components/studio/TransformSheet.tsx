@@ -3,24 +3,14 @@ import Slider from '@react-native-community/slider';
 import React from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { hasManualTransform, straightenDegrees } from '../../domain/canvasTransforms';
+import { hasManualTransform, quarterTurnsForRotation, straightenDegrees, visibleCropAspect } from '../../domain/canvasTransforms';
 import type { CanvasTransform } from '../../domain/types';
 import { colors } from '../theme';
-
-const aspectOptions = [
-  { label: 'Original', aspect: undefined },
-  { label: '1:1', aspect: 1 },
-  { label: '4:3', aspect: 4 / 3 },
-  { label: '16:9', aspect: 16 / 9 },
-] as const;
 
 const matches = (transform: CanvasTransform, aspect: number | undefined, width?: number, height?: number) => {
   if (aspect === undefined) return !transform.crop;
   if (!transform.crop) return false;
-  const imageAspect = Math.max(1, width ?? 1) / Math.max(1, height ?? 1);
-  const cropAspect = imageAspect * transform.crop.width / transform.crop.height;
-  const expected = imageAspect < 1 && aspect !== 1 ? 1 / aspect : aspect;
-  return Math.abs(cropAspect - expected) < 0.02;
+  return Math.abs(visibleCropAspect(width, height, transform) - aspect) < 0.02;
 };
 
 export const TransformSheet = ({
@@ -31,6 +21,8 @@ export const TransformSheet = ({
   onStraightenChange,
   onStraightenCommit,
   onCrop,
+  onFreeform,
+  lockedAspect,
   onRotate,
   onRestore,
 }: {
@@ -41,11 +33,24 @@ export const TransformSheet = ({
   onStraightenChange: (degrees: number) => void;
   onStraightenCommit: (degrees: number) => void;
   onCrop: (aspect: number | undefined) => void;
+  onFreeform: () => void;
+  lockedAspect?: number;
   onRotate: () => void;
   onRestore: () => void;
 }) => {
   const straighten = straightenDegrees(transform.rotationDegrees);
   const changed = hasManualTransform(transform);
+  const imageAspect = Math.max(1, width ?? 1) / Math.max(1, height ?? 1);
+  const swapsDimensions = Math.abs(quarterTurnsForRotation(transform.rotationDegrees)) % 2 === 1;
+  const outputAspect = swapsDimensions ? 1 / imageAspect : imageAspect;
+  const portrait = outputAspect < 1;
+  const aspectOptions = [
+    { id: 'original', label: 'Original', aspect: undefined },
+    { id: 'free', label: 'Free', aspect: undefined },
+    { id: 'square', label: '1:1', aspect: 1 },
+    { id: 'classic', label: portrait ? '3:4' : '4:3', aspect: portrait ? 3 / 4 : 4 / 3 },
+    { id: 'wide', label: portrait ? '9:16' : '16:9', aspect: portrait ? 9 / 16 : 16 / 9 },
+  ];
   return (
     <View>
       <View style={styles.toolbar}>
@@ -74,15 +79,19 @@ export const TransformSheet = ({
       <Text style={styles.sectionTitle}>Crop</Text>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.aspects}>
         {aspectOptions.map((option) => {
-          const selected = matches(transform, option.aspect, width, height);
+          const selected = option.id === 'original'
+            ? !transform.crop
+            : option.id === 'free'
+              ? Boolean(transform.crop) && lockedAspect === undefined
+              : lockedAspect === option.aspect && matches(transform, option.aspect, width, height);
           return (
             <Pressable
-              key={option.label}
+              key={option.id}
               accessibilityRole="button"
               accessibilityState={{ selected }}
               disabled={busy}
               style={({ pressed }) => [styles.aspect, selected && styles.aspectSelected, pressed && styles.pressed]}
-              onPress={() => onCrop(option.aspect)}
+              onPress={() => option.id === 'free' ? onFreeform() : onCrop(option.aspect)}
             >
               <Text style={[styles.aspectText, selected && styles.aspectTextSelected]}>{option.label}</Text>
             </Pressable>
@@ -91,14 +100,14 @@ export const TransformSheet = ({
       </ScrollView>
 
       <View style={styles.sliderHeading}>
-        <Text style={styles.sectionTitle}>Straighten</Text>
+        <Text style={styles.sectionTitle}>Angle</Text>
         <Text style={styles.value}>{straighten > 0 ? '+' : ''}{straighten.toFixed(1)}°</Text>
       </View>
       <Slider
-        accessibilityLabel="Straighten photo"
+        accessibilityLabel="Rotate photo angle"
         accessibilityHint="Changes apply when you release the slider"
-        minimumValue={-15}
-        maximumValue={15}
+        minimumValue={-45}
+        maximumValue={45}
         step={0.1}
         value={straighten}
         disabled={busy}

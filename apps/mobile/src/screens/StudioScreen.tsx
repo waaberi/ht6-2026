@@ -6,10 +6,9 @@ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, 
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { PhotoCanvas } from '../components/PhotoCanvas';
-import { AdjustmentSheet } from '../components/studio/AdjustmentSheet';
+import { AdjustmentSheet, type AdjustmentSection } from '../components/studio/AdjustmentSheet';
 import { LooksPanel } from '../components/studio/LooksPanel';
 import { StudioToolRail, type StudioTool } from '../components/studio/StudioToolRail';
-import { TransformSheet } from '../components/studio/TransformSheet';
 import { colors } from '../components/theme';
 import { saveGeneratedLayerAsset } from '../data/photoRepository';
 import { recordRecommendationFeedback } from '../data/preferences';
@@ -38,6 +37,15 @@ const CENTER_TARGET: Region = { x: 0.3, y: 0.3, width: 0.4, height: 0.4 };
 const UPPER_TARGET: Region = { x: 0.2, y: 0.08, width: 0.6, height: 0.34 };
 const LOWER_TARGET: Region = { x: 0.2, y: 0.58, width: 0.6, height: 0.34 };
 type ExpansionDirection = 'top' | 'right' | 'bottom' | 'left';
+
+const aspectLabel = (aspect: number) => {
+  if (Math.abs(aspect - 1) < 0.001) return '1:1';
+  if (Math.abs(aspect - 4 / 3) < 0.001) return '4:3';
+  if (Math.abs(aspect - 3 / 4) < 0.001) return '3:4';
+  if (Math.abs(aspect - 16 / 9) < 0.001) return '16:9';
+  if (Math.abs(aspect - 9 / 16) < 0.001) return '9:16';
+  return aspect.toFixed(2);
+};
 
 const removeStyleLayers = (stack: LayerStack): LayerStack => ({
   ...stack,
@@ -83,6 +91,8 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     runAnalysis,
   } = useExposure();
   const [tool, setTool] = useState<StudioTool>('coach');
+  const [adjustmentSection, setAdjustmentSection] = useState<AdjustmentSection>('light');
+  const [cropAspect, setCropAspect] = useState<number>();
   const [message, setMessage] = useState<string>();
   const [coachResponse, setCoachResponse] = useState<CoachResponse>();
   const [coachQuestion, setCoachQuestion] = useState('What is the highest-impact change?');
@@ -164,7 +174,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     const collectiveStack = setCollectiveAdjustments(version.stack, draftAdjustments);
     const adjustedStack: LayerStack = {
       ...collectiveStack,
-      canvasTransform: tool === 'transform' ? draftTransform : collectiveStack.canvasTransform,
+      canvasTransform: tool === 'adjust' ? draftTransform : collectiveStack.canvasTransform,
       layers: collectiveStack.layers.map((layer) => ({
         ...layer,
         opacity: draftLayerOpacities[layer.id] ?? layer.opacity,
@@ -263,7 +273,8 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
       }, `Fix: ${issue.title}`);
       if (changed) {
         await acceptRecommendation(issue);
-        setTool('history');
+        setAdjustmentSection('crop');
+        setTool('adjust');
       }
     } else if (issue.fix?.kind === 'retouch' || issue.fix?.kind === 'generative') {
       openGenerativeTool(
@@ -274,7 +285,8 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
           : issue.recommendedAction,
       );
     } else if (issue.fix?.kind === 'crop') {
-      setTool('transform');
+      setAdjustmentSection('crop');
+      setTool('adjust');
     } else if (issue.fix?.kind === 'retake') {
       onRetake();
     }
@@ -329,7 +341,8 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
         setApplying(true);
         const changed = await commit({ ...version.stack, canvasTransform: plan.transform }, action.label);
         if (changed) await acceptRecommendation(selectedIssue);
-        setTool('history');
+        setAdjustmentSection('crop');
+        setTool('adjust');
       } else if (plan.kind === 'generative') {
         openGenerativeTool(plan.operation, plan.target, plan.prompt);
       } else if (plan.kind === 'expand') {
@@ -396,9 +409,10 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
 
   const cropPhoto = (aspect: number | undefined) => {
     const next: CanvasTransform = { ...draftTransform };
+    setCropAspect(aspect);
     if (aspect === undefined) delete next.crop;
-    else next.crop = centeredCrop(selectedPhoto.width, selectedPhoto.height, aspect);
-    void commitTransform(next, aspect === undefined ? 'Original crop' : `Crop ${aspect === 1 ? '1:1' : Math.abs(aspect - 4 / 3) < 0.01 ? '4:3' : '16:9'}`);
+    else next.crop = centeredCrop(selectedPhoto.width, selectedPhoto.height, aspect, draftTransform.rotationDegrees);
+    void commitTransform(next, aspect === undefined ? 'Original crop' : `Crop ${aspectLabel(aspect)}`);
   };
 
   const commitLayerOpacity = async (layerId: string, value: number) => {
@@ -556,6 +570,11 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
           target={tool === 'ai' && generativeOperation !== 'expand' ? generativeTarget : undefined}
           onTargetChange={tool === 'ai' && generativeOperation !== 'expand' ? updateGenerativeTarget : undefined}
           showIssues={tool === 'coach'}
+          editingCrop={tool === 'adjust' && adjustmentSection === 'crop'}
+          cropRegion={draftTransform.crop}
+          cropAspect={cropAspect}
+          onCropChange={(crop) => setDraftTransform((current) => ({ ...current, crop }))}
+          onCropCommit={(crop) => void commitTransform({ ...draftTransform, crop }, 'Crop')}
         />
       </View>
 
@@ -595,20 +614,24 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
               onResetControl={(key) => void commitAdjustment(key, 0)}
               onRestore={() => void restoreAdjustments()}
               busy={applying}
-            />
-          ) : null}
-
-          {tool === 'transform' ? (
-            <TransformSheet
+              section={adjustmentSection}
+              onSectionChange={setAdjustmentSection}
               transform={draftTransform}
-              width={selectedPhoto.width}
-              height={selectedPhoto.height}
-              busy={applying}
-              onStraightenChange={(degrees) => setDraftTransform((current) => withStraighten(current, degrees))}
-              onStraightenCommit={(degrees) => void commitTransform(withStraighten(draftTransform, degrees), 'Straighten')}
+              imageWidth={selectedPhoto.width}
+              imageHeight={selectedPhoto.height}
+              onAngleChange={(degrees) => setDraftTransform((current) => withStraighten(current, degrees))}
+              onAngleCommit={(degrees) => void commitTransform(withStraighten(draftTransform, degrees), 'Rotate angle')}
               onCrop={cropPhoto}
-              onRotate={() => void commitTransform(rotateClockwise(draftTransform), 'Rotate 90°')}
-              onRestore={() => void commitTransform(restoreManualTransform(draftTransform), 'Restore crop and rotation')}
+              onFreeformCrop={() => setCropAspect(undefined)}
+              lockedCropAspect={cropAspect}
+              onRotate={() => {
+                setCropAspect((current) => current ? 1 / current : undefined);
+                void commitTransform(rotateClockwise(draftTransform), 'Rotate 90°');
+              }}
+              onRestoreTransform={() => {
+                setCropAspect(undefined);
+                void commitTransform(restoreManualTransform(draftTransform), 'Restore crop and rotation');
+              }}
             />
           ) : null}
 
@@ -672,7 +695,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
         <StudioToolRail
           active={tool}
           onChange={(nextTool) => {
-            if (tool === 'transform' && nextTool !== 'transform') setDraftTransform(version.stack.canvasTransform);
+            if (tool === 'adjust' && nextTool !== 'adjust') setDraftTransform(version.stack.canvasTransform);
             setTool(nextTool);
           }}
         />
