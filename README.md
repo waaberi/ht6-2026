@@ -14,14 +14,27 @@ The repository contains:
 
 ## Run locally
 
-Mobile:
+Mobile installation (once, and again only after changing native dependencies or app configuration):
 
 ```bash
 cd apps/mobile
-cp .env.example .env.local
+cp -n .env.example .env.local
 npm install
 npm run android
 ```
+
+Start an Android emulator from Android Studio's Device Manager before running the command. `npm run android` automatically finds Android Studio's SDK and bundled JDK 17/21, builds the debug development client, installs it on the running emulator, and exits without leaving Metro running. The first native build is slow; normal development does not repeat it.
+
+Normal development with Fast Refresh (no Gradle rebuild):
+
+```bash
+cd apps/mobile
+npm run dev:android
+```
+
+Keep that command running while editing TypeScript. It starts Metro, launches the installed Exposure development client, and applies JavaScript/TypeScript changes with Fast Refresh. Run `npm run android` again only after changing `app.json`, `package.json` native dependencies, or files under `plugins/`.
+
+The first development launch shows Expo's one-time developer-menu introduction. Press **Continue**, then close the menu to reveal Exposure. Fast Refresh is enabled by default.
 
 Android Emulator reaches a host API at `http://10.0.2.2:8000`. A physical device needs the development machine's LAN address.
 The API URL can also be changed at runtime under Settings → Compute service, including in the standalone APK.
@@ -30,7 +43,7 @@ API:
 
 ```bash
 cd services/api
-cp .env.example .env
+cp -n .env.example .env
 uv sync
 uv run uvicorn exposure_api.main:app --reload
 ```
@@ -40,8 +53,10 @@ uv run uvicorn exposure_api.main:app --reload
 Database:
 
 ```bash
-supabase db reset
-supabase test db
+npx --yes supabase@2.109.1 start
+npx --yes supabase@2.109.1 db reset
+npx --yes supabase@2.109.1 test db
+npx --yes supabase@2.109.1 stop
 ```
 
 The migration creates private `originals`, `derived`, and `layer-assets` buckets. Object paths must begin with the authenticated user's UUID. Originals have no client update or delete policy.
@@ -49,12 +64,16 @@ The migration creates private `originals`, `derived`, and `layer-assets` buckets
 ## Verify
 
 ```bash
-cd apps/mobile && npm run typecheck && npm test && npm run doctor
-cd services/api && uv run pytest
-supabase db reset && supabase test db
+npm --prefix apps/mobile run typecheck
+npm --prefix apps/mobile test
+npm --prefix apps/mobile run doctor
+uv --directory services/api run pytest
+npx --yes supabase@2.109.1 start
+npx --yes supabase@2.109.1 db reset && npx --yes supabase@2.109.1 test db
+npx --yes supabase@2.109.1 stop
 ```
 
-Create an Android debug APK with `eas build --platform android --profile debug`, or build locally with `npm run android:debug` when the Android toolchain is installed.
+`npm run android` also produces the local development APK at `apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk`.
 
 ## Local APK artifacts
 
