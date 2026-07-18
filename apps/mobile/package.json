@@ -41,9 +41,9 @@
   },
   "scripts": {
     "start": "expo start --dev-client",
-    "android": "pnpm android:setup",
+    "android": "node scripts/android.mjs install",
     "android:setup": "node scripts/android.mjs install",
-    "android:debug": "pnpm android:setup",
+    "android:debug": "node scripts/android.mjs install",
     "dev:android": "node scripts/android.mjs dev",
     "ios": "expo run:ios",
     "typecheck": "tsc --noEmit",

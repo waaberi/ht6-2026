@@ -9,7 +9,7 @@
   },
   "scripts": {
     "bootstrap": "node scripts/setup.mjs",
-    "android": "pnpm --filter exposure run android",
+    "android": "node apps/mobile/scripts/android.mjs install",
     "dev": "node scripts/dev.mjs",
     "phone": "node scripts/phone-tailscale.mjs",
     "phone:tailscale": "node scripts/phone-tailscale.mjs",
