@@ -116,10 +116,11 @@ const analyze = async () => {
 
   assert(body.versionId === versionId, 'versionId did not round-trip');
   assert(body.checksum === checksum, 'checksum did not round-trip');
-  assert(body.deterministicModel === 'exposure-deterministic-1', 'deterministic analysis did not run');
+  assert(body.deterministicModel === 'exposure-deterministic-2', 'deterministic signal extraction did not run');
   assert(body.metrics && typeof body.metrics === 'object', 'metrics are missing');
   assert(body.metrics.width === 321 && body.metrics.height === 241, 'uploaded image dimensions were not analyzed');
   assert(body.lighting && typeof body.lighting === 'object', 'lighting analysis is missing');
+  assert(Array.isArray(body.signals), 'measured signals must be an array');
   assert(Array.isArray(body.issues), 'issues must be an array');
   assert(Array.isArray(body.cameraRecommendations), 'cameraRecommendations must be an array');
   assert(typeof body.summary === 'string' && body.summary.length > 0, 'summary is missing');
@@ -186,6 +187,7 @@ try {
     ['photos', 'id'],
     ['profiles', 'id,camera_preferences,recommendation_feedback'],
     ['photo_versions', 'id,adjustments'],
+    ['analyses', 'id,schema_version,signals'],
   ];
   for (const [table, columns] of schemaChecks) {
     const schemaResponse = await fetch(`${serviceUrl}/rest/v1/${table}?select=${columns}&limit=1`, {

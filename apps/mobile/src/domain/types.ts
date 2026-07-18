@@ -166,6 +166,17 @@ export type Issue = {
   };
 };
 
+export type AnalysisSignal = {
+  id: Id;
+  signalKey: string;
+  category: Exclude<IssueCategory, 'intent'>;
+  evidence: Record<string, number | string | boolean | null>;
+  severity: number;
+  confidence: number;
+  location: Region;
+  fix?: Issue['fix'];
+};
+
 export type LightingAnalysis = {
   exposure: number;
   contrast: number;
@@ -237,6 +248,7 @@ export type AnalysisResult = {
   semanticModel?: string;
   metrics: Record<string, number | string | boolean | null>;
   lighting: LightingAnalysis;
+  signals: AnalysisSignal[];
   issues: Issue[];
   cameraRecommendations: CameraRecommendation[];
   summary: string;

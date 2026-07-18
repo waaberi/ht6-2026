@@ -348,6 +348,7 @@ export const pullRemoteAnalyses = async (): Promise<Record<string, AnalysisResul
 
   const analyses: Record<string, AnalysisResult> = {};
   for (const row of data ?? []) {
+    if (row.schema_version !== 'analysis-2') continue;
     const versionId = row.version_id as string;
     if (analyses[versionId]) continue;
     analyses[versionId] = {
@@ -358,6 +359,7 @@ export const pullRemoteAnalyses = async (): Promise<Record<string, AnalysisResul
       semanticModel: (row.semantic_model as string | null) ?? undefined,
       metrics: (row.metrics ?? {}) as AnalysisResult['metrics'],
       lighting: row.lighting as AnalysisResult['lighting'],
+      signals: (row.signals ?? []) as AnalysisResult['signals'],
       cameraRecommendations: (row.camera_recommendations ?? []) as AnalysisResult['cameraRecommendations'],
       issues: (row.issues ?? []) as AnalysisResult['issues'],
       summary: row.summary as string,
@@ -419,11 +421,12 @@ export const persistAnalysis = async (photo: PhotoRecord, analysis: AnalysisResu
     photo_id: photo.id,
     version_id: photo.currentVersionId,
     checksum: analysis.checksum,
-    schema_version: 'analysis-1',
+    schema_version: 'analysis-2',
     deterministic_model: analysis.deterministicModel,
     semantic_model: analysis.semanticModel,
     metrics: analysis.metrics,
     lighting: analysis.lighting,
+    signals: analysis.signals,
     camera_recommendations: analysis.cameraRecommendations,
     issues: analysis.issues,
     summary: analysis.summary,

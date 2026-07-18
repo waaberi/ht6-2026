@@ -28,7 +28,7 @@ def test_analysis_returns_validated_evidence_without_mutating_source(client: Tes
     payload = response.json()
     assert payload["versionId"] == "version-1"
     assert payload["checksum"] == before
-    assert payload["deterministicModel"] == "exposure-deterministic-1"
+    assert payload["deterministicModel"] == "exposure-deterministic-2"
     assert 0 <= payload["lighting"]["clippedHighlights"] <= 1
     assert all(issue["location"]["width"] > 0 for issue in payload["issues"])
     assert hashlib.sha256(image_bytes).hexdigest() == before
@@ -85,7 +85,7 @@ def test_analysis_returns_deterministic_result_when_semantic_provider_times_out(
     )
 
     assert response.status_code == 200, response.text
-    assert response.json()["deterministicModel"] == "exposure-deterministic-1"
+    assert response.json()["deterministicModel"] == "exposure-deterministic-2"
     assert "semanticModel" not in response.json() or response.json()["semanticModel"] is None
 
 

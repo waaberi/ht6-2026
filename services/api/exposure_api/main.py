@@ -38,7 +38,7 @@ SEMANTIC_TIMEOUT_SECONDS = max(5.0, min(40.0, float(os.getenv("EXPOSURE_SEMANTIC
 ANALYSIS_CACHE_MAX_ENTRIES = max(1, int(os.getenv("EXPOSURE_ANALYSIS_CACHE_MAX_ENTRIES", "128")))
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/heic", "image/heif", "image/webp"}
 GPS_KEY = re.compile(r"gps|latitude|longitude|location", re.IGNORECASE)
-SCHEMA_VERSION = "analysis-1"
+SCHEMA_VERSION = "analysis-2"
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Exposure API", version="0.1.0", docs_url="/docs")

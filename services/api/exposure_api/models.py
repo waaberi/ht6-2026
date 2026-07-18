@@ -81,7 +81,7 @@ class AnalysisResult(ApiModel):
     version_id: str
     checksum: str
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    deterministic_model: str = "exposure-deterministic-1"
+    deterministic_model: str = "exposure-deterministic-2"
     semantic_model: str | None = None
     metrics: dict[str, float | str | bool | None]
     lighting: LightingAnalysis
