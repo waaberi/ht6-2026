@@ -2,7 +2,7 @@ import { ZenOldMincho_700Bold } from '@expo-google-fonts/zen-old-mincho/700Bold'
 import { useFonts } from 'expo-font';
 import { StatusBar } from 'expo-status-bar';
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, BackHandler, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Alert, BackHandler, StyleSheet, View } from 'react-native';
 import { SafeAreaProvider, initialWindowMetrics } from 'react-native-safe-area-context';
 
 import { TabBar, type MainTab } from './src/components/TabBar';
@@ -12,6 +12,7 @@ import { LibraryScreen } from './src/screens/LibraryScreen';
 import { hasCompletedOnboarding, OnboardingScreen } from './src/screens/OnboardingScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { StudioScreen } from './src/screens/StudioScreen';
+import { listenForAuthLinks } from './src/services/auth';
 import { ExposureProvider, useExposure } from './src/state/ExposureContext';
 
 export default function App() {
@@ -41,6 +42,8 @@ function ExposureApp() {
   const [tab, setTab] = useState<MainTab>('camera');
   const [studioOpen, setStudioOpen] = useState(false);
   const { loading } = useExposure();
+
+  useEffect(() => listenForAuthLinks((error) => Alert.alert('Sign-in failed', error.message)), []);
 
   useEffect(() => {
     if (!studioOpen) return;

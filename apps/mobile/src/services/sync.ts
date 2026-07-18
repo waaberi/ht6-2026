@@ -71,7 +71,14 @@ export const syncQueuedPhotos = async (
     try {
       synced[index] = { ...photo, syncState: 'syncing' };
       onProgress?.([...synced]);
-      await uploadOnce('originals', `${base}/original.${new File(photo.originalUri).extension.replace('.', '') || 'jpg'}`, photo.originalUri, photo.originalMimeType);
+      const localOriginal = new File(photo.originalUri);
+      const originalPath = photo.remoteOriginalPath
+        ?? `${base}/original.${localOriginal.extension.replace('.', '') || 'jpg'}`;
+      if (localOriginal.exists) {
+        await uploadOnce('originals', originalPath, photo.originalUri, photo.originalMimeType);
+      } else if (!photo.remoteOriginalPath) {
+        throw new Error('The local original is missing.');
+      }
       await Promise.all([
         uploadOnce('derived', `${base}/analysis-proxy.jpg`, photo.analysisProxyUri, 'image/jpeg'),
         uploadOnce('derived', `${base}/thumbnail.jpg`, photo.thumbnailUri, 'image/jpeg'),
@@ -79,7 +86,7 @@ export const syncQueuedPhotos = async (
       const { error: photoError } = await supabase.from('photos').upsert({
         id: photo.id,
         owner_id: userId,
-        original_path: `${base}/original.${new File(photo.originalUri).extension.replace('.', '') || 'jpg'}`,
+        original_path: originalPath,
         original_name: photo.originalName,
         original_mime_type: photo.originalMimeType,
         original_byte_size: photo.originalByteSize,
@@ -126,7 +133,7 @@ export const syncQueuedPhotos = async (
       if (versionsError) throw versionsError;
       const { error: currentError } = await supabase.from('photos').update({ current_version_id: photo.currentVersionId, sync_state: 'synced' }).eq('id', photo.id);
       if (currentError) throw currentError;
-      synced[index] = { ...photo, syncState: 'synced' };
+      synced[index] = { ...photo, remoteOriginalPath: originalPath, syncState: 'synced' };
       onProgress?.([...synced]);
     } catch {
       synced[index] = { ...photo, syncState: 'failed' };
@@ -416,7 +423,7 @@ export const persistAnalysis = async (photo: PhotoRecord, analysis: AnalysisResu
   const { data } = await supabase.auth.getSession();
   const ownerId = data.session?.user.id;
   if (!ownerId) return;
-  await supabase.from('analyses').upsert({
+  const { error } = await supabase.from('analyses').upsert({
     owner_id: ownerId,
     photo_id: photo.id,
     version_id: photo.currentVersionId,
@@ -431,6 +438,7 @@ export const persistAnalysis = async (photo: PhotoRecord, analysis: AnalysisResu
     issues: analysis.issues,
     summary: analysis.summary,
   }, { ignoreDuplicates: true });
+  if (error) throw error;
 };
 
 export const persistStyleProfile = async (style: StyleProfileResult, referencePhotoIds: string[]) => {

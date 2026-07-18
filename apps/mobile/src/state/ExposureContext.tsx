@@ -225,7 +225,9 @@ export const ExposureProvider = ({ children }: React.PropsWithChildren) => {
       if (!livePhoto) throw new Error('The analyzed photo is no longer available.');
       assertCurrentVersion(livePhoto, sourceVersionId);
       setAnalyses((current) => ({ ...current, [sourceVersionId]: result }));
-      void persistAnalysis(photo, result);
+      void persistAnalysis(photo, result).catch((error: unknown) => {
+        setSyncError(error instanceof Error ? error.message : 'Analysis could not sync.');
+      });
       return result;
     } finally {
       setAnalyzing(false);

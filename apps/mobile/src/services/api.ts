@@ -8,6 +8,7 @@ import { apiErrorMessage, resolveApiUrl } from '../domain/apiConfiguration';
 import { layerAssetsForStack } from '../domain/assets';
 import { parseCoachResponse } from '../domain/coachResponse';
 import { currentVersion } from '../domain/layers';
+import { supabase } from './supabase';
 import type {
   AdjustmentValues,
   AnalysisResult,
@@ -39,7 +40,12 @@ const apiFetch = async (path: string, init: Parameters<typeof fetch>[1]) => {
     path === '/v1/layers/generative' ? 180_000 : path === '/v1/render' ? 120_000 : 45_000,
   );
   try {
-    return await fetch(`${apiUrl}${path}`, { ...init, signal: controller.signal });
+    const headers = new Headers(init?.headers);
+    const session = await supabase?.auth.getSession();
+    if (session?.data.session?.access_token) {
+      headers.set('Authorization', `Bearer ${session.data.session.access_token}`);
+    }
+    return await fetch(`${apiUrl}${path}`, { ...init, headers, signal: controller.signal });
   } catch (error) {
     if (controller.signal.aborted) throw new ApiUnavailableError('Request timed out. Try again.');
     throw new ApiUnavailableError('Exposure is offline. Check your connection.');

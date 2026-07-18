@@ -3,6 +3,7 @@ import { Linking } from 'react-native';
 import { supabase } from './supabase';
 
 export const AUTH_REDIRECT_URL = 'exposure://auth/callback';
+const handledAuthUrls = new Set<string>();
 
 const paramsFromUrl = (url: string) => {
   const query = url.includes('?') ? url.split('?')[1]?.split('#')[0] : '';
@@ -59,8 +60,10 @@ export const completeAuthFromUrl = async (url: string) => {
 
 export const listenForAuthLinks = (onError?: (error: Error) => void) => {
   const handle = (url: string | null) => {
-    if (!url) return;
+    if (!url || !url.startsWith(AUTH_REDIRECT_URL) || handledAuthUrls.has(url)) return;
+    handledAuthUrls.add(url);
     void completeAuthFromUrl(url).catch((caught: unknown) => {
+      handledAuthUrls.delete(url);
       onError?.(caught instanceof Error ? caught : new Error('Sign-in failed.'));
     });
   };
