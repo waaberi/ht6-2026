@@ -4,8 +4,8 @@ import json
 from importlib.metadata import version
 from types import SimpleNamespace
 
-from exposure_api.models import AnalysisResult, CoachRequest, Region
-from exposure_api.providers import GeminiImageQuotaError, GeminiProvider
+from exposure_api.models import AnalysisResult, CoachRequest, CoachResponse, Region
+from exposure_api.providers import GeminiImageQuotaError, GeminiProvider, _ground_coach_response
 
 
 def test_google_genai_uses_current_interactions_schema() -> None:
@@ -134,6 +134,8 @@ def test_coach_prompt_exposes_only_enabled_tools_and_photography_contract() -> N
     assert "- remove:" not in prompt
     assert "shutter speed, aperture, and ISO as linked exposure tradeoffs" in prompt
     assert "Return the supplied JSON schema only" in prompt
+    assert "absolute editor slider targets, not deltas" in prompt
+    assert "expansionFraction from 0.1 to 0.5" in prompt
     schema = captured["response_format"]["schema"]  # type: ignore[index]
     assert {"headline", "reason"}.issubset(schema["required"])
 
@@ -156,3 +158,37 @@ def test_coach_request_defaults_to_full_tool_contract_but_respects_explicit_empt
     )
     assert len(CoachRequest(analysis=analysis, question="Help").available_tools) == 8
     assert CoachRequest(analysis=analysis, question="Help", available_tools=[]).available_tools == []
+
+
+def test_grounding_drops_retake_without_grounded_capture_advice() -> None:
+    analysis = AnalysisResult(
+        version_id="version",
+        checksum="checksum",
+        metrics={},
+        lighting={
+            "exposure": 0,
+            "contrast": 0,
+            "clippedShadows": 0,
+            "clippedHighlights": 0,
+            "colorCast": {"red": 0, "green": 0, "blue": 0},
+        },
+        issues=[],
+        camera_recommendations=[],
+        summary="Fixture",
+    )
+    request = CoachRequest(analysis=analysis, question="Should I retake?", available_tools=["retake"])
+    response = CoachResponse(
+        headline="Retake",
+        reason="The detail cannot be recovered.",
+        evidence=[],
+        capture_advice=[],
+        actions=[{
+            "id": "retake",
+            "tool": "retake",
+            "label": "Retake",
+            "reason": "The detail cannot be recovered.",
+        }],
+        model="fixture",
+    )
+
+    assert _ground_coach_response(request, response).actions == []

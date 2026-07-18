@@ -1,16 +1,26 @@
-import type { AdjustmentValues, CanvasTransform, CoachAction, Region } from './types';
+import { collectiveAdjustmentValues, setCollectiveAdjustments } from './layers';
+import type { AdjustmentValues, CanvasTransform, CoachAction, LayerStack, Region } from './types';
 
 export type CoachActionPlan =
   | { kind: 'collective-adjustment'; adjustments: AdjustmentValues }
   | { kind: 'masked-adjustment'; adjustments: AdjustmentValues; target: Region }
   | { kind: 'canvas-transform'; transform: CanvasTransform }
   | { kind: 'generative'; operation: 'remove' | 'add'; target: Region; prompt: string }
-  | { kind: 'expand'; direction: 'top' | 'right' | 'bottom' | 'left'; prompt: string }
+  | { kind: 'expand'; direction: 'top' | 'right' | 'bottom' | 'left'; fraction: number; prompt: string }
   | { kind: 'camera' };
 
 const incomplete = (tool: CoachAction['tool']): never => {
   throw new Error(`Coach returned an incomplete ${tool} action.`);
 };
+
+/** Coach adjustment values are absolute manual-control targets, not deltas. */
+export const applyCoachAdjustmentTargets = (
+  stack: LayerStack,
+  targets: AdjustmentValues,
+): LayerStack => setCollectiveAdjustments(stack, {
+  ...collectiveAdjustmentValues(stack),
+  ...targets,
+});
 
 export const planCoachAction = (action: CoachAction, currentTransform: CanvasTransform): CoachActionPlan => {
   switch (action.tool) {
@@ -42,8 +52,9 @@ export const planCoachAction = (action: CoachAction, currentTransform: CanvasTra
     case 'expand': {
       const direction = (['top', 'right', 'bottom', 'left'] as const)
         .find((side) => (action.canvasTransform?.expansion?.[side] ?? 0) > 0);
-      return direction
-        ? { kind: 'expand', direction, prompt: action.prompt ?? 'Extend the scene naturally into the new canvas.' }
+      const fraction = action.expansionFraction;
+      return direction && fraction !== undefined && fraction >= 0.1 && fraction <= 0.5
+        ? { kind: 'expand', direction, fraction, prompt: action.prompt ?? 'Extend the scene naturally into the new canvas.' }
         : incomplete(action.tool);
     }
     case 'retake':

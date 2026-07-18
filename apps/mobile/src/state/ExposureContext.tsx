@@ -10,7 +10,7 @@ import {
   savePhotos,
   type IngestPhotoInput,
 } from '../data/photoRepository';
-import { appendLayer, commitVersion, currentVersion, mergeCollectiveAdjustments, restoreVersion } from '../domain/layers';
+import { appendLayer, assertCurrentVersion, commitVersion, currentVersion, mergeCollectiveAdjustments, restoreVersion } from '../domain/layers';
 import { mergeHydratedPhotos, mergeSyncProgress } from '../domain/syncMerge';
 import type { AdjustmentValues, AnalysisResult, Layer, LayerStack, PhotoRecord } from '../domain/types';
 import { analyzePhoto } from '../services/api';
@@ -39,9 +39,9 @@ type ExposureState = {
   selectPhoto: (photoId: string) => void;
   ingest: (input: IngestPhotoInput) => Promise<PhotoRecord>;
   deletePhotos: (photoIds: string[]) => Promise<void>;
-  addAdjustment: (adjustments: AdjustmentValues, name?: string) => Promise<void>;
-  addLayer: (layer: Layer, label: string) => Promise<void>;
-  commitStack: (stack: LayerStack, label: string) => Promise<void>;
+  addAdjustment: (adjustments: AdjustmentValues, name?: string, expectedVersionId?: string) => Promise<void>;
+  addLayer: (layer: Layer, label: string, expectedVersionId?: string) => Promise<void>;
+  commitStack: (stack: LayerStack, label: string, expectedVersionId?: string) => Promise<void>;
   restore: (versionId: string) => Promise<void>;
   runAnalysis: () => Promise<AnalysisResult>;
   synchronize: () => Promise<void>;
@@ -146,6 +146,13 @@ export const ExposureProvider = ({ children }: React.PropsWithChildren) => {
 
   const selectedPhoto = photos.find((photo) => photo.id === selectedPhotoId);
 
+  const liveSelectedPhoto = useCallback((expectedVersionId?: string) => {
+    const photo = photosRef.current.find((candidate) => candidate.id === selectedPhotoId);
+    if (!photo) throw new Error('Choose a photo first');
+    assertCurrentVersion(photo, expectedVersionId);
+    return photo;
+  }, [selectedPhotoId]);
+
   const persistPhoto = useCallback(async (next: PhotoRecord) => {
     showPhotos(photosRef.current.map((photo) => (photo.id === next.id ? next : photo)));
     await savePhoto(next);
@@ -171,55 +178,59 @@ export const ExposureProvider = ({ children }: React.PropsWithChildren) => {
   }, [showPhotos, synchronize]);
 
   const addLayer = useCallback(
-    async (layer: Layer, label: string) => {
-      if (!selectedPhoto) throw new Error('Choose a photo first');
-      const stack = appendLayer(currentVersion(selectedPhoto).stack, layer);
-      await persistPhoto(commitVersion(selectedPhoto, randomUUID(), stack, label));
+    async (layer: Layer, label: string, expectedVersionId?: string) => {
+      const photo = liveSelectedPhoto(expectedVersionId);
+      const stack = appendLayer(currentVersion(photo).stack, layer);
+      await persistPhoto(commitVersion(photo, randomUUID(), stack, label));
       void synchronize();
     },
-    [persistPhoto, selectedPhoto, synchronize],
+    [liveSelectedPhoto, persistPhoto, synchronize],
   );
 
   const commitStack = useCallback(
-    async (stack: LayerStack, label: string) => {
-      if (!selectedPhoto) throw new Error('Choose a photo first');
-      await persistPhoto(commitVersion(selectedPhoto, randomUUID(), stack, label));
+    async (stack: LayerStack, label: string, expectedVersionId?: string) => {
+      const photo = liveSelectedPhoto(expectedVersionId);
+      await persistPhoto(commitVersion(photo, randomUUID(), stack, label));
       void synchronize();
     },
-    [persistPhoto, selectedPhoto, synchronize],
+    [liveSelectedPhoto, persistPhoto, synchronize],
   );
 
   const addAdjustment = useCallback(
-    async (adjustments: AdjustmentValues, name = 'Manual adjustment') => {
-      if (!selectedPhoto) throw new Error('Choose a photo first');
-      const stack = mergeCollectiveAdjustments(currentVersion(selectedPhoto).stack, adjustments);
-      await persistPhoto(commitVersion(selectedPhoto, randomUUID(), stack, name));
+    async (adjustments: AdjustmentValues, name = 'Manual adjustment', expectedVersionId?: string) => {
+      const photo = liveSelectedPhoto(expectedVersionId);
+      const stack = mergeCollectiveAdjustments(currentVersion(photo).stack, adjustments);
+      await persistPhoto(commitVersion(photo, randomUUID(), stack, name));
       void synchronize();
     },
-    [persistPhoto, selectedPhoto, synchronize],
+    [liveSelectedPhoto, persistPhoto, synchronize],
   );
 
   const restore = useCallback(
     async (versionId: string) => {
-      if (!selectedPhoto) throw new Error('Choose a photo first');
-      await persistPhoto(restoreVersion(selectedPhoto, versionId, randomUUID()));
+      const photo = liveSelectedPhoto();
+      await persistPhoto(restoreVersion(photo, versionId, randomUUID()));
       void synchronize();
     },
-    [persistPhoto, selectedPhoto, synchronize],
+    [liveSelectedPhoto, persistPhoto, synchronize],
   );
 
   const runAnalysis = useCallback(async () => {
-    if (!selectedPhoto) throw new Error('Choose a photo first');
+    const photo = liveSelectedPhoto();
+    const sourceVersionId = photo.currentVersionId;
     setAnalyzing(true);
     try {
-      const result = await analyzePhoto(selectedPhoto);
-      setAnalyses((current) => ({ ...current, [selectedPhoto.currentVersionId]: result }));
-      void persistAnalysis(selectedPhoto, result);
+      const result = await analyzePhoto(photo);
+      const livePhoto = photosRef.current.find((candidate) => candidate.id === photo.id);
+      if (!livePhoto) throw new Error('The analyzed photo is no longer available.');
+      assertCurrentVersion(livePhoto, sourceVersionId);
+      setAnalyses((current) => ({ ...current, [sourceVersionId]: result }));
+      void persistAnalysis(photo, result);
       return result;
     } finally {
       setAnalyzing(false);
     }
-  }, [selectedPhoto]);
+  }, [liveSelectedPhoto]);
 
   const value = useMemo<ExposureState>(
     () => ({

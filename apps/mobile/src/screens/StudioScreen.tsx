@@ -14,8 +14,8 @@ import { saveGeneratedLayerAsset } from '../data/photoRepository';
 import { recordRecommendationFeedback } from '../data/preferences';
 import { loadStyleProfiles, type SavedStyleProfile } from '../data/styleRepository';
 import { centeredCrop, restoreManualTransform, rotateClockwise, withStraighten } from '../domain/canvasTransforms';
-import { planCoachAction } from '../domain/coachHarness';
-import { collectiveAdjustmentValues, currentVersion, removeLayer, reorderLayer, setCollectiveAdjustments, setLayerOpacity, toggleLayer } from '../domain/layers';
+import { applyCoachAdjustmentTargets, planCoachAction } from '../domain/coachHarness';
+import { collectiveAdjustmentValues, currentVersion, removeLayer, reorderLayer, setCollectiveAdjustments, setLayerOpacity, StalePhotoVersionError, toggleLayer } from '../domain/layers';
 import type {
   AdjustmentValues,
   CanvasTransform,
@@ -107,6 +107,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   const [generativePrompt, setGenerativePrompt] = useState('Remove the selected distraction and reconstruct the background.');
   const [generativeTarget, setGenerativeTarget] = useState<Region>(CENTER_TARGET);
   const [expansionDirection, setExpansionDirection] = useState<ExpansionDirection>('right');
+  const [expansionFraction, setExpansionFraction] = useState(0.25);
   const adjustmentCommitRef = useRef(false);
   const [savedLooks, setSavedLooks] = useState<SavedStyleProfile[]>([]);
   const [looksLoading, setLooksLoading] = useState(true);
@@ -158,6 +159,10 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   }, [savedAdjustments, version?.id]);
 
   useEffect(() => {
+    setCoachResponse(undefined);
+  }, [version?.id]);
+
+  useEffect(() => {
     setSelectedLookId(appliedLookLayer?.styleProfileId);
     setLookStrength(appliedLookLayer?.strength ?? 0.75);
     setLookDraftLayerId(appliedLookLayer?.id ?? randomUUID());
@@ -204,10 +209,10 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     );
   }
 
-  const commit = async (stack: LayerStack, label: string) => {
+  const commit = async (stack: LayerStack, label: string, expectedVersionId = version.id) => {
     setMessage(undefined);
     try {
-      await commitStack(stack, label);
+      await commitStack(stack, label, expectedVersionId);
       return true;
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Edit failed.');
@@ -239,7 +244,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     if (issue.fix?.kind === 'adjustment' && issue.fix.adjustments) {
       setApplying(true);
       try {
-        await addAdjustment(issue.fix.adjustments, `Fix: ${issue.title}`);
+        await addAdjustment(issue.fix.adjustments, `Fix: ${issue.title}`, version.id);
         await acceptRecommendation(issue);
         setTool('adjust');
       } catch (error) {
@@ -254,7 +259,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
           id: randomUUID(), type: 'masked-adjustment', name: `Fix: ${issue.title}`, enabled: true, opacity: 1,
           createdAt: new Date().toISOString(), adjustments: issue.fix.adjustments,
           mask: { type: 'polygon', region: issue.location },
-        }, `Fix: ${issue.title}`);
+        }, `Fix: ${issue.title}`, version.id);
         await acceptRecommendation(issue);
         setTool('layers');
       } catch (error) {
@@ -325,8 +330,8 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
       const plan = planCoachAction(action, version.stack.canvasTransform);
       if (plan.kind === 'collective-adjustment') {
         setApplying(true);
-        await addAdjustment(plan.adjustments, action.label);
-        await acceptRecommendation(selectedIssue);
+        const changed = await commit(applyCoachAdjustmentTargets(version.stack, plan.adjustments), action.label, version.id);
+        if (changed) await acceptRecommendation(selectedIssue);
         setTool('adjust');
       } else if (plan.kind === 'masked-adjustment') {
         setApplying(true);
@@ -334,7 +339,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
           id: randomUUID(), type: 'masked-adjustment', name: action.label, enabled: true, opacity: 1,
           createdAt: new Date().toISOString(), adjustments: plan.adjustments,
           mask: { type: 'polygon', region: plan.target },
-        }, action.label);
+        }, action.label, version.id);
         await acceptRecommendation(selectedIssue);
         setTool('layers');
       } else if (plan.kind === 'canvas-transform') {
@@ -347,6 +352,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
         openGenerativeTool(plan.operation, plan.target, plan.prompt);
       } else if (plan.kind === 'expand') {
         setExpansionDirection(plan.direction);
+        setExpansionFraction(plan.fraction);
         setGenerativeOperation('expand');
         setGenerativePrompt(plan.prompt);
         setTool('ai');
@@ -496,6 +502,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
 
   const generateEdit = async () => {
     if (!generativePrompt.trim()) return;
+    const sourceVersionId = version.id;
     setMessage(undefined);
     setAssetBusy(true);
     try {
@@ -506,7 +513,9 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
         generativePrompt.trim(),
         generativeOperation,
         expansionDirection,
+        expansionFraction,
       );
+      if (result.sourceVersionId !== sourceVersionId) throw new StalePhotoVersionError();
       const patchAssetId = randomUUID();
       const maskAssetId = randomUUID();
       const patchUri = saveGeneratedLayerAsset(patchAssetId, result.patchBase64);
@@ -530,9 +539,9 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
           ...version.stack,
           canvasTransform: { ...version.stack.canvasTransform, expansion: result.expansion },
           layers: [...version.stack.layers, generatedLayer],
-        }, label);
+        }, label, sourceVersionId);
       } else {
-        await addLayer(generatedLayer, label);
+        await addLayer(generatedLayer, label, sourceVersionId);
       }
       await acceptRecommendation(selectedIssue);
       setTool('layers');
@@ -659,6 +668,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
               issues={analysis?.issues ?? []}
               busy={assetBusy}
               expansionDirection={expansionDirection}
+              expansionFraction={expansionFraction}
               onOperationChange={(operation) => {
                 setGenerativeOperation(operation);
                 setGenerativePrompt(operation === 'remove'
@@ -674,6 +684,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
               }}
               onGenerate={generateEdit}
               onExpansionDirectionChange={setExpansionDirection}
+              onExpansionFractionChange={setExpansionFraction}
             />
           ) : null}
 
@@ -845,11 +856,13 @@ const AiPanel = ({
   issues,
   busy,
   expansionDirection,
+  expansionFraction,
   onOperationChange,
   onPromptChange,
   onTargetChange,
   onGenerate,
   onExpansionDirectionChange,
+  onExpansionFractionChange,
 }: {
   operation: GenerativeOperation;
   prompt: string;
@@ -857,11 +870,13 @@ const AiPanel = ({
   issues: Issue[];
   busy: boolean;
   expansionDirection: ExpansionDirection;
+  expansionFraction: number;
   onOperationChange: (operation: GenerativeOperation) => void;
   onPromptChange: (value: string) => void;
   onTargetChange: (target: Region, issueId?: string) => void;
   onGenerate: () => void;
   onExpansionDirectionChange: (direction: ExpansionDirection) => void;
+  onExpansionFractionChange: (fraction: number) => void;
 }) => {
   const selected = (candidate: Region) => JSON.stringify(candidate) === JSON.stringify(target);
   return (
@@ -876,19 +891,36 @@ const AiPanel = ({
 
       <Text style={styles.sectionTitle}>{operation === 'expand' ? 'Expand edge' : 'Drag on photo'}</Text>
       {operation === 'expand' ? (
-        <View style={styles.directionGrid}>
-          {(['left', 'top', 'bottom', 'right'] as ExpansionDirection[]).map((direction) => (
-            <Pressable
-              key={direction}
-              accessibilityRole="button"
-              accessibilityState={{ selected: expansionDirection === direction }}
-              style={[styles.directionButton, expansionDirection === direction && styles.chipActive]}
-              onPress={() => onExpansionDirectionChange(direction)}
-            >
-              <Text style={[styles.chipText, expansionDirection === direction && styles.chipTextActive]}>{direction[0].toUpperCase() + direction.slice(1)}</Text>
-            </Pressable>
-          ))}
-        </View>
+        <>
+          <View style={styles.directionGrid}>
+            {(['left', 'top', 'bottom', 'right'] as ExpansionDirection[]).map((direction) => (
+              <Pressable
+                key={direction}
+                accessibilityRole="button"
+                accessibilityState={{ selected: expansionDirection === direction }}
+                style={[styles.directionButton, expansionDirection === direction && styles.chipActive]}
+                onPress={() => onExpansionDirectionChange(direction)}
+              >
+                <Text style={[styles.chipText, expansionDirection === direction && styles.chipTextActive]}>{direction[0].toUpperCase() + direction.slice(1)}</Text>
+              </Pressable>
+            ))}
+          </View>
+          <View style={styles.expansionAmountRow}>
+            <Text style={styles.opacityValue}>{Math.round(expansionFraction * 100)}%</Text>
+            <Slider
+              style={styles.opacitySlider}
+              accessibilityLabel="Canvas expansion amount"
+              minimumValue={0.1}
+              maximumValue={0.5}
+              step={0.05}
+              value={expansionFraction}
+              onValueChange={onExpansionFractionChange}
+              minimumTrackTintColor={colors.primary}
+              maximumTrackTintColor={colors.outlineStrong}
+              thumbTintColor={colors.text}
+            />
+          </View>
+        </>
       ) : (
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
           {issues.slice(0, 3).map((issue) => (
@@ -1022,6 +1054,7 @@ const styles = StyleSheet.create({
   chipTextActive: { color: colors.limeInk },
   directionGrid: { flexDirection: 'row', gap: 8, marginBottom: 12 },
   directionButton: { flex: 1, minHeight: 48, borderRadius: 8, borderWidth: 1, borderColor: colors.line, alignItems: 'center', justifyContent: 'center' },
+  expansionAmountRow: { minHeight: 48, flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
   focusedFinding: { paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
   findingHeading: { flexDirection: 'row', justifyContent: 'space-between', gap: 12 },
   findingTitle: { flex: 1, color: colors.ink, fontSize: 13, fontWeight: '800' },

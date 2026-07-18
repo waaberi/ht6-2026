@@ -6,6 +6,7 @@ import { loadPreferences } from '../data/preferences';
 import { ensureLocalOriginal } from './cloudOriginal';
 import { apiErrorMessage, resolveApiUrl } from '../domain/apiConfiguration';
 import { layerAssetsForStack } from '../domain/assets';
+import { parseCoachResponse } from '../domain/coachResponse';
 import { currentVersion } from '../domain/layers';
 import type {
   AdjustmentValues,
@@ -105,7 +106,7 @@ export const askCoach = async (
       availableTools: ['adjust_global', 'adjust_masked', 'crop', 'straighten', 'remove', 'add', 'expand', 'retake'],
     }),
   });
-  return parseResponse<CoachResponse>(response);
+  return parseCoachResponse(await parseResponse<unknown>(response));
 };
 
 export const requestRender = async (
@@ -147,6 +148,7 @@ export const createGenerativePatch = async (
   prompt: string,
   operation: GenerativeOperation = 'remove',
   expansionDirection: 'top' | 'right' | 'bottom' | 'left' = 'right',
+  expansionFraction = 0.25,
 ): Promise<GenerativePatchResult> => {
   const form = new FormData();
   const original = await ensureLocalOriginal(photo);
@@ -155,7 +157,10 @@ export const createGenerativePatch = async (
   form.append('prompt', prompt);
   form.append('operation', operation);
   if (operation === 'expand') {
-    form.append('expansion_json', JSON.stringify({ direction: expansionDirection, fraction: 0.25 }));
+    if (expansionFraction < 0.1 || expansionFraction > 0.5) {
+      throw new Error('Canvas expansion must be between 10% and 50%.');
+    }
+    form.append('expansion_json', JSON.stringify({ direction: expansionDirection, fraction: expansionFraction }));
   }
   form.append('source_version_id', photo.currentVersionId);
   form.append('layer_stack_json', JSON.stringify(stack));

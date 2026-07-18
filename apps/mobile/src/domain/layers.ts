@@ -3,6 +3,13 @@ import { identityCanvasTransform } from './types';
 
 const copyStack = (stack: LayerStack): LayerStack => JSON.parse(JSON.stringify(stack)) as LayerStack;
 
+export class StalePhotoVersionError extends Error {
+  constructor() {
+    super('This photo changed while the edit was processing. Review the latest version and try again.');
+    this.name = 'StalePhotoVersionError';
+  }
+}
+
 export const emptyLayerStack = (): LayerStack => ({
   canvasTransform: identityCanvasTransform(),
   adjustments: {},
@@ -46,6 +53,13 @@ export const currentVersion = (photo: PhotoRecord): PhotoVersion => {
   const version = photo.versions.find((candidate) => candidate.id === photo.currentVersionId);
   if (!version) throw new Error('Current photo version is missing');
   return version;
+};
+
+export const assertCurrentVersion = (photo: PhotoRecord, expectedVersionId?: string) => {
+  if (expectedVersionId && photo.currentVersionId !== expectedVersionId) {
+    throw new StalePhotoVersionError();
+  }
+  return currentVersion(photo);
 };
 
 export const makeAdjustmentLayer = (

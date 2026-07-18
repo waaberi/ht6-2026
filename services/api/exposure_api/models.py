@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -23,6 +24,12 @@ class Region(ApiModel):
     polygon: list[dict[str, float]] | None = None
     polyline: list[dict[str, float]] | None = None
     mask_asset_id: str | None = None
+
+    @model_validator(mode="after")
+    def validate_containment(self) -> "Region":
+        if self.x + self.width > 1 + 1e-9 or self.y + self.height > 1 + 1e-9:
+            raise ValueError("Region must remain inside normalized image bounds")
+        return self
 
 
 class Fix(ApiModel):
@@ -153,10 +160,22 @@ class CoachAction(ApiModel):
     label: str = Field(min_length=1, max_length=48)
     reason: str = Field(min_length=1, max_length=180)
     requires_confirmation: bool = True
-    adjustments: dict[str, float] | None = None
+    adjustments: dict[str, float] | None = Field(
+        default=None,
+        description=(
+            "For adjust_global, absolute target values for the named editor sliders; omitted sliders remain unchanged. "
+            "For adjust_masked, adjustment strengths applied inside the target."
+        ),
+    )
     target: Region | None = None
     prompt: str | None = Field(default=None, max_length=500)
     canvas_transform: dict[str, Any] | None = None
+    expansion_fraction: float | None = Field(
+        default=None,
+        ge=0.1,
+        le=0.5,
+        description="For expand, the fraction of the current canvas dimension to add on the selected edge.",
+    )
 
     @model_validator(mode="after")
     def validate_tool_contract(self) -> "CoachAction":
@@ -167,20 +186,51 @@ class CoachAction(ApiModel):
         if self.adjustments:
             if set(self.adjustments) - adjustment_keys:
                 raise ValueError("Coach action contains an unsupported adjustment")
-            if any(value < -1 or value > 1 for value in self.adjustments.values()):
-                raise ValueError("Coach adjustment values must stay within -1..1")
+            if any(not math.isfinite(value) or value < -1 or value > 1 for value in self.adjustments.values()):
+                raise ValueError("Coach adjustment values must be finite and stay within -1..1")
         if self.tool in {"adjust_global", "adjust_masked"} and not self.adjustments:
             raise ValueError("Adjustment tools require adjustments")
+        if self.tool not in {"adjust_global", "adjust_masked"} and self.adjustments is not None:
+            raise ValueError("adjustments are only valid for adjustment tools")
         if self.tool in {"adjust_masked", "remove", "add"} and self.target is None:
             raise ValueError(f"{self.tool} requires an explicit target")
+        if self.tool not in {"adjust_masked", "remove", "add"} and self.target is not None:
+            raise ValueError("target is only valid for masked, remove, or add tools")
         if self.tool == "add" and not self.prompt:
             raise ValueError("add requires a prompt describing the element")
-        if self.tool in {"crop", "straighten"} and not self.canvas_transform:
-            raise ValueError(f"{self.tool} requires a canvas transform")
+        if self.tool not in {"remove", "add", "expand"} and self.prompt is not None:
+            raise ValueError("prompt is only valid for remove, add, or expand")
+        if self.tool == "crop":
+            transform = self.canvas_transform or {}
+            if set(transform) != {"crop"} or not isinstance(transform.get("crop"), dict):
+                raise ValueError("crop requires only a contained normalized canvasTransform.crop")
+            Region.model_validate(transform["crop"])
+        elif self.tool == "straighten":
+            transform = self.canvas_transform or {}
+            degrees = transform.get("rotationDegrees")
+            if set(transform) != {"rotationDegrees"} or not isinstance(degrees, (int, float)):
+                raise ValueError("straighten requires only canvasTransform.rotationDegrees")
+            if not math.isfinite(float(degrees)) or abs(float(degrees)) > 45:
+                raise ValueError("straighten rotationDegrees must be finite and within -45..45")
+        elif self.tool != "expand" and self.canvas_transform is not None:
+            raise ValueError("canvasTransform is only valid for crop, straighten, or expand")
         if self.tool == "expand":
-            expansion = (self.canvas_transform or {}).get("expansion")
-            if not isinstance(expansion, dict) or sum(float(expansion.get(side, 0)) > 0 for side in ("top", "right", "bottom", "left")) != 1:
+            transform = self.canvas_transform or {}
+            expansion = transform.get("expansion")
+            sides = ("top", "right", "bottom", "left")
+            if (
+                set(transform) != {"expansion"}
+                or not isinstance(expansion, dict)
+                or set(expansion) != set(sides)
+                or any(not isinstance(expansion.get(side), (int, float)) for side in sides)
+                or any(not math.isfinite(float(expansion[side])) or float(expansion[side]) < 0 for side in sides)
+                or sum(float(expansion[side]) > 0 for side in sides) != 1
+            ):
                 raise ValueError("expand requires one positive canvas expansion side")
+            if self.expansion_fraction is None:
+                raise ValueError("expand requires expansionFraction between 0.1 and 0.5")
+        elif self.expansion_fraction is not None:
+            raise ValueError("expansionFraction is only valid for expand")
         if not self.requires_confirmation:
             raise ValueError("Coach actions must require confirmation")
         return self

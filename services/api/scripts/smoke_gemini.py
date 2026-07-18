@@ -10,7 +10,7 @@ from exposure_api.models import AnalysisResult, CoachRequest, Region
 from exposure_api.providers import GeminiImageQuotaError, GeminiProvider
 
 
-async def main(include_image: bool) -> None:
+async def main(include_image: bool, include_semantic: bool) -> None:
     provider = GeminiProvider()
     if not provider.configured:
         raise SystemExit("Gemini is not configured.")
@@ -29,6 +29,25 @@ async def main(include_image: bool) -> None:
         camera_recommendations=[],
         summary="The fixture has balanced exposure and clear edges.",
     )
+    image = Image.new("RGB", (64, 64), "#496b65")
+    ImageDraw.Draw(image).rectangle((25, 25, 39, 39), fill="#eabda8")
+    encoded = io.BytesIO()
+    image.save(encoded, format="PNG")
+    if include_semantic:
+        semantic = await asyncio.wait_for(
+            provider.analyze_semantics(
+                encoded.getvalue(),
+                "image/png",
+                analysis,
+                {"ISO": 200, "Camera": "Exposure network smoke"},
+                {"detail": "concise", "skillLevel": "enthusiast", "desiredMood": "natural"},
+            ),
+            timeout=45,
+        )
+        if semantic is None or not semantic.summary:
+            raise SystemExit("Gemini semantic analysis returned no validated response.")
+        print(f"Gemini semantic analysis: ok ({provider.semantic_model})")
+
     response = await provider.coach(CoachRequest(
         analysis=analysis,
         question="Give one evidence-grounded next step, or say no change is needed.",
@@ -39,10 +58,6 @@ async def main(include_image: bool) -> None:
     print(f"Gemini Coach: ok ({response.model})")
 
     if include_image:
-        image = Image.new("RGB", (64, 64), "#496b65")
-        ImageDraw.Draw(image).rectangle((25, 25, 39, 39), fill="#eabda8")
-        encoded = io.BytesIO()
-        image.save(encoded, format="PNG")
         try:
             candidate = await provider.generate_candidate(
                 encoded.getvalue(),
@@ -61,5 +76,6 @@ async def main(include_image: bool) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--include-image", action="store_true")
+    parser.add_argument("--skip-semantic", action="store_true")
     arguments = parser.parse_args()
-    asyncio.run(main(arguments.include_image))
+    asyncio.run(main(arguments.include_image, not arguments.skip_semantic))

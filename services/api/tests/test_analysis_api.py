@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
 
 from exposure_api import main
+from exposure_api.models import SemanticAnalysis
 
 
 def test_analysis_returns_validated_evidence_without_mutating_source(client: TestClient, image_bytes: bytes) -> None:
@@ -86,6 +87,40 @@ def test_analysis_returns_deterministic_result_when_semantic_provider_times_out(
     assert response.status_code == 200, response.text
     assert response.json()["deterministicModel"] == "exposure-deterministic-1"
     assert "semanticModel" not in response.json() or response.json()["semanticModel"] is None
+
+
+def test_semantic_timeout_does_not_poison_the_retry_cache(client: TestClient, monkeypatch) -> None:
+    class RecoveringProvider:
+        configured = True
+        semantic_model = "recovering-semantic-fixture"
+        calls = 0
+
+        async def analyze_semantics(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                await asyncio.sleep(0.05)
+                return None
+            return SemanticAnalysis(summary="Semantic retry succeeded.", apparent_intent="A measured test image.")
+
+    image = Image.new("RGB", (139, 93), "#526b63")
+    encoded = io.BytesIO()
+    image.save(encoded, format="PNG")
+    provider = RecoveringProvider()
+    monkeypatch.setattr(main, "provider", provider)
+    monkeypatch.setattr(main, "SEMANTIC_TIMEOUT_SECONDS", 0.01)
+
+    request = {
+        "files": {"image": ("recovering-semantic.png", encoded.getvalue(), "image/png")},
+        "data": {"version_id": "semantic-retry"},
+    }
+    first = client.post("/v1/analyze", **request)
+    second = client.post("/v1/analyze", **request)
+
+    assert first.status_code == second.status_code == 200
+    assert first.json().get("semanticModel") is None
+    assert second.json()["semanticModel"] == "recovering-semantic-fixture"
+    assert second.json()["summary"] == "Semantic retry succeeded."
+    assert provider.calls == 2
 
 
 def test_camera_advice_does_not_invent_missing_exif(client: TestClient, image_bytes: bytes) -> None:

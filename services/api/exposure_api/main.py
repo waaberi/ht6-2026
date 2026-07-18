@@ -184,7 +184,10 @@ async def analyze(
             logger.exception("Gemini semantic analysis failed")
             semantic = None
     result = merge_semantic(deterministic, semantic, provider.semantic_model if semantic else None)
-    _store_analysis(cache_key, result)
+    # A provider timeout/outage must not poison this photo's semantic cache.
+    # Return the useful deterministic result now, but let the next request retry Gemini.
+    if not provider.configured or semantic is not None:
+        _store_analysis(cache_key, result)
     return result
 
 

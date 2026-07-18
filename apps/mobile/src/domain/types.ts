@@ -193,7 +193,7 @@ export type CoachTool =
 
 export type CoachEvidence = {
   path: string;
-  value?: string;
+  value?: string | number | boolean | null;
   meaning: string;
 };
 
@@ -214,6 +214,8 @@ export type CoachAction = {
   target?: Region;
   prompt?: string;
   canvasTransform?: Partial<CanvasTransform>;
+  /** Fraction of the current canvas added by an expand action (0.1..0.5). */
+  expansionFraction?: number;
 };
 
 export type CoachResponse = {

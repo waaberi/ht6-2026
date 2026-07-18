@@ -13,15 +13,19 @@ from .models import AnalysisResult, CoachRequest, CoachResponse, Region, Semanti
 
 COACH_TOOL_GUIDANCE = {
     "adjust_global": (
-        "a reversible whole-photo adjustment using only exposure, contrast, highlights, shadows, temperature, tint, "
-        "saturation, vibrance, sharpening, denoise, grain, or vignette in the -1..1 range"
+        "a reversible whole-photo adjustment using absolute target slider values, never deltas, for only exposure, "
+        "contrast, highlights, shadows, temperature, tint, saturation, vibrance, sharpening, denoise, grain, or "
+        "vignette in the -1..1 range; omit sliders that should remain unchanged"
     ),
     "adjust_masked": "the same reversible adjustments, restricted to an explicit supplied target",
     "crop": "a normalized x, y, width, and height in canvasTransform.crop; preserve the apparent intent",
     "straighten": "canvasTransform.rotationDegrees grounded in a measured horizon or dominant structural line",
     "remove": "a localized removal of an accidental distraction inside an explicit target",
     "add": "an intentional creative addition inside an explicit target, with a precise generation prompt",
-    "expand": "an outpaint of exactly one canvas edge using one positive side in canvasTransform.expansion",
+    "expand": (
+        "an outpaint of exactly one canvas edge selected by one positive side in canvasTransform.expansion, plus an "
+        "expansionFraction from 0.1 to 0.5 describing how much of the current canvas dimension to add"
+    ),
     "retake": "a new-capture recommendation paired with specific captureAdvice; it never claims to change this file",
 }
 
@@ -69,6 +73,8 @@ def _coach_prompt(request: CoachRequest, available_tools: list[str]) -> str:
         "capture choices, each with basedOn evidence paths and an explicit tradeoff for ISO, aperture, or shutter. "
         "actions contains zero to two reversible proposals. Every action requiresConfirmation must be true. Use "
         "remove only for a demonstrated accidental distraction; use add only for an explicit creative request. "
+        "adjust_global adjustments are absolute editor slider targets, not deltas; omitted sliders stay unchanged. "
+        "expand must include expansionFraction from 0.1 to 0.5 as well as exactly one selected expansion edge. "
         "Target the selected issue when one is supplied. It is valid to return no action when the current image already "
         "supports the user's intent.\n\n"
         "FEEDBACK MEMORY\n"
@@ -123,10 +129,13 @@ def _ground_coach_response(request: CoachRequest, response: CoachResponse) -> Co
         needs_tradeoff = item.setting in {"iso", "aperture", "shutter"}
         if based_on and (not needs_tradeoff or item.tradeoff):
             capture_advice.append(item.model_copy(update={"based_on": based_on}))
+    actions = [action for action in response.actions if action.tool in allowed_tools]
+    if not capture_advice:
+        actions = [action for action in actions if action.tool != "retake"]
     return response.model_copy(update={
         "evidence": evidence[:4],
         "capture_advice": capture_advice[:3],
-        "actions": [action for action in response.actions if action.tool in allowed_tools][:2],
+        "actions": actions[:2],
     })
 
 
