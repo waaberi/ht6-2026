@@ -1,6 +1,7 @@
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import process from 'node:process';
 
@@ -9,6 +10,15 @@ const forwardedArgs = process.argv.slice(2);
 const expoArgs = forwardedArgs[0] === '--' ? forwardedArgs.slice(1) : forwardedArgs;
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 const executable = (name) => process.platform === 'win32' ? `${name}.cmd` : name;
+const geminiKeyIsConfigured = (() => {
+  try {
+    return /^GEMINI_API_KEY\s*=\s*\S+/m.test(
+      readFileSync(new URL('../services/api/.env.local', import.meta.url), 'utf8'),
+    );
+  } catch {
+    return false;
+  }
+})();
 
 const tailscale = spawnSync('tailscale', ['ip', '-4'], { encoding: 'utf8' });
 if (tailscale.error) {
@@ -127,19 +137,25 @@ const api = spawn(executable('uv'), [
 });
 watchChild(api, 'Exposure API');
 
-let apiReady = false;
-for (let attempt = 0; attempt < 120 && !apiReady; attempt += 1) {
+let apiHealth;
+for (let attempt = 0; attempt < 120 && !apiHealth; attempt += 1) {
   if (api.exitCode !== null) break;
   try {
     const response = await fetch(`${apiUrl}/health`);
-    apiReady = response.ok;
+    const body = await response.json();
+    if (response.ok && body.service === 'Exposure') apiHealth = body;
   } catch {
     // The reload server may still be creating its worker.
   }
-  if (!apiReady) await delay(250);
+  if (!apiHealth) await delay(250);
 }
-if (!apiReady) {
+if (!apiHealth) {
   console.error(`Exposure API did not become ready at ${apiUrl}.`);
+  stopChildren(1);
+  await new Promise(() => {});
+}
+if (geminiKeyIsConfigured && !apiHealth.geminiConfigured) {
+  console.error('Exposure API started without the Gemini key from services/api/.env.local. Restart the phone stack after fixing that file.');
   stopChildren(1);
   await new Promise(() => {});
 }
