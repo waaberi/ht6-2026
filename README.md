@@ -12,6 +12,8 @@ The repository contains:
 - `services/api`: FastAPI service for deterministic analysis, validated Gemini orchestration, authoritative rendering, portfolio/style computation, and localized Nano Banana patches.
 - `supabase`: Postgres schema, owner-only RLS, immutable versions, private Storage buckets, Realtime jobs, and pgTAP security tests.
 
+The cross-platform capture policy, implementation guarantees, and physical-device validation matrix are documented in [`apps/mobile/PHOTO_QUALITY.md`](apps/mobile/PHOTO_QUALITY.md).
+
 ## Quick start
 
 Run everything from the repository root:

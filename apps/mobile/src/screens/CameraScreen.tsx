@@ -22,7 +22,15 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { colors } from '../components/theme';
-import { captureControlsForSession, clampZoom, horizonRollForOrientation, normalizeFlashMode, zoomFromPinch } from '../domain/cameraControls';
+import {
+  captureControlsForSession,
+  clampZoom,
+  highestQualityCaptureOptions,
+  highestQualityPictureSize,
+  horizonRollForOrientation,
+  normalizeFlashMode,
+  zoomFromPinch,
+} from '../domain/cameraControls';
 import {
   defaultPreferences,
   loadPreferences,
@@ -50,30 +58,21 @@ const distanceBetweenTouches = (touches: ReadonlyArray<{ pageX: number; pageY: n
 const nextValue = <T,>(options: readonly T[], current: T) =>
   options[(options.indexOf(current) + 1) % options.length];
 
-const pictureSizeForRatio = (sizes: string[], ratio: CameraPreferences['photoRatio']) => {
-  const target = ratio === '16:9' ? 16 / 9 : 4 / 3;
-  return sizes
-    .map((size) => {
-      const [width, height] = size.split('x').map(Number);
-      return { size, width, height, distance: Math.abs(width / height - target) };
-    })
-    .filter(({ width, height }) => Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0)
-    .sort((left, right) => left.distance - right.distance || right.width * right.height - left.width * left.height)
-    .find(({ distance }) => distance < 0.04)?.size;
-};
-
 export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps) => {
   const insets = useSafeAreaInsets();
   const [permission, requestPermission] = useCameraPermissions();
   const camera = useRef<CameraView>(null);
   const busyRef = useRef(false);
+  const pictureSizesRequestedRef = useRef(false);
   const preferencesRef = useRef<CameraPreferences>(defaultPreferences.camera);
   const zoomRef = useRef(defaultPreferences.camera.zoom);
   const pinchRef = useRef({ distance: 0, zoom: 0 });
   const [facing, setFacing] = useState<CameraType>('back');
   const [cameraPreferences, setCameraPreferences] = useState<CameraPreferences>(defaultPreferences.camera);
   const [availablePictureSizes, setAvailablePictureSizes] = useState<string[]>([]);
+  const [pictureSizesLoaded, setPictureSizesLoaded] = useState(false);
   const [ready, setReady] = useState(false);
+  const [captureConfigurationReady, setCaptureConfigurationReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [countdown, setCountdown] = useState<number>();
   const [controlsOpen, setControlsOpen] = useState(false);
@@ -93,9 +92,20 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
   }, []);
 
   const pictureSize = useMemo(
-    () => pictureSizeForRatio(availablePictureSizes, cameraPreferences.photoRatio),
+    () => highestQualityPictureSize(
+      availablePictureSizes,
+      cameraPreferences.photoRatio,
+      Platform.OS === 'ios' ? 'ios' : 'android',
+    ),
     [availablePictureSizes, cameraPreferences.photoRatio],
   );
+
+  useEffect(() => {
+    setCaptureConfigurationReady(false);
+    if (!ready || !pictureSizesLoaded) return;
+    const timeout = setTimeout(() => setCaptureConfigurationReady(true), 180);
+    return () => clearTimeout(timeout);
+  }, [cameraPreferences.photoRatio, facing, pictureSize, pictureSizesLoaded, ready]);
 
   const persistCamera = useCallback(async (changes: Partial<CameraPreferences>) => {
     await updateCameraPreferences(changes);
@@ -206,9 +216,11 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
   };
 
   const capture = () => run(async () => {
-    if (!camera.current || !ready || flashSettling) throw new Error('Camera controls are still updating.');
+    if (!camera.current || !ready || !captureConfigurationReady || flashSettling) {
+      throw new Error('Camera controls are still updating.');
+    }
     await waitForTimer();
-    const picture = await camera.current.takePictureAsync({ quality: 1, exif: true, skipProcessing: false });
+    const picture = await camera.current.takePictureAsync(highestQualityCaptureOptions);
     await ingest({
       uri: picture.uri,
       name: `Exposure-${Date.now()}.${picture.format}`,
@@ -230,17 +242,23 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
 
   const onCameraReady = async () => {
     setReady(true);
-    if (Platform.OS !== 'ios' || !camera.current) return;
+    if (!camera.current || pictureSizesRequestedRef.current) return;
+    pictureSizesRequestedRef.current = true;
     try {
       setAvailablePictureSizes(await camera.current.getAvailablePictureSizesAsync());
     } catch {
       setAvailablePictureSizes([]);
+    } finally {
+      setPictureSizesLoaded(true);
     }
   };
 
   const switchCamera = () => {
     setReady(false);
+    setCaptureConfigurationReady(false);
     setAvailablePictureSizes([]);
+    setPictureSizesLoaded(false);
+    pictureSizesRequestedRef.current = false;
     setFacing((current) => (current === 'back' ? 'front' : 'back'));
   };
 
@@ -289,12 +307,13 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
         facing={facing}
         flash={flash}
         mirror={facing === 'front' && cameraPreferences.mirrorSelfies}
+        autofocus={Platform.OS === 'ios' ? 'off' : undefined}
         mode="picture"
         zoom={cameraPreferences.zoom}
         enableTorch={false}
         animateShutter={false}
         ratio={Platform.OS === 'android' ? cameraPreferences.photoRatio : undefined}
-        pictureSize={Platform.OS === 'ios' ? pictureSize : undefined}
+        pictureSize={pictureSize}
         responsiveOrientationWhenOrientationLocked={Platform.OS === 'ios' ? true : undefined}
         onCameraReady={onCameraReady}
         onMountError={(event) => setError(event.message)}
@@ -403,9 +422,9 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={cameraPreferences.timerSeconds ? `Take photo with ${cameraPreferences.timerSeconds} second timer` : 'Take photo'}
-            style={({ pressed }) => [styles.shutter, (!ready || busy || flashSettling) && styles.disabled, pressed && styles.pressed]}
+            style={({ pressed }) => [styles.shutter, (!ready || !captureConfigurationReady || busy || flashSettling) && styles.disabled, pressed && styles.pressed]}
             onPress={capture}
-            disabled={!ready || busy || flashSettling}
+            disabled={!ready || !captureConfigurationReady || busy || flashSettling}
           >
             {busy && !countdown ? <ActivityIndicator color={colors.ink} /> : <View style={styles.shutterCore} />}
           </Pressable>
