@@ -72,6 +72,6 @@ pnpm test
 ## Local APK artifacts
 
 - `artifacts/exposure-debug.apk` is the requested debug build and connects to Metro during development.
-- `artifacts/exposure-standalone.apk` is debug-signed but has the production Hermes bundle embedded, so it installs and opens without Metro. Configure the API URL in Settings before using analysis, authoritative export, or generative tools.
+- `artifacts/exposure-standalone.apk` is debug-signed but has the production Hermes bundle embedded, so it installs and opens without Metro. Set `EXPO_PUBLIC_API_URL` in `apps/mobile/.env.production` or the EAS build environment before building; production builds do not expose a runtime endpoint field.
 
 Both APKs use package `com.ht62026.exposure`, min SDK 24, target SDK 36, and omit microphone permission.
