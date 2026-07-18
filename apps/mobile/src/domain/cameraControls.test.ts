@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { clampZoom, horizonRollForOrientation, zoomFromPinch } from './cameraControls';
+import { clampZoom, horizonRollForOrientation, normalizeFlashMode, zoomFromPinch } from './cameraControls';
 
 test('pinch zoom is monotonic and clamped to the camera range', () => {
   assert.ok(zoomFromPinch(0.2, 100, 160) > 0.2);
@@ -18,4 +18,12 @@ test('horizon roll follows the active device orientation', () => {
   assert.equal(horizonRollForOrientation(rotation, -90), -0.2);
   assert.equal(horizonRollForOrientation(rotation, 180), 0.35);
   assert.equal(horizonRollForOrientation(null, 0), 0);
+});
+
+test('unknown or stale flash values fail closed', () => {
+  assert.equal(normalizeFlashMode('on'), 'on');
+  assert.equal(normalizeFlashMode('auto'), 'auto');
+  assert.equal(normalizeFlashMode('off'), 'off');
+  assert.equal(normalizeFlashMode('torch'), 'off');
+  assert.equal(normalizeFlashMode(undefined), 'off');
 });

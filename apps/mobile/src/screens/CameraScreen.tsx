@@ -22,7 +22,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { colors } from '../components/theme';
-import { clampZoom, horizonRollForOrientation, zoomFromPinch } from '../domain/cameraControls';
+import { clampZoom, horizonRollForOrientation, normalizeFlashMode, zoomFromPinch } from '../domain/cameraControls';
 import {
   defaultPreferences,
   loadPreferences,
@@ -77,6 +77,7 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
   const [busy, setBusy] = useState(false);
   const [countdown, setCountdown] = useState<number>();
   const [controlsOpen, setControlsOpen] = useState(false);
+  const [flashSettling, setFlashSettling] = useState(true);
   const [levelRoll, setLevelRoll] = useState<number>();
   const [error, setError] = useState<string>();
   const { ingest, selectedPhoto } = useExposure();
@@ -154,6 +155,12 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
     };
   }, [cameraPreferences.showLevel]);
 
+  useEffect(() => {
+    setFlashSettling(true);
+    const timeout = setTimeout(() => setFlashSettling(false), 120);
+    return () => clearTimeout(timeout);
+  }, [cameraPreferences.defaultFlash, facing]);
+
   const pinchResponder = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: (event) => event.nativeEvent.touches.length === 2,
     onMoveShouldSetPanResponder: (event) => event.nativeEvent.touches.length === 2,
@@ -197,7 +204,7 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
   };
 
   const capture = () => run(async () => {
-    if (!camera.current || !ready) throw new Error('Camera is still starting.');
+    if (!camera.current || !ready || flashSettling) throw new Error('Camera controls are still updating.');
     await waitForTimer();
     const picture = await camera.current.takePictureAsync({ quality: 1, exif: true, skipProcessing: false });
     await ingest({
@@ -266,7 +273,7 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
     );
   }
 
-  const flash = cameraPreferences.defaultFlash as FlashMode;
+  const flash = normalizeFlashMode(cameraPreferences.defaultFlash) as FlashMode;
   const panelBottomPadding = 12;
   const guideBottom = controlsOpen ? 254 : 178;
   const levelAligned = levelRoll !== undefined && Math.abs(levelRoll) <= Math.PI / 120;
@@ -283,6 +290,8 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
         mirror={facing === 'front' && cameraPreferences.mirrorSelfies}
         mode="picture"
         zoom={cameraPreferences.zoom}
+        enableTorch={false}
+        animateShutter={false}
         ratio={Platform.OS === 'android' ? cameraPreferences.photoRatio : undefined}
         pictureSize={Platform.OS === 'ios' ? pictureSize : undefined}
         responsiveOrientationWhenOrientationLocked={Platform.OS === 'ios' ? true : undefined}
@@ -356,7 +365,10 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
               <ControlButton
                 icon={flash === 'off' ? 'flash-off' : flash === 'auto' ? 'flash-auto' : 'flash'}
                 label={flash === 'off' ? 'Flash off' : flash === 'auto' ? 'Flash auto' : 'Flash on'}
-                onPress={() => updateCamera({ defaultFlash: nextValue(['off', 'auto', 'on'] as const, flash) })}
+                onPress={() => {
+                  setFlashSettling(true);
+                  updateCamera({ defaultFlash: nextValue(['off', 'auto', 'on'] as const, flash) });
+                }}
               />
               <ControlButton
                 icon="timer-outline"
@@ -390,9 +402,9 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={cameraPreferences.timerSeconds ? `Take photo with ${cameraPreferences.timerSeconds} second timer` : 'Take photo'}
-            style={({ pressed }) => [styles.shutter, (!ready || busy) && styles.disabled, pressed && styles.shutterPressed]}
+            style={({ pressed }) => [styles.shutter, (!ready || busy || flashSettling) && styles.disabled, pressed && styles.shutterPressed]}
             onPress={capture}
-            disabled={!ready || busy}
+            disabled={!ready || busy || flashSettling}
           >
             {busy && !countdown ? <ActivityIndicator color={colors.ink} /> : <View style={styles.shutterCore} />}
           </Pressable>

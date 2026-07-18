@@ -10,10 +10,11 @@
   "scripts": {
     "bootstrap": "node scripts/setup.mjs",
     "android": "pnpm --filter exposure run android",
-    "dev": "pnpm --filter exposure run dev:android",
+    "dev": "node scripts/dev.mjs",
     "phone": "node scripts/phone-tailscale.mjs",
     "phone:tailscale": "node scripts/phone-tailscale.mjs",
     "api": "uv --directory services/api run uvicorn exposure_api.main:app --reload --env-file .env.local",
+    "network:smoke": "node scripts/smoke-network.mjs",
     "db:start": "supabase start",
     "db:reset": "supabase db reset",
     "db:test": "supabase test db",

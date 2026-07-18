@@ -52,7 +52,15 @@ function ExposureApp() {
   }, [studioOpen]);
 
   if (loading) return <LoadingScreen />;
-  if (studioOpen) return <StudioScreen onClose={() => setStudioOpen(false)} />;
+  if (studioOpen) return (
+    <StudioScreen
+      onClose={() => setStudioOpen(false)}
+      onRetake={() => {
+        setStudioOpen(false);
+        setTab('camera');
+      }}
+    />
+  );
 
   return (
     <View style={styles.container}>

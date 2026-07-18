@@ -15,6 +15,7 @@ import { saveGeneratedLayerAsset } from '../data/photoRepository';
 import { recordRecommendationFeedback } from '../data/preferences';
 import { loadStyleProfiles, type SavedStyleProfile } from '../data/styleRepository';
 import { centeredCrop, restoreManualTransform, rotateClockwise, withStraighten } from '../domain/canvasTransforms';
+import { planCoachAction } from '../domain/coachHarness';
 import { collectiveAdjustmentValues, currentVersion, removeLayer, reorderLayer, setCollectiveAdjustments, setLayerOpacity, toggleLayer } from '../domain/layers';
 import type {
   AdjustmentValues,
@@ -70,7 +71,7 @@ const applyStyleLayer = (
   };
 };
 
-export const StudioScreen = ({ onClose }: { onClose: () => void }) => {
+export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRetake: () => void }) => {
   const {
     selectedPhoto,
     analysis,
@@ -87,6 +88,7 @@ export const StudioScreen = ({ onClose }: { onClose: () => void }) => {
   const [coachQuestion, setCoachQuestion] = useState('What is the highest-impact change?');
   const [coachBusy, setCoachBusy] = useState(false);
   const [selectedIssueId, setSelectedIssueId] = useState<string>();
+  const [dismissedIssueIds, setDismissedIssueIds] = useState<string[]>([]);
   const [exporting, setExporting] = useState(false);
   const [applying, setApplying] = useState(false);
   const [draftAdjustments, setDraftAdjustments] = useState<AdjustmentValues>({});
@@ -126,7 +128,11 @@ export const StudioScreen = ({ onClose }: { onClose: () => void }) => {
     || appliedLookLayer?.styleProfileId !== selectedLookId
     || Math.abs((appliedLookLayer?.strength ?? -1) - lookStrength) > 0.001
   );
-  const selectedIssue = analysis?.issues.find((issue) => issue.id === selectedIssueId) ?? analysis?.issues[0];
+  const visibleIssues = useMemo(
+    () => analysis?.issues.filter((issue) => !dismissedIssueIds.includes(issue.id)) ?? [],
+    [analysis?.issues, dismissedIssueIds],
+  );
+  const selectedIssue = visibleIssues.find((issue) => issue.id === selectedIssueId) ?? visibleIssues[0];
 
   useEffect(() => {
     let active = true;
@@ -205,6 +211,13 @@ export const StudioScreen = ({ onClose }: { onClose: () => void }) => {
     void persistPreferences(preferences).catch(() => undefined);
   };
 
+  const dismissRecommendation = async (issue: Issue) => {
+    const preferences = await recordRecommendationFeedback(issue.id, false);
+    void persistPreferences(preferences).catch(() => undefined);
+    setDismissedIssueIds((current) => [...new Set([...current, issue.id])]);
+    setSelectedIssueId(undefined);
+  };
+
   const openGenerativeTool = (operation: GenerativeOperation, target: Region, prompt: string) => {
     setGenerativeOperation(operation);
     setGenerativeTarget(target);
@@ -260,6 +273,10 @@ export const StudioScreen = ({ onClose }: { onClose: () => void }) => {
           ? `Remove ${issue.title.toLowerCase()} and reconstruct the surrounding background.`
           : issue.recommendedAction,
       );
+    } else if (issue.fix?.kind === 'crop') {
+      setTool('transform');
+    } else if (issue.fix?.kind === 'retake') {
+      onRetake();
     }
   };
 
@@ -268,6 +285,7 @@ export const StudioScreen = ({ onClose }: { onClose: () => void }) => {
     try {
       const result = await runAnalysis();
       const firstIssue = result.issues[0];
+      setDismissedIssueIds([]);
       setSelectedIssueId(firstIssue?.id);
       if (firstIssue) setGenerativeTarget(firstIssue.location);
     } catch (error) {
@@ -290,38 +308,42 @@ export const StudioScreen = ({ onClose }: { onClose: () => void }) => {
 
   const applyCoachAction = async (action: CoachAction) => {
     if (!action.requiresConfirmation) return;
-    if (action.tool === 'adjust_global' && action.adjustments) {
-      await addAdjustment(action.adjustments, action.label);
-      setTool('adjust');
-    } else if (action.tool === 'adjust_masked' && action.adjustments && action.target) {
-      await addLayer({
-        id: randomUUID(), type: 'masked-adjustment', name: action.label, enabled: true, opacity: 1,
-        createdAt: new Date().toISOString(), adjustments: action.adjustments,
-        mask: { type: 'polygon', region: action.target },
-      }, action.label);
-      setTool('layers');
-    } else if ((action.tool === 'crop' || action.tool === 'straighten') && action.canvasTransform) {
-      const rotationDelta = action.canvasTransform.rotationDegrees ?? 0;
-      await commit({
-        ...version.stack,
-        canvasTransform: {
-          ...version.stack.canvasTransform,
-          ...action.canvasTransform,
-          rotationDegrees: version.stack.canvasTransform.rotationDegrees + rotationDelta,
-        },
-      }, action.label);
-      setTool('history');
-    } else if ((action.tool === 'remove' || action.tool === 'add') && action.target) {
-      openGenerativeTool(action.tool, action.target, action.prompt ?? action.reason);
-    } else if (action.tool === 'expand' && action.canvasTransform?.expansion) {
-      const direction = (['top', 'right', 'bottom', 'left'] as ExpansionDirection[])
-        .find((side) => (action.canvasTransform?.expansion?.[side] ?? 0) > 0) ?? 'right';
-      setExpansionDirection(direction);
-      setGenerativeOperation('expand');
-      setGenerativePrompt(action.prompt ?? 'Extend the scene naturally into the new canvas.');
-      setTool('ai');
-    } else if (action.tool === 'retake') {
-      setMessage(action.reason);
+    setMessage(undefined);
+    try {
+      const plan = planCoachAction(action, version.stack.canvasTransform);
+      if (plan.kind === 'collective-adjustment') {
+        setApplying(true);
+        await addAdjustment(plan.adjustments, action.label);
+        await acceptRecommendation(selectedIssue);
+        setTool('adjust');
+      } else if (plan.kind === 'masked-adjustment') {
+        setApplying(true);
+        await addLayer({
+          id: randomUUID(), type: 'masked-adjustment', name: action.label, enabled: true, opacity: 1,
+          createdAt: new Date().toISOString(), adjustments: plan.adjustments,
+          mask: { type: 'polygon', region: plan.target },
+        }, action.label);
+        await acceptRecommendation(selectedIssue);
+        setTool('layers');
+      } else if (plan.kind === 'canvas-transform') {
+        setApplying(true);
+        const changed = await commit({ ...version.stack, canvasTransform: plan.transform }, action.label);
+        if (changed) await acceptRecommendation(selectedIssue);
+        setTool('history');
+      } else if (plan.kind === 'generative') {
+        openGenerativeTool(plan.operation, plan.target, plan.prompt);
+      } else if (plan.kind === 'expand') {
+        setExpansionDirection(plan.direction);
+        setGenerativeOperation('expand');
+        setGenerativePrompt(plan.prompt);
+        setTool('ai');
+      } else {
+        onRetake();
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Coach action could not be prepared.');
+    } finally {
+      setApplying(false);
     }
   };
 
@@ -556,6 +578,8 @@ export const StudioScreen = ({ onClose }: { onClose: () => void }) => {
               applying={applying}
               onAnalyze={analyze}
               onSelectIssue={selectIssue}
+              issues={visibleIssues}
+              onDismissIssue={(issue) => void dismissRecommendation(issue)}
               onQuestionChange={setCoachQuestion}
               onAsk={ask}
               onApplyIssue={applyIssue}
@@ -667,6 +691,8 @@ const CoachPanel = ({
   applying,
   onAnalyze,
   onSelectIssue,
+  issues,
+  onDismissIssue,
   onQuestionChange,
   onAsk,
   onApplyIssue,
@@ -681,6 +707,8 @@ const CoachPanel = ({
   applying: boolean;
   onAnalyze: () => void;
   onSelectIssue: (issue: Issue) => void;
+  issues: Issue[];
+  onDismissIssue: (issue: Issue) => void;
   onQuestionChange: (value: string) => void;
   onAsk: () => void;
   onApplyIssue: (issue: Issue) => void;
@@ -695,15 +723,16 @@ const CoachPanel = ({
       </View>
     );
   }
-  const fixable = selectedIssue?.fix && !['crop', 'retake'].includes(selectedIssue.fix.kind);
+  const fixable = Boolean(selectedIssue?.fix);
+  const captureAdvice = response?.captureAdvice.length ? response.captureAdvice : analysis.cameraRecommendations;
   return (
     <>
       <Text style={styles.summary}>{response?.headline ?? analysis.summary}</Text>
       {response?.reason ? <Text style={styles.body}>{response.reason}</Text> : null}
 
-      {analysis.issues.length > 0 ? (
+      {issues.length > 0 ? (
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
-          {analysis.issues.slice(0, 6).map((issue) => (
+          {issues.slice(0, 6).map((issue) => (
             <Pressable
               key={issue.id}
               accessibilityRole="button"
@@ -721,26 +750,31 @@ const CoachPanel = ({
         <View style={styles.focusedFinding}>
           <View style={styles.findingHeading}>
             <Text style={styles.findingTitle}>{selectedIssue.title}</Text>
-            <Text style={styles.confidence}>{Math.round(selectedIssue.confidence * 100)}%</Text>
           </View>
           <Text numberOfLines={3} style={styles.body}>{selectedIssue.explanation}</Text>
-          {fixable ? (
-            <Pressable accessibilityRole="button" style={styles.inlineAction} onPress={() => onApplyIssue(selectedIssue)} disabled={applying}>
-              <Text style={styles.inlineActionText}>{selectedIssue.fix?.kind === 'retouch' || selectedIssue.fix?.kind === 'generative' ? 'Review fix' : 'Apply fix'}</Text>
+          <View style={styles.findingActions}>
+            {fixable ? (
+              <Pressable accessibilityRole="button" style={styles.inlineAction} onPress={() => onApplyIssue(selectedIssue)} disabled={applying}>
+                <Text style={styles.inlineActionText}>{selectedIssue.fix?.kind === 'retouch' || selectedIssue.fix?.kind === 'generative' || selectedIssue.fix?.kind === 'crop' ? 'Review' : selectedIssue.fix?.kind === 'retake' ? 'Retake' : 'Apply'}</Text>
+              </Pressable>
+            ) : null}
+            <Pressable accessibilityRole="button" style={styles.inlineAction} onPress={() => onDismissIssue(selectedIssue)} disabled={applying}>
+              <Text style={styles.dismissActionText}>Dismiss</Text>
             </Pressable>
-          ) : null}
+          </View>
         </View>
       ) : null}
 
-      {analysis.cameraRecommendations.length > 0 ? (
+      {captureAdvice.length > 0 ? (
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Capture advice</Text>
-          {analysis.cameraRecommendations.map((advice, index) => (
+          {captureAdvice.map((advice, index) => (
             <View key={`${advice.setting}-${index}`} style={styles.adviceRow}>
               <Text style={styles.adviceSetting}>{advice.setting.replace('-', ' ')}</Text>
               <View style={styles.adviceBody}>
                 {advice.value ? <Text style={styles.adviceValue}>{advice.value}</Text> : null}
-                <Text numberOfLines={2} style={styles.caption}>{advice.explanation}</Text>
+                {'tradeoff' in advice && advice.tradeoff ? <Text numberOfLines={2} style={styles.caption}>{advice.tradeoff}</Text> : null}
+                {'explanation' in advice ? <Text numberOfLines={2} style={styles.caption}>{advice.explanation}</Text> : null}
               </View>
             </View>
           ))}
@@ -968,9 +1002,10 @@ const styles = StyleSheet.create({
   focusedFinding: { paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
   findingHeading: { flexDirection: 'row', justifyContent: 'space-between', gap: 12 },
   findingTitle: { flex: 1, color: colors.ink, fontSize: 13, fontWeight: '800' },
-  confidence: { color: colors.muted, fontSize: 12 },
+  findingActions: { flexDirection: 'row', gap: 18 },
   inlineAction: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', marginTop: 4 },
   inlineActionText: { color: colors.lime, fontSize: 12, fontWeight: '800' },
+  dismissActionText: { color: colors.textSecondary, fontSize: 12, fontWeight: '700' },
   section: { marginTop: 16 },
   sectionTitle: { color: colors.ink, fontSize: 13, fontWeight: '800', marginBottom: 8 },
   adviceRow: { minHeight: 54, flexDirection: 'row', alignItems: 'flex-start', paddingVertical: 7, borderBottomColor: colors.line, borderBottomWidth: StyleSheet.hairlineWidth },

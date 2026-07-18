@@ -1,4 +1,8 @@
 export type MotionRotation = { beta: number; gamma: number };
+export type CaptureFlashMode = 'off' | 'auto' | 'on';
+
+export const normalizeFlashMode = (value: unknown): CaptureFlashMode =>
+  value === 'on' || value === 'auto' ? value : 'off';
 
 export const clampZoom = (zoom: number) => Math.max(0, Math.min(1, zoom));
 

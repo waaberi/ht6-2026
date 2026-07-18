@@ -30,7 +30,7 @@ from .models import (
     Region,
     StyleProfile,
 )
-from .providers import GeminiProvider
+from .providers import GeminiImageError, GeminiImageQuotaError, GeminiProvider
 from .renderer import encode_image, export_exif, render_layer_stack
 
 MAX_UPLOAD_BYTES = int(os.getenv("EXPOSURE_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
@@ -257,7 +257,14 @@ async def generative_layer(
             for side in ("top", "right", "bottom", "left")
         }
     rendered_bytes, _ = await asyncio.to_thread(encode_image, rendered, "png")
-    candidate = await provider.generate_candidate(rendered_bytes, "image/png", prompt, target, operation)
+    try:
+        candidate = await provider.generate_candidate(rendered_bytes, "image/png", prompt, target, operation)
+    except GeminiImageQuotaError as error:
+        logger.warning("Gemini image generation is blocked by project quota")
+        raise HTTPException(503, str(error)) from error
+    except GeminiImageError as error:
+        logger.exception("Gemini image generation failed")
+        raise HTTPException(502, str(error)) from error
     try:
         result = await asyncio.to_thread(
             extract_localized_patch,

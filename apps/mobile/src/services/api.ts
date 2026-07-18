@@ -4,7 +4,7 @@ import { File } from 'expo-file-system';
 import { exifForRemoteAnalysis } from '../data/photoRepository';
 import { loadPreferences } from '../data/preferences';
 import { ensureLocalOriginal } from './cloudOriginal';
-import { resolveApiUrl } from '../domain/apiConfiguration';
+import { apiErrorMessage, resolveApiUrl } from '../domain/apiConfiguration';
 import { layerAssetsForStack } from '../domain/assets';
 import { currentVersion } from '../domain/layers';
 import type {
@@ -32,18 +32,26 @@ const requireApiUrl = async () => {
 
 const apiFetch = async (path: string, init: Parameters<typeof fetch>[1]) => {
   const apiUrl = await requireApiUrl();
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    path === '/v1/layers/generative' ? 180_000 : path === '/v1/render' ? 120_000 : 45_000,
+  );
   try {
-    return await fetch(`${apiUrl}${path}`, init);
+    return await fetch(`${apiUrl}${path}`, { ...init, signal: controller.signal });
   } catch (error) {
+    if (controller.signal.aborted) throw new ApiUnavailableError('The Exposure service timed out. Try again when the connection is stable.');
     const detail = error instanceof Error ? error.message : 'Network request failed.';
     throw new ApiUnavailableError(`Could not reach the Exposure API at ${apiUrl}. ${detail}`);
+  } finally {
+    clearTimeout(timeout);
   }
 };
 
 const parseResponse = async <T>(response: Response): Promise<T> => {
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(body || `Exposure service returned ${response.status}`);
+    throw new Error(apiErrorMessage(body, response.status));
   }
   return (await response.json()) as T;
 };
@@ -90,6 +98,7 @@ export const askCoach = async (
         detail: preferences.detail,
         skillLevel: preferences.skillLevel,
         desiredMood: preferences.desiredMood,
+        recommendationFeedback: preferences.recommendationFeedback,
       },
       layerStack: context.stack,
       selectedIssueId: context.selectedIssueId,

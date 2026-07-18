@@ -120,6 +120,9 @@ class CoachPreferences(ApiModel):
     detail: Literal["concise", "detailed"] = "concise"
     skill_level: Literal["beginner", "enthusiast", "professional"] = "enthusiast"
     desired_mood: str = Field(default="", max_length=120)
+    recommendation_feedback: dict[Literal["accepted", "rejected"], list[str]] = Field(
+        default_factory=lambda: {"accepted": [], "rejected": []},
+    )
 
 
 class CoachRequest(ApiModel):

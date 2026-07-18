@@ -26,6 +26,14 @@ COACH_TOOL_GUIDANCE = {
 }
 
 
+class GeminiImageError(RuntimeError):
+    pass
+
+
+class GeminiImageQuotaError(GeminiImageError):
+    pass
+
+
 def _coach_prompt(request: CoachRequest, available_tools: list[str]) -> str:
     selected_issue = next(
         (issue for issue in request.analysis.issues if issue.id == request.selected_issue_id),
@@ -63,6 +71,10 @@ def _coach_prompt(request: CoachRequest, available_tools: list[str]) -> str:
         "remove only for a demonstrated accidental distraction; use add only for an explicit creative request. "
         "Target the selected issue when one is supplied. It is valid to return no action when the current image already "
         "supports the user's intent.\n\n"
+        "FEEDBACK MEMORY\n"
+        "recommendationFeedback IDs refer to issue IDs. Do not repeat a rejected issue unless the user explicitly "
+        "asks about it or materially stronger supplied evidence now supports it. Treat accepted issue IDs as prior "
+        "preferences, not as proof that the same correction is needed again.\n\n"
         f"Preferences: {request.preferences.model_dump_json(by_alias=True)}\n"
         f"Analysis: {request.analysis.model_dump_json(by_alias=True)}\n"
         f"Selected issue: {selected_issue.model_dump_json(by_alias=True) if selected_issue else 'none'}\n"
@@ -223,9 +235,18 @@ class GeminiProvider:
                     {"type": "text", "text": preservation_prompt},
                     {"type": "image", "data": base64.b64encode(image_bytes).decode(), "mime_type": mime_type},
                 ],
-                response_format={"type": "image", "mime_type": "image/png"},
+                response_format={"type": "image", "mime_type": "image/jpeg"},
             )
             data = interaction.output_image.data
             return base64.b64decode(data) if isinstance(data, str) else bytes(data)
 
-        return await asyncio.to_thread(request)
+        try:
+            return await asyncio.to_thread(request)
+        except Exception as error:
+            message = str(error).lower()
+            status = getattr(error, "status_code", None) or getattr(error, "code", None)
+            if status == 429 or "quota exceeded" in message or "rate limit" in message:
+                raise GeminiImageQuotaError(
+                    "The configured Gemini project has no available image-generation quota."
+                ) from error
+            raise GeminiImageError("Gemini image generation failed.") from error

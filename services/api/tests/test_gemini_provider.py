@@ -5,7 +5,7 @@ from importlib.metadata import version
 from types import SimpleNamespace
 
 from exposure_api.models import AnalysisResult, CoachRequest, Region
-from exposure_api.providers import GeminiProvider
+from exposure_api.providers import GeminiImageQuotaError, GeminiProvider
 
 
 def test_google_genai_uses_current_interactions_schema() -> None:
@@ -35,6 +35,7 @@ def test_generative_prompt_includes_operation_and_target() -> None:
     assert "operation: remove" in prompt
     assert "x=0.1200" in prompt
     assert "y=0.2300" in prompt
+    assert captured["response_format"] == {"type": "image", "mime_type": "image/jpeg"}
 
 
 def test_expand_prompt_requests_scene_continuation() -> None:
@@ -57,6 +58,27 @@ def test_expand_prompt_requests_scene_continuation() -> None:
     prompt = captured["input"][0]["text"]  # type: ignore[index]
     assert "operation: expand" in prompt
     assert "Fill the black target band" in prompt
+
+
+def test_image_quota_error_is_normalized() -> None:
+    class Interactions:
+        def create(self, **_kwargs: object) -> SimpleNamespace:
+            raise RuntimeError("quota exceeded for image requests")
+
+    provider = GeminiProvider()
+    provider._client = SimpleNamespace(interactions=Interactions())  # type: ignore[assignment]
+    try:
+        asyncio.run(provider.generate_candidate(
+            b"source",
+            "image/png",
+            "remove the cable",
+            Region(x=0.1, y=0.1, width=0.2, height=0.2),
+            "remove",
+        ))
+    except GeminiImageQuotaError as error:
+        assert "quota" in str(error)
+    else:
+        raise AssertionError("quota errors must use the stable provider contract")
 
 
 def test_coach_prompt_exposes_only_enabled_tools_and_photography_contract() -> None:

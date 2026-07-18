@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { resolveApiUrl } from './apiConfiguration';
+import { apiErrorMessage, resolveApiUrl } from './apiConfiguration';
 
 test('uses the launcher-provided API URL before every persisted configuration', () => {
   assert.equal(
@@ -12,6 +12,12 @@ test('uses the launcher-provided API URL before every persisted configuration', 
     ),
     'http://developer-tailnet-host.test:8000',
   );
+});
+
+test('API errors expose a concise FastAPI detail instead of raw JSON', () => {
+  assert.equal(apiErrorMessage('{"detail":"Image quota is unavailable."}', 503), 'Image quota is unavailable.');
+  assert.equal(apiErrorMessage('Gateway unavailable', 502), 'Gateway unavailable');
+  assert.equal(apiErrorMessage('', 500), 'Exposure service returned 500');
 });
 
 test('uses the configured URL when there is no launcher URL', () => {
