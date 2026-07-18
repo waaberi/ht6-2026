@@ -30,6 +30,8 @@ Use `pnpm dev` every day. It starts the emulator when needed, starts Metro, open
 
 For a physical Android phone, install Expo Go, connect the phone to the same Wi-Fi network, run `pnpm phone`, and scan the terminal QR code in Expo Go.
 
+On eduroam, run `pnpm phone:hotspot` instead. It starts the `uottawashed` hotspot when needed, serves the API and Expo Go at `10.42.0.1`, and prints one QR code for every teammate connected to the hotspot. Press Ctrl+C when finished, then run `uottawashed off`.
+
 The first development launch shows Expo's one-time developer-menu introduction. Press **Continue**, then close the menu to reveal Exposure. Fast Refresh is enabled by default.
 
 Android Emulator reaches a host API at `http://10.0.2.2:8000`. A physical device needs the development machine's LAN address. The API URL can also be changed under Settings → Compute service, including in the standalone APK.
