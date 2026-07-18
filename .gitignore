@@ -7,7 +7,10 @@ overnight.env
 # Workspace-local agent metadata
 .agents/
 .codex/
-
+.claude/
+.cursor/
+.gemini/
+.opencode/
 # Dependencies and generated builds
 node_modules/
 .expo/
