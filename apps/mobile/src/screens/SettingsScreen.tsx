@@ -270,10 +270,10 @@ const ChoiceRow = ({ label, value, options, onChange, last = false }: {
             key={option.value}
             accessibilityRole="radio"
             accessibilityState={{ checked: selected }}
-            style={({ pressed }) => [styles.segment, selected && styles.segmentSelected, pressed && styles.pressed]}
+            style={[styles.segment, selected && styles.segmentSelected]}
             onPress={() => onChange(option.value)}
           >
-            <Text style={[styles.segmentLabel, selected && styles.segmentLabelSelected]}>{option.label}</Text>
+            <Text numberOfLines={1} style={[styles.segmentLabel, selected && styles.segmentLabelSelected]}>{option.label}</Text>
           </Pressable>
         );
       })}
@@ -327,10 +327,10 @@ const styles = StyleSheet.create({
   choiceBlock: { paddingHorizontal: 12, paddingTop: 11, paddingBottom: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
   rowLabel: { color: colors.ink, fontSize: 14, fontWeight: '600' },
   rowDetail: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 2 },
-  segmented: { minHeight: 52, flexDirection: 'row', borderRadius: 10, backgroundColor: colors.background, padding: 4, marginTop: 9 },
-  segment: { flex: 1, minHeight: 44, borderRadius: 8, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
+  segmented: { height: 52, flexDirection: 'row', alignItems: 'stretch', borderRadius: 10, backgroundColor: colors.background, padding: 4, marginTop: 9 },
+  segment: { flex: 1, height: 44, borderRadius: 8, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
   segmentSelected: { backgroundColor: colors.primary },
-  segmentLabel: { color: colors.muted, fontSize: 12, fontWeight: '700', textAlign: 'center' },
+  segmentLabel: { width: '100%', color: colors.muted, fontSize: 12, lineHeight: 16, fontWeight: '700', textAlign: 'center' },
   segmentLabelSelected: { color: colors.onPrimary },
   settingRow: { minHeight: 60, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
   settingCopy: { flex: 1, paddingRight: 14 },

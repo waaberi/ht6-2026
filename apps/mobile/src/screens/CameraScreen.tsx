@@ -401,7 +401,7 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={cameraPreferences.timerSeconds ? `Take photo with ${cameraPreferences.timerSeconds} second timer` : 'Take photo'}
-            style={({ pressed }) => [styles.shutter, (!ready || busy || flashSettling) && styles.disabled, pressed && styles.shutterPressed]}
+            style={({ pressed }) => [styles.shutter, (!ready || busy || flashSettling) && styles.disabled, pressed && styles.pressed]}
             onPress={capture}
             disabled={!ready || busy || flashSettling}
           >
@@ -461,7 +461,6 @@ const styles = StyleSheet.create({
   recentImage: { width: '100%', height: '100%' },
   shutter: { width: 82, height: 82, borderRadius: 41, borderWidth: 3, borderColor: colors.ink, padding: 6, alignItems: 'center', justifyContent: 'center' },
   shutterCore: { width: '100%', height: '100%', borderRadius: 34, backgroundColor: colors.ink },
-  shutterPressed: { transform: [{ scale: 0.95 }] },
   flipButton: { width: 58, height: 58, borderRadius: 29, backgroundColor: colors.surfaceStrong, alignItems: 'center', justifyContent: 'center' },
   disabled: { opacity: 0.45 },
   pressed: { opacity: 0.7 },

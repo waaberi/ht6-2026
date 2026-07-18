@@ -10,10 +10,10 @@ export type MainTab = 'camera' | 'library' | 'settings';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
 
-const items: Array<{ id: MainTab; label: string; icon: IoniconName; activeIcon: IoniconName }> = [
-  { id: 'camera', label: 'Camera', icon: 'camera-outline', activeIcon: 'camera' },
-  { id: 'library', label: 'Library', icon: 'images-outline', activeIcon: 'images' },
-  { id: 'settings', label: 'Settings', icon: 'settings-outline', activeIcon: 'settings' },
+const items: Array<{ id: MainTab; label: string; icon: IoniconName }> = [
+  { id: 'camera', label: 'Camera', icon: 'camera-outline' },
+  { id: 'library', label: 'Library', icon: 'images-outline' },
+  { id: 'settings', label: 'Settings', icon: 'settings-outline' },
 ];
 
 export const TabBar = ({ active, onChange }: { active: MainTab; onChange: (tab: MainTab) => void }) => {
@@ -27,19 +27,19 @@ export const TabBar = ({ active, onChange }: { active: MainTab; onChange: (tab: 
           <Pressable
             key={item.id}
             onPress={() => onChange(item.id)}
-            style={({ pressed }) => [styles.item, pressed && styles.pressed]}
+            style={styles.item}
             accessibilityRole="tab"
             accessibilityLabel={item.label}
             accessibilityState={{ selected }}
           >
             <View style={styles.iconWrap}>
               <Ionicons
-                name={selected ? item.activeIcon : item.icon}
+                name={item.icon}
                 size={23}
                 color={selected ? colors.primary : colors.textSecondary}
               />
             </View>
-            <Text style={[styles.label, selected && styles.selectedLabel]}>{item.label}</Text>
+            <Text numberOfLines={1} style={[styles.label, selected && styles.selectedLabel]}>{item.label}</Text>
           </Pressable>
         );
       })}
@@ -70,7 +70,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  label: { color: colors.textSecondary, ...typography.caption, fontWeight: '600' },
-  selectedLabel: { color: colors.primary, fontWeight: '700' },
-  pressed: { opacity: 0.72 },
+  label: { color: colors.textSecondary, ...typography.caption, fontWeight: '700' },
+  selectedLabel: { color: colors.primary },
 });
