@@ -6,6 +6,8 @@ import process from 'node:process';
 const workspaceRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const hotspotAddress = '10.42.0.1';
 const apiUrl = `http://${hotspotAddress}:8000`;
+const forwardedArgs = process.argv.slice(2);
+const expoArgs = forwardedArgs[0] === '--' ? forwardedArgs.slice(1) : forwardedArgs;
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 const executable = (name) => process.platform === 'win32' ? `${name}.cmd` : name;
 
@@ -138,6 +140,7 @@ const expo = spawn(executable('pnpm'), [
   'start',
   '--go',
   '--lan',
+  ...expoArgs,
 ], {
   cwd: workspaceRoot,
   env,
