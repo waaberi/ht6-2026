@@ -79,6 +79,15 @@ const emulator = join(sdkRoot, 'emulator', process.platform === 'win32' ? 'emula
 const packageName = 'com.ht62026.exposure';
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+const runAdb = (args, description) => {
+  const result = spawnSync(adb, args, { env, encoding: 'utf8' });
+  if (result.status !== 0) {
+    console.error(`${description} failed.`);
+    console.error(result.stderr || result.stdout);
+    process.exit(result.status ?? 1);
+  }
+};
+
 const listedDevices = () => {
   const result = spawnSync(adb, ['devices'], { env, encoding: 'utf8' });
   if (result.status !== 0) return [];
@@ -94,14 +103,44 @@ const onlineDevices = () => listedDevices()
   .filter(({ state }) => state === 'device')
   .map(({ serial }) => serial);
 
+const bootStatus = (serial) => spawnSync(
+  adb,
+  ['-s', serial, 'shell', 'getprop', 'sys.boot_completed'],
+  { env, encoding: 'utf8' },
+);
+
+const emulatorConsoleIsAvailable = (serial) => {
+  const result = spawnSync(adb, ['-s', serial, 'emu', 'avd', 'name'], { env, encoding: 'utf8' });
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+  return result.status === 0 && !/could not connect to TCP port/i.test(output);
+};
+
+const refreshStaleEmulatorConnections = async () => {
+  const staleEmulators = listedDevices()
+    .map(({ serial }) => serial)
+    .filter((serial) => serial.startsWith('emulator-') && !emulatorConsoleIsAvailable(serial));
+
+  if (!staleEmulators.length) return;
+
+  console.log(`Refreshing ADB to remove stale emulator connection(s): ${staleEmulators.join(', ')}`);
+  runAdb(['kill-server'], 'Stopping the stale ADB server');
+  runAdb(['start-server'], 'Restarting the ADB server');
+  await delay(500);
+};
+
 const waitForBoot = async () => {
   for (let attempt = 0; attempt < 180; attempt += 1) {
-    const devices = onlineDevices();
-    const serial = devices.find((candidate) => candidate.startsWith('emulator-')) ?? devices[0];
-    if (serial) {
-      env.ANDROID_SERIAL = serial;
-      const result = spawnSync(adb, ['shell', 'getprop', 'sys.boot_completed'], { env, encoding: 'utf8' });
-      if (result.status === 0 && result.stdout.trim() === '1') return;
+    const devices = onlineDevices().sort((left, right) => (
+      Number(right.startsWith('emulator-')) - Number(left.startsWith('emulator-'))
+    ));
+    for (const serial of devices) {
+      if (serial.startsWith('emulator-') && !emulatorConsoleIsAvailable(serial)) continue;
+      const result = bootStatus(serial);
+      if (result.status === 0 && result.stdout.trim() === '1') {
+        env.ANDROID_SERIAL = serial;
+        console.log(`Android device: ${serial}`);
+        return;
+      }
     }
     await delay(1000);
   }
@@ -112,9 +151,10 @@ const waitForBoot = async () => {
 
 const ensureAndroidDevice = async () => {
   const devices = listedDevices();
-  const deviceIsAvailableOrBooting = devices.some(({ serial, state }) => (
-    serial.startsWith('emulator-') || state === 'device'
-  ));
+  const deviceIsAvailableOrBooting = devices.some(({ serial, state }) => {
+    if (serial.startsWith('emulator-')) return emulatorConsoleIsAvailable(serial);
+    return state === 'device' && bootStatus(serial).status === 0;
+  });
   if (!deviceIsAvailableOrBooting) {
     const result = spawnSync(emulator, ['-list-avds'], { env, encoding: 'utf8' });
     const avds = result.stdout.split('\n').map((name) => name.trim()).filter(Boolean);
@@ -141,15 +181,6 @@ const ensureAndroidDevice = async () => {
   await waitForBoot();
 };
 
-const runAdb = (args, description) => {
-  const result = spawnSync(adb, args, { env, encoding: 'utf8' });
-  if (result.status !== 0) {
-    console.error(`${description} failed.`);
-    console.error(result.stderr || result.stdout);
-    process.exit(result.status ?? 1);
-  }
-};
-
 const expoCli = join(dirname(require.resolve('expo/package.json')), 'bin', 'cli');
 const commands = {
   install: [
@@ -167,6 +198,7 @@ if (!(mode in commands)) {
 console.log(`Android SDK: ${sdkRoot}`);
 console.log(`Android JDK: ${javaHome}`);
 
+await refreshStaleEmulatorConnections();
 await ensureAndroidDevice();
 
 if (mode === 'dev') {

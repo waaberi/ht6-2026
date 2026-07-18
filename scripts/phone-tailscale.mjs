@@ -54,7 +54,7 @@ for (const [name, port] of [['Exposure API', 8000], ['Metro', 8081]]) {
 
 const env = {
   ...process.env,
-  EXPO_PUBLIC_API_URL: apiUrl,
+  EXPO_PUBLIC_LAUNCHER_API_URL: apiUrl,
   REACT_NATIVE_PACKAGER_HOSTNAME: tailscaleAddress,
 };
 const children = [];

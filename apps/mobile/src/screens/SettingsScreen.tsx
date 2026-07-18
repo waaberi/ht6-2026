@@ -4,11 +4,17 @@ import { Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from
 
 import { colors } from '../components/theme';
 import { loadPreferences, savePreferences as persistPreferences, type ExposurePreferences } from '../data/preferences';
+import { resolveApiUrl } from '../domain/apiConfiguration';
 import { supabase } from '../services/supabase';
 import { persistPreferences as persistPreferencesToCloud } from '../services/sync';
 import { useExposure } from '../state/ExposureContext';
 
 export const SettingsScreen = () => {
+  const configuredApiUrl = resolveApiUrl(
+    process.env.EXPO_PUBLIC_LAUNCHER_API_URL,
+    process.env.EXPO_PUBLIC_API_URL,
+    undefined,
+  );
   const { photos } = useExposure();
   const [session, setSession] = useState<Session | null>(null);
   const [email, setEmail] = useState('');
@@ -63,7 +69,7 @@ export const SettingsScreen = () => {
       </Section>
       <Section title="Compute service">
         <Text style={styles.body}>The app or development launcher configures this automatically. This fallback is used only when no service URL is configured.</Text>
-        <TextInput value={apiUrl} onChangeText={setApiUrl} onEndEditing={() => updatePreferences({ apiUrl })} autoCapitalize="none" autoCorrect={false} keyboardType="url" placeholder={process.env.EXPO_PUBLIC_API_URL ?? 'https://api.example.com'} placeholderTextColor={colors.muted} style={styles.input} />
+        <TextInput value={apiUrl} onChangeText={setApiUrl} onEndEditing={() => updatePreferences({ apiUrl })} autoCapitalize="none" autoCorrect={false} keyboardType="url" placeholder={configuredApiUrl || 'https://api.example.com'} placeholderTextColor={colors.muted} style={styles.input} />
       </Section>
       <Section title="Coaching">
         <Text style={styles.label}>SKILL LEVEL</Text>
@@ -82,7 +88,7 @@ export const SettingsScreen = () => {
         <View style={styles.statRow}><Text style={styles.statValue}>{photos.length}</Text><Text style={styles.statLabel}>originals</Text><Text style={styles.statValue}>{photos.reduce((sum, photo) => sum + photo.versions.length, 0)}</Text><Text style={styles.statLabel}>versions</Text></View>
         <Text style={styles.body}>{photos.filter((photo) => photo.syncState !== 'synced').length} item(s) queued for sync. Local capture remains available offline.</Text>
       </Section>
-      <Text style={styles.footer}>Exposure · com.ht62026.exposure{apiUrl || process.env.EXPO_PUBLIC_API_URL ? ' · API configured' : ' · local mode'}</Text>
+      <Text style={styles.footer}>Exposure · com.ht62026.exposure{apiUrl || configuredApiUrl ? ' · API configured' : ' · local mode'}</Text>
     </ScrollView>
   );
 };

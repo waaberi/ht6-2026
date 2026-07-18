@@ -1,3 +1,4 @@
+import { fetch } from 'expo/fetch';
 import { File } from 'expo-file-system';
 
 import { exifForRemoteAnalysis } from '../data/photoRepository';
@@ -10,12 +11,16 @@ export class ApiUnavailableError extends Error {}
 
 const requireApiUrl = async () => {
   const preferences = await loadPreferences();
-  const apiUrl = resolveApiUrl(process.env.EXPO_PUBLIC_API_URL, preferences.apiUrl);
+  const apiUrl = resolveApiUrl(
+    process.env.EXPO_PUBLIC_LAUNCHER_API_URL,
+    process.env.EXPO_PUBLIC_API_URL,
+    preferences.apiUrl,
+  );
   if (!apiUrl) throw new ApiUnavailableError('Set the Exposure API URL in Settings to enable analysis and export.');
   return apiUrl;
 };
 
-const apiFetch = async (path: string, init: RequestInit) => {
+const apiFetch = async (path: string, init: Parameters<typeof fetch>[1]) => {
   const apiUrl = await requireApiUrl();
   try {
     return await fetch(`${apiUrl}${path}`, init);

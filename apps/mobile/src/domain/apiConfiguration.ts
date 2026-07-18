@@ -1,2 +1,5 @@
-export const resolveApiUrl = (configuredUrl: string | undefined, overrideUrl: string | undefined) =>
-  (configuredUrl?.trim() || overrideUrl?.trim() || '').replace(/\/$/, '');
+export const resolveApiUrl = (
+  launcherUrl: string | undefined,
+  configuredUrl: string | undefined,
+  fallbackUrl: string | undefined,
+) => (launcherUrl?.trim() || configuredUrl?.trim() || fallbackUrl?.trim() || '').replace(/\/$/, '');
