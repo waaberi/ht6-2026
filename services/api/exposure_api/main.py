@@ -60,7 +60,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 provider = GeminiProvider()
-AnalysisCacheKey = tuple[str, str, str, str]
+AnalysisCacheKey = tuple[str, str, str, str, str, str]
 analysis_cache: OrderedDict[AnalysisCacheKey, AnalysisResult] = OrderedDict()
 
 
@@ -81,6 +81,20 @@ def _store_analysis(key: AnalysisCacheKey, result: AnalysisResult) -> None:
 def _semantic_cache_identity() -> str:
     models = getattr(provider, "semantic_models", (provider.semantic_model,))
     return "|".join(models)
+
+
+def _canonical_fingerprint(value: object) -> str:
+    serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _analysis_cache_scope(authenticated_user: dict[str, object] | None) -> str:
+    if not authenticated_user:
+        return "anonymous"
+    user_id = authenticated_user.get("id")
+    if not isinstance(user_id, str) or not user_id:
+        return "anonymous"
+    return f"user:{hashlib.sha256(user_id.encode('utf-8')).hexdigest()}"
 
 
 async def _read_image(upload: UploadFile) -> bytes:
@@ -143,10 +157,11 @@ async def health() -> dict[str, object]:
     }
 
 
-@app.post("/v1/analyze", response_model=AnalysisResult, dependencies=[Depends(require_authenticated_user)])
+@app.post("/v1/analyze", response_model=AnalysisResult)
 async def analyze(
     image: Annotated[UploadFile, File()],
     version_id: Annotated[str, Form(min_length=1)],
+    authenticated_user: Annotated[dict[str, object] | None, Depends(require_authenticated_user)],
     checksum: Annotated[str, Form()] = "",
     exif_json: Annotated[str, Form()] = "{}",
     coaching_json: Annotated[str, Form()] = "{}",
@@ -172,8 +187,14 @@ async def analyze(
         checksum = hashlib.sha256(image_bytes).hexdigest()
     else:
         checksum = checksum or hashlib.sha256(image_bytes).hexdigest()
-    coaching_fingerprint = hashlib.sha256(json.dumps(coaching, sort_keys=True).encode()).hexdigest()[:12]
-    cache_key = (checksum, SCHEMA_VERSION, _semantic_cache_identity() if provider.configured else "local", coaching_fingerprint)
+    cache_key = (
+        checksum,
+        SCHEMA_VERSION,
+        _semantic_cache_identity() if provider.configured else "local",
+        _canonical_fingerprint(coaching),
+        _canonical_fingerprint(safe_exif),
+        _analysis_cache_scope(authenticated_user),
+    )
     cached = _cached_analysis(cache_key)
     if cached:
         return cached.model_copy(update={"version_id": version_id})
