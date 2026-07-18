@@ -186,6 +186,106 @@ def test_canvas_space_patch_fills_an_expanded_edge() -> None:
     assert tuple(rendered[6, 23]) == (238, 189, 168)
 
 
+def test_collective_adjustments_run_after_canvas_space_generated_patches() -> None:
+    source = Image.new("RGB", (8, 6), (20, 30, 40))
+    source_bytes = io.BytesIO()
+    source.save(source_bytes, format="PNG")
+    patch = Image.new("RGBA", source.size, (0, 0, 0, 0))
+    patch_pixels = np.asarray(patch).copy()
+    patch_pixels[2:4, 3:5] = (40, 60, 80, 255)
+    patch_bytes = io.BytesIO()
+    Image.fromarray(patch_pixels, "RGBA").save(patch_bytes, format="PNG")
+    layer = {
+        "id": "generated",
+        "type": "generative-patch",
+        "enabled": True,
+        "opacity": 1,
+        "patchAssetId": "patch",
+        "canvasSpace": True,
+        "canvasExpansion": {"top": 0, "right": 0, "bottom": 0, "left": 0},
+    }
+
+    rendered = np.asarray(render_layer_stack(
+        source_bytes.getvalue(),
+        LayerStack.model_validate({
+            "canvasTransform": IDENTITY,
+            "adjustments": {"exposure": 1},
+            "layers": [layer],
+        }),
+        {"patch": patch_bytes.getvalue()},
+    ))
+
+    assert tuple(rendered[0, 0]) == (40, 60, 80)
+    assert tuple(rendered[2, 3]) == (80, 120, 160)
+
+
+def test_generated_patch_embedded_mask_is_applied_exactly_once() -> None:
+    source = Image.new("RGB", (5, 5), "black")
+    source_bytes = io.BytesIO()
+    source.save(source_bytes, format="PNG")
+    edge_alpha = np.array([0, 64, 128, 192, 255], dtype=np.uint8)
+    patch_pixels = np.full((5, 5, 4), 255, dtype=np.uint8)
+    patch_pixels[..., 3] = edge_alpha[None, :]
+    patch = Image.fromarray(patch_pixels, "RGBA")
+    patch_bytes = io.BytesIO()
+    patch.save(patch_bytes, format="PNG")
+    mask = Image.fromarray(np.tile(edge_alpha, (5, 1)), "L")
+    mask_bytes = io.BytesIO()
+    mask.save(mask_bytes, format="PNG")
+
+    for canvas_space in (False, True):
+        layer = {
+            "id": f"generated-{canvas_space}",
+            "type": "generative-patch",
+            "enabled": True,
+            "opacity": 1,
+            "patchAssetId": "patch",
+            "maskAssetId": "mask",
+            "canvasSpace": canvas_space,
+            "canvasExpansion": {"top": 0, "right": 0, "bottom": 0, "left": 0},
+        }
+        rendered = np.asarray(render_layer_stack(
+            source_bytes.getvalue(),
+            LayerStack.model_validate({"canvasTransform": IDENTITY, "layers": [layer]}),
+            {"patch": patch_bytes.getvalue(), "mask": mask_bytes.getvalue()},
+        ))
+
+        assert np.array_equal(rendered[2, :, 0], edge_alpha)
+        assert np.array_equal(rendered[2, :, 1], edge_alpha)
+        assert np.array_equal(rendered[2, :, 2], edge_alpha)
+
+
+def test_generated_patch_uses_the_separately_stored_mask_when_present() -> None:
+    source = Image.new("RGB", (5, 5), "black")
+    source_bytes = io.BytesIO()
+    source.save(source_bytes, format="PNG")
+    patch = Image.new("RGBA", source.size, (255, 255, 255, 255))
+    patch_bytes = io.BytesIO()
+    patch.save(patch_bytes, format="PNG")
+    edge_alpha = np.array([0, 64, 128, 192, 255], dtype=np.uint8)
+    mask = Image.fromarray(np.tile(edge_alpha, (5, 1)), "L")
+    mask_bytes = io.BytesIO()
+    mask.save(mask_bytes, format="PNG")
+    layer = {
+        "id": "generated",
+        "type": "generative-patch",
+        "enabled": True,
+        "opacity": 1,
+        "patchAssetId": "patch",
+        "maskAssetId": "mask",
+        "canvasSpace": True,
+        "canvasExpansion": {"top": 0, "right": 0, "bottom": 0, "left": 0},
+    }
+
+    rendered = np.asarray(render_layer_stack(
+        source_bytes.getvalue(),
+        LayerStack.model_validate({"canvasTransform": IDENTITY, "layers": [layer]}),
+        {"patch": patch_bytes.getvalue(), "mask": mask_bytes.getvalue()},
+    ))
+
+    assert np.array_equal(rendered[2, :, 0], edge_alpha)
+
+
 def test_every_collective_adjustment_changes_the_render() -> None:
     yy, xx = np.indices((48, 64), dtype=np.uint8)
     source_pixels = np.stack(

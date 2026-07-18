@@ -84,6 +84,31 @@ def _mask_for(layer: dict[str, Any], size: tuple[int, int], assets: dict[str, by
     return Image.new("L", size, 255)
 
 
+def _overlay_alpha(
+    overlay: Image.Image,
+    layer: dict[str, Any],
+    assets: dict[str, bytes],
+    size: tuple[int, int],
+) -> Image.Image:
+    alpha = overlay.getchannel("A").resize(size, Image.Resampling.LANCZOS)
+    mask_id = layer.get("maskAssetId")
+    if mask_id and mask_id in assets:
+        supplied = Image.open(io.BytesIO(assets[mask_id])).convert("L").resize(size, Image.Resampling.LANCZOS)
+        if layer.get("type") == "generative-patch":
+            # Generative extraction embeds this same mask in patch alpha for
+            # immediate local preview and stores it separately for authoritative
+            # rendering. The stored mask replaces, rather than multiplies, the
+            # embedded copy so feathered edges are applied exactly once.
+            alpha = supplied
+        else:
+            alpha = Image.fromarray(
+                (np.asarray(alpha, dtype=np.float32) * np.asarray(supplied, dtype=np.float32) / 255).astype(np.uint8),
+                "L",
+            )
+    opacity = max(0, min(1, float(layer.get("opacity", 1))))
+    return alpha.point(lambda value: round(value * opacity))
+
+
 def _composite_asset(base: Image.Image, layer: dict[str, Any], assets: dict[str, bytes]) -> Image.Image:
     asset_id = layer.get("assetId") or layer.get("patchAssetId")
     if not asset_id or asset_id not in assets:
@@ -93,12 +118,7 @@ def _composite_asset(base: Image.Image, layer: dict[str, Any], assets: dict[str,
     if transform:
         overlay = _apply_canvas_transform(overlay, transform).convert("RGBA")
     overlay = overlay.resize(base.size, Image.Resampling.LANCZOS)
-    opacity = max(0, min(1, float(layer.get("opacity", 1))))
-    alpha = overlay.getchannel("A").point(lambda value: round(value * opacity))
-    mask_id = layer.get("maskAssetId")
-    if mask_id and mask_id in assets:
-        supplied = Image.open(io.BytesIO(assets[mask_id])).convert("L").resize(base.size, Image.Resampling.LANCZOS)
-        alpha = Image.fromarray((np.asarray(alpha, dtype=np.float32) * np.asarray(supplied, dtype=np.float32) / 255).astype(np.uint8), "L")
+    alpha = _overlay_alpha(overlay, layer, assets, base.size)
     overlay.putalpha(alpha)
     base_rgb = base.convert("RGB")
     overlay_rgb = overlay.convert("RGB")
@@ -124,15 +144,7 @@ def _composite_canvas_asset(
     if not asset_id or asset_id not in assets:
         return base
     overlay = Image.open(io.BytesIO(assets[asset_id])).convert("RGBA")
-    opacity = max(0, min(1, float(layer.get("opacity", 1))))
-    alpha = overlay.getchannel("A").point(lambda value: round(value * opacity))
-    mask_id = layer.get("maskAssetId")
-    if mask_id and mask_id in assets:
-        supplied = Image.open(io.BytesIO(assets[mask_id])).convert("L").resize(overlay.size, Image.Resampling.LANCZOS)
-        alpha = Image.fromarray(
-            (np.asarray(alpha, dtype=np.float32) * np.asarray(supplied, dtype=np.float32) / 255).astype(np.uint8),
-            "L",
-        )
+    alpha = _overlay_alpha(overlay, layer, assets, overlay.size)
     overlay.putalpha(alpha)
     snapshot = layer.get("canvasExpansion") or current_expansion
     x = int(current_expansion.get("left", 0)) - int(snapshot.get("left", 0))
@@ -208,7 +220,6 @@ def render_layer_stack(image_bytes: bytes, stack: LayerStack, assets: dict[str, 
     with Image.open(io.BytesIO(image_bytes)) as source:
         rendered = ImageOps.exif_transpose(source).convert("RGB")
     canvas_applied = False
-    adjustments_applied = False
     current_expansion = stack.canvas_transform.get("expansion") or {}
     for layer in stack.layers:
         if not layer.get("enabled", True):
@@ -218,9 +229,6 @@ def render_layer_stack(image_bytes: bytes, stack: LayerStack, assets: dict[str, 
             if not canvas_applied:
                 rendered = _apply_canvas_transform(rendered, stack.canvas_transform)
                 canvas_applied = True
-            if stack.adjustments and not adjustments_applied:
-                rendered = _adjust(rendered, stack.adjustments)
-                adjustments_applied = True
             rendered = _composite_canvas_asset(rendered, layer, assets, current_expansion)
             continue
         opacity = max(0, min(1, float(layer.get("opacity", 1))))
@@ -239,7 +247,10 @@ def render_layer_stack(image_bytes: bytes, stack: LayerStack, assets: dict[str, 
             rendered = _composite_asset(rendered, layer, assets)
     if not canvas_applied:
         rendered = _apply_canvas_transform(rendered, stack.canvas_transform)
-    if stack.adjustments and not adjustments_applied:
+    # Collective sliders are a photo-wide final composition stage, not an
+    # ordered layer. Running them after transforms and every layer guarantees
+    # that manual and Coach global targets also affect generated canvas pixels.
+    if stack.adjustments:
         rendered = _adjust(rendered, stack.adjustments)
     return rendered
 
