@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
@@ -93,3 +94,44 @@ def test_heic_import_is_decoded(client: TestClient) -> None:
     )
     assert response.status_code == 200, response.text
     assert response.json()["metrics"]["width"] == 48
+
+
+def test_analysis_measures_the_rendered_current_stack(client: TestClient, image_bytes: bytes) -> None:
+    base = client.post(
+        "/v1/analyze",
+        files={"image": ("photo.png", image_bytes, "image/png")},
+        data={"version_id": "original", "checksum": hashlib.sha256(image_bytes).hexdigest()},
+    )
+    stack = {
+        "canvasTransform": {"rotationDegrees": 0, "perspective": [1, 0, 0, 0, 1, 0, 0, 0, 1]},
+        "layers": [{"type": "adjustment", "enabled": True, "opacity": 1, "adjustments": {"exposure": 0.8}}],
+    }
+    edited = client.post(
+        "/v1/analyze",
+        files={"image": ("photo.png", image_bytes, "image/png")},
+        data={
+            "version_id": "edited",
+            "checksum": hashlib.sha256(image_bytes).hexdigest(),
+            "layer_stack_json": json.dumps(stack),
+            "asset_ids_json": "[]",
+        },
+    )
+    assert base.status_code == edited.status_code == 200
+    assert edited.json()["metrics"]["meanLuminance"] > base.json()["metrics"]["meanLuminance"]
+    assert edited.json()["checksum"] != base.json()["checksum"]
+
+
+def test_coach_returns_structured_fallback(client: TestClient, image_bytes: bytes) -> None:
+    analysis = client.post(
+        "/v1/analyze",
+        files={"image": ("photo.png", image_bytes, "image/png")},
+        data={"version_id": "coach"},
+    ).json()
+    response = client.post("/v1/coach", json={"analysis": analysis, "question": "What should I change?"})
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["headline"]
+    assert payload["reason"]
+    assert isinstance(payload["evidence"], list)
+    assert isinstance(payload["captureAdvice"], list)
+    assert len(payload["actions"]) <= 2

@@ -11,6 +11,7 @@ from typing import Annotated
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from PIL import ImageOps
 from pydantic import ValidationError
 
 from .analysis import analyze_deterministic, merge_semantic
@@ -18,6 +19,8 @@ from .curation import create_style_profile, review_portfolio
 from .generative import ExcessiveDriftError, extract_localized_patch
 from .models import (
     AnalysisResult,
+    CoachCaptureAdvice,
+    CoachEvidence,
     CoachRequest,
     CoachResponse,
     GenerativePatchResult,
@@ -109,11 +112,28 @@ async def analyze(
     checksum: Annotated[str, Form()] = "",
     exif_json: Annotated[str, Form()] = "{}",
     coaching_json: Annotated[str, Form()] = "{}",
+    layer_stack_json: Annotated[str, Form()] = '{"canvasTransform":{"rotationDegrees":0,"perspective":[1,0,0,0,1,0,0,0,1]},"layers":[]}',
+    assets: Annotated[list[UploadFile], File()] = [],
+    asset_ids_json: Annotated[str, Form()] = "[]",
 ) -> AnalysisResult:
     image_bytes = await _read_image(image)
     safe_exif = _safe_exif(exif_json)
     coaching = _safe_coaching(coaching_json)
-    checksum = checksum or hashlib.sha256(image_bytes).hexdigest()
+    try:
+        stack = LayerStack.model_validate_json(layer_stack_json)
+    except ValidationError as error:
+        raise HTTPException(422, "layer_stack_json must use the Exposure layer contract") from error
+    asset_bytes = await _read_assets(assets, asset_ids_json)
+    transform = stack.canvas_transform
+    identity_perspective = [1, 0, 0, 0, 1, 0, 0, 0, 1]
+    needs_render = bool(stack.adjustments) or bool(stack.layers) or bool(transform.get("crop")) or bool(transform.get("expansion")) or bool(transform.get("rotationDegrees", 0)) or transform.get("perspective") != identity_perspective
+    analysis_mime_type = image.content_type or "image/jpeg"
+    if needs_render:
+        rendered = await asyncio.to_thread(render_layer_stack, image_bytes, stack, asset_bytes)
+        image_bytes, analysis_mime_type = await asyncio.to_thread(encode_image, rendered, "png")
+        checksum = hashlib.sha256(image_bytes).hexdigest()
+    else:
+        checksum = checksum or hashlib.sha256(image_bytes).hexdigest()
     coaching_fingerprint = hashlib.sha256(json.dumps(coaching, sort_keys=True).encode()).hexdigest()[:12]
     cache_key = (checksum, SCHEMA_VERSION, provider.semantic_model if provider.configured else "local", coaching_fingerprint)
     cached = analysis_cache.get(cache_key)
@@ -131,7 +151,7 @@ async def analyze(
         try:
             semantic = await provider.analyze_semantics(
                 image_bytes,
-                image.content_type or "image/jpeg",
+                analysis_mime_type,
                 deterministic,
                 safe_exif,
                 coaching,
@@ -173,6 +193,8 @@ async def generative_layer(
     target_json: Annotated[str, Form()],
     prompt: Annotated[str, Form(min_length=1, max_length=800)],
     source_version_id: Annotated[str, Form(min_length=1)],
+    operation: Annotated[str, Form(pattern="^(remove|add|expand)$")] = "remove",
+    expansion_json: Annotated[str, Form()] = "{}",
     layer_stack_json: Annotated[str, Form()] = '{"canvasTransform":{"rotationDegrees":0,"perspective":[1,0,0,0,1,0,0,0,1]},"layers":[]}',
     assets: Annotated[list[UploadFile], File()] = [],
     asset_ids_json: Annotated[str, Form()] = "[]",
@@ -187,10 +209,40 @@ async def generative_layer(
         raise HTTPException(422, "target_json and layer_stack_json must use Exposure contracts") from error
     asset_bytes = await _read_assets(assets, asset_ids_json)
     rendered = await asyncio.to_thread(render_layer_stack, image_bytes, stack, asset_bytes)
+    cumulative_expansion: dict[str, int] | None = None
+    if operation == "expand":
+        try:
+            expansion_request = json.loads(expansion_json)
+            direction = expansion_request["direction"]
+            fraction = float(expansion_request.get("fraction", 0.25))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            raise HTTPException(422, "expansion_json requires a direction and fraction") from error
+        if direction not in {"top", "right", "bottom", "left"} or not 0.1 <= fraction <= 0.5:
+            raise HTTPException(422, "Expand one edge by 10% to 50%")
+        axis_size = rendered.height if direction in {"top", "bottom"} else rendered.width
+        delta = max(1, round(axis_size * fraction))
+        border = {
+            "left": (delta, 0, 0, 0),
+            "top": (0, delta, 0, 0),
+            "right": (0, 0, delta, 0),
+            "bottom": (0, 0, 0, delta),
+        }[direction]
+        rendered = ImageOps.expand(rendered, border=border, fill="black")
+        target = Region(
+            x=0 if direction == "left" else (rendered.width - delta) / rendered.width if direction == "right" else 0,
+            y=0 if direction == "top" else (rendered.height - delta) / rendered.height if direction == "bottom" else 0,
+            width=delta / rendered.width if direction in {"left", "right"} else 1,
+            height=delta / rendered.height if direction in {"top", "bottom"} else 1,
+        )
+        existing = stack.canvas_transform.get("expansion") or {}
+        cumulative_expansion = {
+            side: max(0, int(existing.get(side, 0))) + (delta if side == direction else 0)
+            for side in ("top", "right", "bottom", "left")
+        }
     rendered_bytes, _ = await asyncio.to_thread(encode_image, rendered, "png")
-    candidate = await provider.generate_candidate(rendered_bytes, "image/png", prompt)
+    candidate = await provider.generate_candidate(rendered_bytes, "image/png", prompt, target, operation)
     try:
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             extract_localized_patch,
             rendered_bytes,
             candidate,
@@ -198,6 +250,7 @@ async def generative_layer(
             model=provider.image_model,
             source_version_id=source_version_id,
         )
+        return result.model_copy(update={"expansion": cumulative_expansion})
     except ExcessiveDriftError as error:
         raise HTTPException(422, str(error)) from error
 
@@ -247,14 +300,37 @@ async def style_apply(
 async def coach(request: CoachRequest) -> CoachResponse:
     if provider.configured:
         try:
-            response = await provider.coach(request.analysis, request.question)
+            response = await provider.coach(request)
             if response:
-                return CoachResponse(answer=response[0], model=response[1])
+                return response
         except Exception:
             logger.exception("Gemini Coach request failed")
     if request.analysis.issues:
         issue = request.analysis.issues[0]
-        answer = f"Start with {issue.title.lower()}. {issue.recommended_action} This is the highest-confidence change supported by the current measurements."
+        evidence = [
+            CoachEvidence(path=f"issues.{issue.id}.evidence.{key}", value=value, meaning=issue.explanation)
+            for key, value in list(issue.evidence.items())[:1]
+        ]
+        headline = issue.title
+        reason = issue.recommended_action
     else:
-        answer = "No strong technical fault crossed the measured thresholds. Keep the original intent and make only small reversible changes."
-    return CoachResponse(answer=answer, model="exposure-deterministic-coach-1")
+        evidence = []
+        headline = "Keep the current intent"
+        reason = "No strong technical fault crossed the measured thresholds."
+    capture_advice = [
+        CoachCaptureAdvice(
+            setting=item.setting,
+            value=item.value,
+            tradeoff=item.explanation,
+            based_on=item.based_on,
+        )
+        for item in request.analysis.camera_recommendations[:3]
+    ]
+    return CoachResponse(
+        headline=headline,
+        reason=reason,
+        evidence=evidence,
+        capture_advice=capture_advice,
+        actions=[],
+        model="exposure-deterministic-coach-1",
+    )

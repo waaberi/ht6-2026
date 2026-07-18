@@ -1,8 +1,9 @@
-import { File } from 'expo-file-system';
+import { Directory, File, Paths } from 'expo-file-system';
 
 import { layerAssetsForStacks } from '../domain/assets';
-import type { ExposurePreferences } from '../data/preferences';
-import type { AnalysisResult, PhotoRecord } from '../domain/types';
+import { mergeStyleProfiles, type SavedStyleProfile } from '../data/styleRepository';
+import { loadPreferences, savePreferences, type ExposurePreferences } from '../data/preferences';
+import type { AnalysisResult, Layer, PhotoRecord, PhotoVersion } from '../domain/types';
 import type { PortfolioReview, StyleProfileResult } from './api';
 import { supabase } from './supabase';
 
@@ -13,7 +14,10 @@ const uploadOnce = async (bucket: string, path: string, uri: string, contentType
   if (error && !/already exists|duplicate/i.test(error.message)) throw error;
 };
 
-export const syncQueuedPhotos = async (photos: PhotoRecord[]): Promise<PhotoRecord[]> => {
+export const syncQueuedPhotos = async (
+  photos: PhotoRecord[],
+  onProgress?: (photos: PhotoRecord[]) => void,
+): Promise<PhotoRecord[]> => {
   if (!supabase) return photos;
   const { data } = await supabase.auth.getSession();
   const userId = data.session?.user.id;
@@ -26,6 +30,7 @@ export const syncQueuedPhotos = async (photos: PhotoRecord[]): Promise<PhotoReco
     const base = `${userId}/${photo.id}`;
     try {
       synced[index] = { ...photo, syncState: 'syncing' };
+      onProgress?.([...synced]);
       await uploadOnce('originals', `${base}/original.${new File(photo.originalUri).extension.replace('.', '') || 'jpg'}`, photo.originalUri, photo.originalMimeType);
       await Promise.all([
         uploadOnce('derived', `${base}/analysis-proxy.jpg`, photo.analysisProxyUri, 'image/jpeg'),
@@ -43,6 +48,7 @@ export const syncQueuedPhotos = async (photos: PhotoRecord[]): Promise<PhotoReco
         width: photo.width,
         height: photo.height,
         exif: photo.exif,
+        created_at: photo.createdAt,
         current_version_id: null,
         sync_state: 'syncing',
       }, { onConflict: 'id', ignoreDuplicates: true });
@@ -71,19 +77,279 @@ export const syncQueuedPhotos = async (photos: PhotoRecord[]): Promise<PhotoReco
         restored_from_version_id: version.restoredFromVersionId,
         label: version.label,
         canvas_transform: version.stack.canvasTransform,
+        adjustments: version.stack.adjustments ?? {},
         layer_stack: version.stack.layers,
         analysis_proxy_path: `${base}/analysis-proxy.jpg`,
         thumbnail_path: `${base}/thumbnail.jpg`,
+        created_at: version.createdAt,
       })), { onConflict: 'id', ignoreDuplicates: true });
       if (versionsError) throw versionsError;
       const { error: currentError } = await supabase.from('photos').update({ current_version_id: photo.currentVersionId, sync_state: 'synced' }).eq('id', photo.id);
       if (currentError) throw currentError;
       synced[index] = { ...photo, syncState: 'synced' };
+      onProgress?.([...synced]);
     } catch {
       synced[index] = { ...photo, syncState: 'failed' };
+      onProgress?.([...synced]);
     }
   }
   return synced;
+};
+
+type RemotePhotoRow = {
+  id: string;
+  created_at: string;
+  capture_source: PhotoRecord['captureSource'];
+  original_path: string;
+  original_name: string;
+  original_mime_type: string;
+  original_byte_size: number;
+  original_checksum: string;
+  width?: number | null;
+  height?: number | null;
+  exif?: Record<string, unknown> | null;
+  current_version_id: string | null;
+};
+
+type RemoteVersionRow = {
+  id: string;
+  photo_id: string;
+  parent_version_id?: string | null;
+  restored_from_version_id?: string | null;
+  label: string;
+  canvas_transform: PhotoVersion['stack']['canvasTransform'];
+  adjustments?: PhotoVersion['stack']['adjustments'] | null;
+  layer_stack: Layer[];
+  analysis_proxy_path?: string | null;
+  thumbnail_path?: string | null;
+  created_at: string;
+};
+
+type RemoteLayerAssetRow = {
+  id: string;
+  photo_id: string;
+  storage_path: string;
+  mime_type: string;
+};
+
+const exposureDirectory = new Directory(Paths.document, 'exposure');
+const originalsDirectory = new Directory(exposureDirectory, 'originals');
+const proxiesDirectory = new Directory(exposureDirectory, 'proxies');
+const thumbnailsDirectory = new Directory(exposureDirectory, 'thumbnails');
+const layerAssetsDirectory = new Directory(exposureDirectory, 'layer-assets');
+
+const ensureSyncDirectories = () => {
+  exposureDirectory.create({ intermediates: true, idempotent: true });
+  originalsDirectory.create({ intermediates: true, idempotent: true });
+  proxiesDirectory.create({ intermediates: true, idempotent: true });
+  thumbnailsDirectory.create({ intermediates: true, idempotent: true });
+  layerAssetsDirectory.create({ intermediates: true, idempotent: true });
+};
+
+const extensionForPath = (path: string, fallback = 'jpg') => path.match(/\.([a-z0-9]+)$/i)?.[1] ?? fallback;
+
+const downloadPrivateObject = async (bucket: string, path: string, destination: File) => {
+  if (!supabase || destination.exists) return;
+  const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, 10 * 60);
+  if (error) throw error;
+  await File.downloadFileAsync(data.signedUrl, destination, { idempotent: true });
+};
+
+const withLocalAssetUris = (layer: Layer, assetUris: Map<string, string>): Layer => {
+  if (layer.type === 'image') {
+    return { ...layer, uri: assetUris.get(layer.assetId) ?? layer.uri };
+  }
+  if (layer.type === 'retouch' || layer.type === 'generative-patch') {
+    return {
+      ...layer,
+      patchUri: assetUris.get(layer.patchAssetId) ?? layer.patchUri,
+      maskUri: assetUris.get(layer.maskAssetId) ?? layer.maskUri,
+    };
+  }
+  if (layer.type === 'masked-adjustment' && layer.mask.assetId) {
+    return { ...layer, mask: { ...layer.mask, uri: assetUris.get(layer.mask.assetId) ?? layer.mask.uri } };
+  }
+  return layer;
+};
+
+const hydrateRemotePhoto = async (
+  photo: RemotePhotoRow,
+  versions: RemoteVersionRow[],
+  assets: RemoteLayerAssetRow[],
+): Promise<PhotoRecord> => {
+  ensureSyncDirectories();
+  const original = new File(originalsDirectory, `${photo.id}.${extensionForPath(photo.original_path)}`);
+  const proxy = new File(proxiesDirectory, `${photo.id}.jpg`);
+  const thumbnail = new File(thumbnailsDirectory, `${photo.id}.jpg`);
+  const currentVersion = versions.find((version) => version.id === photo.current_version_id) ?? versions.at(-1);
+
+  await Promise.all([
+    downloadPrivateObject('originals', photo.original_path, original),
+    currentVersion?.analysis_proxy_path
+      ? downloadPrivateObject('derived', currentVersion.analysis_proxy_path, proxy)
+      : Promise.resolve(),
+    currentVersion?.thumbnail_path
+      ? downloadPrivateObject('derived', currentVersion.thumbnail_path, thumbnail)
+      : Promise.resolve(),
+  ]);
+
+  const assetUris = new Map<string, string>();
+  await Promise.all(assets.map(async (asset) => {
+    const local = new File(layerAssetsDirectory, `${asset.id}.${extensionForPath(asset.storage_path, asset.mime_type === 'image/png' ? 'png' : 'jpg')}`);
+    await downloadPrivateObject('layer-assets', asset.storage_path, local);
+    assetUris.set(asset.id, local.uri);
+  }));
+
+  const hydratedVersions: PhotoVersion[] = versions
+    .sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at))
+    .map((version) => ({
+      id: version.id,
+      photoId: photo.id,
+      parentVersionId: version.parent_version_id ?? undefined,
+      restoredFromVersionId: version.restored_from_version_id ?? undefined,
+      createdAt: version.created_at,
+      label: version.label,
+      stack: {
+        canvasTransform: version.canvas_transform,
+        adjustments: version.adjustments ?? {},
+        layers: version.layer_stack.map((layer) => withLocalAssetUris(layer, assetUris)),
+      },
+    }));
+
+  return {
+    id: photo.id,
+    createdAt: photo.created_at,
+    captureSource: photo.capture_source,
+    originalUri: original.uri,
+    originalName: photo.original_name,
+    originalMimeType: photo.original_mime_type,
+    originalByteSize: Number(photo.original_byte_size),
+    originalChecksum: photo.original_checksum,
+    analysisProxyUri: proxy.exists ? proxy.uri : original.uri,
+    thumbnailUri: thumbnail.exists ? thumbnail.uri : proxy.exists ? proxy.uri : original.uri,
+    width: photo.width ?? undefined,
+    height: photo.height ?? undefined,
+    exif: photo.exif ?? {},
+    currentVersionId: photo.current_version_id ?? currentVersion?.id ?? hydratedVersions.at(-1)?.id ?? '',
+    versions: hydratedVersions,
+    syncState: 'synced',
+  };
+};
+
+/**
+ * Pulls the private cloud library after sign-in so another device can rebuild
+ * the same originals, version stacks, and generated/imported layer assets.
+ */
+export const pullRemotePhotos = async (localPhotos: PhotoRecord[]): Promise<PhotoRecord[]> => {
+  if (!supabase) return localPhotos;
+  const { data: sessionData } = await supabase.auth.getSession();
+  const userId = sessionData.session?.user.id;
+  if (!userId) return localPhotos;
+
+  const { data: photoRows, error: photoError } = await supabase
+    .from('photos')
+    .select('*')
+    .eq('owner_id', userId)
+    .order('created_at', { ascending: false });
+  if (photoError) throw photoError;
+  if (!photoRows?.length) return localPhotos;
+
+  const photoIds = photoRows.map((row) => row.id as string);
+  const [{ data: versionRows, error: versionError }, { data: assetRows, error: assetError }] = await Promise.all([
+    supabase.from('photo_versions').select('*').in('photo_id', photoIds),
+    supabase.from('layer_assets').select('*').in('photo_id', photoIds),
+  ]);
+  if (versionError) throw versionError;
+  if (assetError) throw assetError;
+
+  const remote = await Promise.all((photoRows as RemotePhotoRow[]).map((photo) => hydrateRemotePhoto(
+    photo,
+    (versionRows as RemoteVersionRow[]).filter((version) => version.photo_id === photo.id),
+    (assetRows as RemoteLayerAssetRow[]).filter((asset) => asset.photo_id === photo.id),
+  )));
+
+  const merged = new Map(localPhotos.map((photo) => [photo.id, photo]));
+  for (const photo of remote) {
+    const local = merged.get(photo.id);
+    const hasUnsyncedLocalHistory = local && local.versions.some((version) => !photo.versions.some((remoteVersion) => remoteVersion.id === version.id));
+    merged.set(photo.id, local && (local.syncState !== 'synced' || hasUnsyncedLocalHistory) ? local : photo);
+  }
+  return [...merged.values()].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+};
+
+export const pullRemoteAnalyses = async (): Promise<Record<string, AnalysisResult>> => {
+  if (!supabase) return {};
+  const { data: sessionData } = await supabase.auth.getSession();
+  const userId = sessionData.session?.user.id;
+  if (!userId) return {};
+  const { data, error } = await supabase
+    .from('analyses')
+    .select('*')
+    .eq('owner_id', userId)
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+
+  const analyses: Record<string, AnalysisResult> = {};
+  for (const row of data ?? []) {
+    const versionId = row.version_id as string;
+    if (analyses[versionId]) continue;
+    analyses[versionId] = {
+      versionId,
+      checksum: row.checksum as string,
+      createdAt: row.created_at as string,
+      deterministicModel: row.deterministic_model as string,
+      semanticModel: (row.semantic_model as string | null) ?? undefined,
+      metrics: (row.metrics ?? {}) as AnalysisResult['metrics'],
+      lighting: row.lighting as AnalysisResult['lighting'],
+      cameraRecommendations: (row.camera_recommendations ?? []) as AnalysisResult['cameraRecommendations'],
+      issues: (row.issues ?? []) as AnalysisResult['issues'],
+      summary: row.summary as string,
+    };
+  }
+  return analyses;
+};
+
+export const pullRemoteStyles = async () => {
+  if (!supabase) return;
+  const { data: sessionData } = await supabase.auth.getSession();
+  const userId = sessionData.session?.user.id;
+  if (!userId) return;
+  const { data, error } = await supabase
+    .from('style_profiles')
+    .select('*')
+    .eq('owner_id', userId)
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  await mergeStyleProfiles((data ?? []).map((row) => ({
+    id: row.id as string,
+    name: row.name as string,
+    referencePhotoIds: (row.reference_photo_ids ?? []) as string[],
+    palette: (row.palette ?? []) as string[],
+    adjustments: (row.adjustments ?? {}) as SavedStyleProfile['adjustments'],
+    mood: row.mood as string,
+    createdAt: row.created_at as string,
+  })));
+};
+
+export const pullRemotePreferences = async () => {
+  if (!supabase) return;
+  const { data: sessionData } = await supabase.auth.getSession();
+  const userId = sessionData.session?.user.id;
+  if (!userId) return;
+  const { data, error } = await supabase.from('profiles').select('*').eq('id', userId).maybeSingle();
+  if (error) throw error;
+  if (!data) return;
+  const local = await loadPreferences();
+  await savePreferences({
+    ...local,
+    skillLevel: data.skill_level ?? local.skillLevel,
+    detail: data.feedback_detail ?? local.detail,
+    desiredMood: data.desired_mood ?? '',
+    exportMetadata: data.export_metadata ?? local.exportMetadata,
+    exportGps: data.export_gps ?? local.exportGps,
+    recommendationFeedback: data.recommendation_feedback ?? local.recommendationFeedback,
+    camera: { ...local.camera, ...(data.camera_preferences ?? {}) },
+  });
 };
 
 export const persistAnalysis = async (photo: PhotoRecord, analysis: AnalysisResult) => {
@@ -155,6 +421,7 @@ export const persistPreferences = async (preferences: ExposurePreferences) => {
     export_metadata: preferences.exportMetadata,
     export_gps: preferences.exportGps,
     recommendation_feedback: preferences.recommendationFeedback,
+    camera_preferences: preferences.camera,
   });
   if (error) throw error;
 };

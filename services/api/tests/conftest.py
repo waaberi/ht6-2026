@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 
 import pytest
@@ -7,6 +8,15 @@ from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
 
 from exposure_api.main import app
+
+
+@pytest.fixture(autouse=True)
+def run_worker_calls_inline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep API tests deterministic where sandboxed Python worker threads are unavailable."""
+    async def inline(function: object, *args: object, **kwargs: object) -> object:
+        return function(*args, **kwargs)  # type: ignore[operator]
+
+    monkeypatch.setattr(asyncio, "to_thread", inline)
 
 
 @pytest.fixture

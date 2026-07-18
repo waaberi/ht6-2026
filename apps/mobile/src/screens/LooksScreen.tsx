@@ -1,14 +1,22 @@
+import { FlashList } from '@shopify/flash-list';
+import Slider from '@react-native-community/slider';
 import { randomUUID } from 'expo-crypto';
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { AccessibilityInfo, FlatList, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 
-import { colors } from '../components/theme';
+import { colors, layout, radii, spacing, typography } from '../components/theme';
+import { ActionButton } from '../components/ui/ActionButton';
+import { EmptyState } from '../components/ui/EmptyState';
+import { ScreenHeader } from '../components/ui/ScreenHeader';
+import { SelectablePhotoTile } from '../components/ui/SelectablePhotoTile';
+import { StickyActionBar } from '../components/ui/StickyActionBar';
 import { loadStyleProfiles, saveStyleProfile, type SavedStyleProfile } from '../data/styleRepository';
 import { createStyleProfile, type StyleProfileResult } from '../services/api';
 import { persistStyleProfile } from '../services/sync';
 import { useExposure } from '../state/ExposureContext';
 
 export const LooksScreen = () => {
+  const { width } = useWindowDimensions();
   const { photos, selectedPhoto, addLayer } = useExposure();
   const [selected, setSelected] = useState<string[]>([]);
   const [style, setStyle] = useState<StyleProfileResult>();
@@ -16,10 +24,24 @@ export const LooksScreen = () => {
   const [strength, setStrength] = useState(0.75);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  const [notice, setNotice] = useState<string>();
+  const columnCount = width >= 900 ? 7 : width >= 600 ? 5 : 3;
 
   useEffect(() => { void loadStyleProfiles().then(setSavedStyles); }, []);
 
-  const toggle = (id: string) => setSelected((current) => current.includes(id) ? current.filter((item) => item !== id) : current.length < 8 ? [...current, id] : current);
+  const toggle = (id: string) => {
+    setStyle(undefined);
+    setNotice(undefined);
+    setSelected((current) => {
+      if (current.includes(id)) return current.filter((item) => item !== id);
+      if (current.length < 8) return [...current, id];
+      const message = 'You can select up to 8 references.';
+      setNotice(message);
+      AccessibilityInfo.announceForAccessibility(message);
+      return current;
+    });
+  };
+
   const create = async () => {
     setBusy(true);
     setError(undefined);
@@ -29,47 +51,214 @@ export const LooksScreen = () => {
       setStyle(created);
       setSavedStyles((current) => [saved, ...current.filter((item) => item.id !== saved.id)]);
       await persistStyleProfile(created, selected);
+      AccessibilityInfo.announceForAccessibility(`${created.name} is ready.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Look creation failed.');
     } finally {
       setBusy(false);
     }
   };
+
   const apply = async () => {
     if (!style || !selectedPhoto) return;
-    await addLayer({
-      id: randomUUID(), type: 'style', name: style.name, enabled: true, opacity: 1,
-      createdAt: new Date().toISOString(), styleProfileId: style.id, adjustments: style.adjustments, strength,
-    }, `Look: ${style.name}`);
+    setBusy(true);
+    setError(undefined);
+    try {
+      await addLayer({
+        id: randomUUID(),
+        type: 'style',
+        name: style.name,
+        enabled: true,
+        opacity: 1,
+        createdAt: new Date().toISOString(),
+        styleProfileId: style.id,
+        adjustments: style.adjustments,
+        strength,
+      }, `Look: ${style.name}`);
+      AccessibilityInfo.announceForAccessibility(`${style.name} applied.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Look could not be applied.');
+    } finally {
+      setBusy(false);
+    }
   };
 
-  return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-      <Text style={styles.eyebrow}>STYLE LAB</Text><Text style={styles.title}>Looks</Text>
-      <Text style={styles.intro}>Choose 3–8 inspiration frames. Exposure extracts their palette and tonal behavior into one reversible Style layer.</Text>
-      {savedStyles.length ? <><Text style={styles.savedTitle}>SAVED LOOKS</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.savedRow}>{savedStyles.map((saved) => <Pressable key={saved.id} style={[styles.savedChip, style?.id === saved.id && styles.savedChipActive]} onPress={() => setStyle(saved)}><Text style={styles.savedChipText}>{saved.name}</Text></Pressable>)}</ScrollView></> : null}
-      <View style={styles.grid}>
-        {photos.map((photo) => {
-          const chosen = selected.includes(photo.id);
-          return <Pressable key={photo.id} onPress={() => toggle(photo.id)} style={[styles.tile, chosen && styles.chosen]}><Image source={{ uri: photo.thumbnailUri }} style={styles.image} /><Text style={styles.mark}>{chosen ? '✓' : '+'}</Text></Pressable>;
-        })}
+  const chooseSavedStyle = (saved: SavedStyleProfile) => {
+    setStyle(saved);
+    setStrength(0.75);
+    setError(undefined);
+  };
+
+  const savedLooks = savedStyles.length ? (
+    <View style={styles.savedSection}>
+      <Text style={styles.sectionTitle}>Saved</Text>
+      <FlatList
+        horizontal
+        data={savedStyles}
+        keyExtractor={(item) => item.id}
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.savedRow}
+        renderItem={({ item }) => {
+          const active = style?.id === item.id;
+          return (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={item.name}
+              accessibilityState={{ selected: active }}
+              onPress={() => chooseSavedStyle(item)}
+              style={({ pressed }) => [styles.savedLook, active && styles.savedLookActive, pressed && styles.pressed]}
+            >
+              <View style={styles.savedPalette} accessibilityElementsHidden>
+                {item.palette.slice(0, 4).map((color, index) => (
+                  <View key={`${color}-${index}`} style={[styles.savedSwatch, { backgroundColor: color }]} />
+                ))}
+              </View>
+              <Text numberOfLines={1} style={styles.savedName}>{item.name}</Text>
+            </Pressable>
+          );
+        }}
+      />
+    </View>
+  ) : null;
+
+  const listHeader = (
+    <>
+      <ScreenHeader title="Looks" detail={`${selected.length}/8`} />
+      {savedLooks}
+      <Text style={styles.instruction}>Select 3–8 reference photos</Text>
+      {notice ? <Text accessibilityLiveRegion="polite" style={styles.notice}>{notice}</Text> : null}
+      {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
+    </>
+  );
+
+  const result = style ? (
+    <View style={styles.result} accessibilityLiveRegion="polite">
+      <Text accessibilityRole="header" style={styles.resultTitle}>{style.name}</Text>
+      {style.mood ? <Text style={styles.mood}>{style.mood}</Text> : null}
+      <View style={styles.palette} accessibilityLabel={`${style.name} color palette`}>
+        {style.palette.map((color, index) => <View key={`${color}-${index}`} style={[styles.swatch, { backgroundColor: color }]} />)}
       </View>
-      {error ? <Text style={styles.error}>{error}</Text> : null}
-      <Pressable style={[styles.primary, (selected.length < 3 || selected.length > 8) && styles.disabled]} disabled={selected.length < 3 || selected.length > 8 || busy} onPress={create}>
-        {busy ? <ActivityIndicator color={colors.limeInk} /> : <Text style={styles.primaryText}>Extract look from {selected.length} references</Text>}
-      </Pressable>
-      {style ? <View style={styles.result}><Text style={styles.resultTitle}>{style.name}</Text><Text style={styles.mood}>{style.mood}</Text><View style={styles.palette}>{style.palette.map((color) => <View key={color} style={[styles.swatch, { backgroundColor: color }]} />)}</View><Text style={styles.adjustments}>{Object.entries(style.adjustments).map(([key, value]) => `${key} ${value}`).join(' · ')}</Text><Text style={styles.strengthLabel}>STRENGTH · {Math.round(strength * 100)}%</Text><View style={styles.strengthRow}>{[0.25, 0.5, 0.75, 1].map((value) => <Pressable key={value} style={[styles.strengthButton, strength === value && styles.strengthActive]} onPress={() => setStrength(value)}><Text style={[styles.strengthText, strength === value && styles.strengthTextActive]}>{Math.round(value * 100)}</Text></Pressable>)}</View><Pressable style={styles.apply} onPress={apply} disabled={!selectedPhoto}><Text style={styles.applyText}>Apply to current photo as a layer</Text></Pressable></View> : null}
-    </ScrollView>
+      <View style={styles.strengthHeader}>
+        <Text style={styles.strengthLabel}>Strength</Text>
+        <Text style={styles.strengthValue}>{Math.round(strength * 100)}%</Text>
+      </View>
+      <Slider
+        accessibilityLabel="Look strength"
+        accessibilityValue={{ min: 0, max: 100, now: Math.round(strength * 100), text: `${Math.round(strength * 100)} percent` }}
+        style={styles.slider}
+        minimumValue={0}
+        maximumValue={1}
+        step={0.01}
+        value={strength}
+        onValueChange={setStrength}
+        minimumTrackTintColor={colors.primary}
+        maximumTrackTintColor={colors.outlineStrong}
+        thumbTintColor={colors.text}
+      />
+      {!selectedPhoto ? <Text style={styles.targetNotice}>Choose a photo in Library before applying.</Text> : null}
+    </View>
+  ) : <View style={styles.footerSpacer} />;
+
+  return (
+    <View style={styles.screen}>
+      {photos.length === 0 ? (
+        <>
+          <ScreenHeader title="Looks" detail="0/8" />
+          {savedLooks}
+          <EmptyState icon="color-palette-outline" title="No reference photos" />
+        </>
+      ) : (
+        <FlashList
+          key={`looks-${columnCount}`}
+          data={photos}
+          extraData={selected}
+          numColumns={columnCount}
+          contentContainerStyle={styles.content}
+          keyExtractor={(item) => item.id}
+          ListHeaderComponent={listHeader}
+          ListFooterComponent={result}
+          renderItem={({ item }) => (
+            <SelectablePhotoTile
+              photo={item}
+              selected={selected.includes(item.id)}
+              onPress={() => toggle(item.id)}
+              aspectRatio={1}
+            />
+          )}
+        />
+      )}
+      {(photos.length || style) ? (
+        <StickyActionBar>
+          {style ? (
+            <ActionButton label={`Apply ${style.name}`} onPress={apply} disabled={!selectedPhoto} loading={busy} />
+          ) : (
+            <ActionButton
+              label={selected.length >= 3 ? 'Create look' : 'Select at least 3 references'}
+              onPress={create}
+              disabled={selected.length < 3 || selected.length > 8}
+              loading={busy}
+            />
+          )}
+        </StickyActionBar>
+      ) : null}
+    </View>
   );
 };
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: colors.canvas }, content: { padding: 20, paddingBottom: 48 },
-  eyebrow: { color: colors.lime, fontWeight: '900', fontSize: 9, letterSpacing: 2.2, marginTop: 6 },
-  title: { color: colors.ink, fontSize: 34, fontWeight: '900', marginTop: 5 }, intro: { color: colors.muted, fontSize: 13, lineHeight: 20, marginTop: 8 },
-  savedTitle: { color: colors.muted, fontSize: 8, fontWeight: '900', letterSpacing: 1.4, marginTop: 18 }, savedRow: { gap: 7, paddingTop: 8 }, savedChip: { borderWidth: 1, borderColor: colors.line, paddingHorizontal: 11, paddingVertical: 8 }, savedChipActive: { borderColor: colors.lime }, savedChipText: { color: colors.ink, fontSize: 10, fontWeight: '700' },
-  grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 20 }, tile: { width: '31%', aspectRatio: 1, borderWidth: 2, borderColor: 'transparent' }, chosen: { borderColor: colors.lime }, image: { width: '100%', height: '100%' },
-  mark: { position: 'absolute', right: 5, top: 4, color: colors.ink, backgroundColor: 'rgba(0,0,0,0.7)', width: 22, height: 22, borderRadius: 11, textAlign: 'center', lineHeight: 22, fontWeight: '900' },
-  primary: { minHeight: 48, marginTop: 18, backgroundColor: colors.lime, alignItems: 'center', justifyContent: 'center', borderRadius: 3 }, primaryText: { color: colors.limeInk, fontWeight: '900', fontSize: 12 }, disabled: { opacity: 0.35 }, error: { color: colors.danger, fontSize: 11, marginTop: 12 },
-  result: { marginTop: 18, padding: 18, backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line }, resultTitle: { color: colors.ink, fontSize: 20, fontWeight: '900' }, mood: { color: colors.muted, fontSize: 12, marginTop: 4 }, palette: { flexDirection: 'row', height: 36, marginTop: 14 }, swatch: { flex: 1 }, adjustments: { color: colors.muted, fontSize: 10, lineHeight: 16, marginTop: 12 }, strengthLabel: { color: colors.muted, fontSize: 8, fontWeight: '900', letterSpacing: 1.2, marginTop: 12 }, strengthRow: { flexDirection: 'row', gap: 6, marginTop: 7 }, strengthButton: { flex: 1, borderWidth: 1, borderColor: colors.line, paddingVertical: 8, alignItems: 'center' }, strengthActive: { backgroundColor: colors.lime, borderColor: colors.lime }, strengthText: { color: colors.muted, fontSize: 9, fontWeight: '900' }, strengthTextActive: { color: colors.limeInk }, apply: { padding: 13, borderColor: colors.lime, borderWidth: 1, marginTop: 14, alignItems: 'center' }, applyText: { color: colors.lime, fontSize: 11, fontWeight: '900' },
+  screen: { flex: 1, backgroundColor: colors.background },
+  content: { paddingHorizontal: spacing.xxs, paddingBottom: layout.stickyActionHeight + spacing.md },
+  instruction: {
+    color: colors.textSecondary,
+    ...typography.label,
+    marginHorizontal: layout.screenPadding,
+    marginBottom: spacing.base,
+  },
+  notice: {
+    color: colors.text,
+    ...typography.label,
+    marginHorizontal: layout.screenPadding,
+    marginBottom: spacing.base,
+  },
+  error: {
+    color: colors.danger,
+    ...typography.label,
+    marginHorizontal: layout.screenPadding,
+    marginBottom: spacing.base,
+  },
+  sectionTitle: { color: colors.text, ...typography.section, fontWeight: '700', marginHorizontal: layout.screenPadding },
+  savedSection: { marginBottom: spacing.lg },
+  savedRow: { gap: spacing.sm, paddingHorizontal: layout.screenPadding, paddingTop: spacing.sm },
+  savedLook: {
+    width: 132,
+    minHeight: 72,
+    padding: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.outline,
+    borderRadius: radii.md,
+    backgroundColor: colors.surface,
+  },
+  savedLookActive: { borderColor: colors.text },
+  savedPalette: { height: 26, flexDirection: 'row', borderRadius: radii.sm, overflow: 'hidden' },
+  savedSwatch: { flex: 1 },
+  savedName: { color: colors.text, ...typography.caption, fontWeight: '700', marginTop: spacing.xs },
+  pressed: { opacity: 0.8 },
+  result: {
+    marginHorizontal: spacing.md,
+    marginTop: spacing.lg,
+    marginBottom: spacing.md,
+    padding: spacing.md,
+    borderRadius: radii.md,
+    backgroundColor: colors.surface,
+  },
+  resultTitle: { color: colors.text, fontFamily: typography.displayFamily, ...typography.title },
+  mood: { color: colors.textSecondary, ...typography.body, marginTop: spacing.xxs },
+  palette: { height: 40, flexDirection: 'row', marginTop: spacing.md, borderRadius: radii.sm, overflow: 'hidden' },
+  swatch: { flex: 1 },
+  strengthHeader: { flexDirection: 'row', justifyContent: 'space-between', marginTop: spacing.lg },
+  strengthLabel: { color: colors.text, ...typography.label, fontWeight: '700' },
+  strengthValue: { color: colors.textSecondary, ...typography.label },
+  slider: { width: '100%', height: 48, marginTop: spacing.xxs },
+  targetNotice: { color: colors.textSecondary, ...typography.caption, marginTop: spacing.xs },
+  footerSpacer: { height: spacing.md },
 });

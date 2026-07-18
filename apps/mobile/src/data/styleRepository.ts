@@ -25,3 +25,12 @@ export const saveStyleProfile = async (style: StyleProfileResult, referencePhoto
   await AsyncStorage.setItem(STYLES_KEY, JSON.stringify([saved, ...styles.filter((item) => item.id !== saved.id)]));
   return saved;
 };
+
+export const mergeStyleProfiles = async (remote: SavedStyleProfile[]) => {
+  const local = await loadStyleProfiles();
+  const merged = new Map(remote.map((style) => [style.id, style]));
+  for (const style of local) merged.set(style.id, style);
+  const styles = [...merged.values()].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+  await AsyncStorage.setItem(STYLES_KEY, JSON.stringify(styles));
+  return styles;
+};

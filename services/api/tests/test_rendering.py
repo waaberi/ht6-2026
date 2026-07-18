@@ -8,6 +8,9 @@ import numpy as np
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from exposure_api.models import LayerStack
+from exposure_api.renderer import render_layer_stack
+
 
 IDENTITY = {"rotationDegrees": 0, "perspective": [1, 0, 0, 0, 1, 0, 0, 0, 1]}
 
@@ -103,6 +106,83 @@ def test_image_asset_remains_an_independent_layer(client: TestClient, image_byte
     with_layer = np.asarray(Image.open(io.BytesIO(response.content)).convert("RGB"))
     without_layer = np.asarray(Image.open(io.BytesIO(_render(client, image_bytes, [{**layer, "enabled": False}]))).convert("RGB"))
     assert not np.array_equal(with_layer, without_layer)
+
+
+def test_canvas_space_patch_fills_an_expanded_edge() -> None:
+    source = Image.new("RGB", (20, 12), "#335577")
+    source_bytes = io.BytesIO()
+    source.save(source_bytes, format="PNG")
+    patch = Image.new("RGBA", (25, 12), (0, 0, 0, 0))
+    patch_pixels = np.asarray(patch).copy()
+    patch_pixels[:, 20:] = (238, 189, 168, 255)
+    patch = Image.fromarray(patch_pixels, "RGBA")
+    patch_bytes = io.BytesIO()
+    patch.save(patch_bytes, format="PNG")
+    expansion = {"top": 0, "right": 5, "bottom": 0, "left": 0}
+    layer = {
+        "id": "outpaint",
+        "type": "generative-patch",
+        "enabled": True,
+        "opacity": 1,
+        "patchAssetId": "patch",
+        "canvasSpace": True,
+        "canvasExpansion": expansion,
+    }
+    rendered_image = render_layer_stack(
+        source_bytes.getvalue(),
+        LayerStack.model_validate({"canvasTransform": {**IDENTITY, "expansion": expansion}, "layers": [layer]}),
+        {"patch": patch_bytes.getvalue()},
+    )
+    rendered = np.asarray(rendered_image.convert("RGB"))
+    assert rendered.shape[:2] == (12, 25)
+    assert tuple(rendered[6, 10]) == (51, 85, 119)
+    assert tuple(rendered[6, 23]) == (238, 189, 168)
+
+
+def test_every_collective_adjustment_changes_the_render() -> None:
+    yy, xx = np.indices((48, 64), dtype=np.uint8)
+    source_pixels = np.stack(
+        (
+            (xx * 4 + yy * 3) % 255,
+            (xx * 7 + yy * 2) % 255,
+            (xx * 2 + yy * 9) % 255,
+        ),
+        axis=2,
+    ).astype(np.uint8)
+    source = Image.fromarray(source_pixels, "RGB")
+    source_bytes = io.BytesIO()
+    source.save(source_bytes, format="PNG")
+    baseline = np.asarray(
+        render_layer_stack(
+            source_bytes.getvalue(),
+            LayerStack.model_validate({"canvasTransform": IDENTITY, "adjustments": {}, "layers": []}),
+        )
+    )
+
+    controls = (
+        "exposure",
+        "contrast",
+        "highlights",
+        "shadows",
+        "temperature",
+        "tint",
+        "saturation",
+        "vibrance",
+        "sharpening",
+        "denoise",
+        "grain",
+        "vignette",
+    )
+    for control in controls:
+        rendered = np.asarray(
+            render_layer_stack(
+                source_bytes.getvalue(),
+                LayerStack.model_validate(
+                    {"canvasTransform": IDENTITY, "adjustments": {control: 0.5}, "layers": []}
+                ),
+            )
+        )
+        assert not np.array_equal(rendered, baseline), f"{control} did not change the render"
 
 
 def test_gps_is_excluded_from_export_unless_explicitly_enabled(client: TestClient) -> None:

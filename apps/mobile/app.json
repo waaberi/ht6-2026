@@ -3,22 +3,24 @@
     "name": "Exposure",
     "slug": "exposure",
     "version": "1.0.0",
-    "orientation": "portrait",
+    "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "scheme": "exposure",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.ht62026.exposure"
     },
     "android": {
       "package": "com.ht62026.exposure",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#221A1B",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false,
+      "predictiveBackGestureEnabled": true,
+      "edgeToEdgeEnabled": true,
       "permissions": [
         "android.permission.CAMERA"
       ],
@@ -39,6 +41,12 @@
         "expo-image-picker",
         {
           "photosPermission": "Allow Exposure to import photographs"
+        }
+      ],
+      [
+        "expo-sensors",
+        {
+          "motionPermission": "Allow Exposure to show a live camera level"
         }
       ],
       "./plugins/withAndroidCleartextTraffic"

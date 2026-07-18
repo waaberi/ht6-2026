@@ -1,19 +1,40 @@
+import { ZenOldMincho_700Bold } from '@expo-google-fonts/zen-old-mincho/700Bold';
+import { useFonts } from 'expo-font';
 import { StatusBar } from 'expo-status-bar';
-import React, { useState } from 'react';
-import { ActivityIndicator, StyleSheet, View } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { ActivityIndicator, BackHandler, StyleSheet, View } from 'react-native';
+import { SafeAreaProvider, initialWindowMetrics } from 'react-native-safe-area-context';
 
 import { TabBar, type MainTab } from './src/components/TabBar';
 import { colors } from './src/components/theme';
 import { CameraScreen } from './src/screens/CameraScreen';
 import { LibraryScreen } from './src/screens/LibraryScreen';
-import { LooksScreen } from './src/screens/LooksScreen';
-import { PortfolioScreen } from './src/screens/PortfolioScreen';
+import { hasCompletedOnboarding, OnboardingScreen } from './src/screens/OnboardingScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { StudioScreen } from './src/screens/StudioScreen';
 import { ExposureProvider, useExposure } from './src/state/ExposureContext';
 
 export default function App() {
-  return <ExposureProvider><ExposureApp /></ExposureProvider>;
+  const [fontsLoaded, fontError] = useFonts({ ZenOldMincho_700Bold });
+  const [onboardingComplete, setOnboardingComplete] = useState<boolean>();
+
+  useEffect(() => {
+    void hasCompletedOnboarding().then(setOnboardingComplete);
+  }, []);
+
+  const ready = fontsLoaded || Boolean(fontError);
+  return (
+    <SafeAreaProvider initialMetrics={initialWindowMetrics}>
+      {!ready || onboardingComplete === undefined ? (
+        <LoadingScreen />
+      ) : onboardingComplete ? (
+        <ExposureProvider><ExposureApp /></ExposureProvider>
+      ) : (
+        <OnboardingScreen onComplete={() => setOnboardingComplete(true)} />
+      )}
+      <StatusBar style="light" backgroundColor={colors.background} />
+    </SafeAreaProvider>
+  );
 }
 
 function ExposureApp() {
@@ -21,29 +42,41 @@ function ExposureApp() {
   const [studioOpen, setStudioOpen] = useState(false);
   const { loading } = useExposure();
 
-  if (loading) return <View style={styles.loading}><ActivityIndicator color={colors.lime} /></View>;
-  if (studioOpen) return <><StudioScreen onClose={() => setStudioOpen(false)} /><StatusBar style="light" /></>;
+  useEffect(() => {
+    if (!studioOpen) return;
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      setStudioOpen(false);
+      return true;
+    });
+    return () => subscription.remove();
+  }, [studioOpen]);
+
+  if (loading) return <LoadingScreen />;
+  if (studioOpen) return <StudioScreen onClose={() => setStudioOpen(false)} />;
 
   return (
     <View style={styles.container}>
       <View style={styles.content}>
-        {tab === 'camera' ? <CameraScreen onOpenStudio={() => setStudioOpen(true)} /> : null}
-        {tab === 'library' ? <LibraryScreen onOpenStudio={() => setStudioOpen(true)} /> : null}
-        {tab === 'portfolio' ? <PortfolioScreen /> : null}
-        {tab === 'looks' ? <LooksScreen /> : null}
+        {tab === 'camera' ? <CameraScreen onOpenStudio={() => setStudioOpen(true)} onOpenLibrary={() => setTab('library')} /> : null}
+        {tab === 'library' ? <LibraryScreen onOpenStudio={() => setStudioOpen(true)} onOpenCamera={() => setTab('camera')} /> : null}
         {tab === 'settings' ? <SettingsScreen /> : null}
       </View>
       <TabBar active={tab} onChange={setTab} />
-      <StatusBar style="light" />
     </View>
   );
 }
 
+const LoadingScreen = () => (
+  <View style={styles.loading}>
+    <ActivityIndicator color={colors.primary} />
+  </View>
+);
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: colors.canvas,
+    backgroundColor: colors.background,
   },
   content: { flex: 1 },
-  loading: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.canvas },
+  loading: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.background },
 });

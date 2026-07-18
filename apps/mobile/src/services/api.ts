@@ -5,7 +5,16 @@ import { exifForRemoteAnalysis } from '../data/photoRepository';
 import { loadPreferences } from '../data/preferences';
 import { resolveApiUrl } from '../domain/apiConfiguration';
 import { layerAssetsForStack } from '../domain/assets';
-import type { AdjustmentValues, AnalysisResult, LayerStack, PhotoRecord, Region } from '../domain/types';
+import { currentVersion } from '../domain/layers';
+import type {
+  AdjustmentValues,
+  AnalysisResult,
+  CoachResponse,
+  GenerativeOperation,
+  LayerStack,
+  PhotoRecord,
+  Region,
+} from '../domain/types';
 
 export class ApiUnavailableError extends Error {}
 
@@ -40,12 +49,20 @@ const parseResponse = async <T>(response: Response): Promise<T> => {
 
 export const analyzePhoto = async (photo: PhotoRecord): Promise<AnalysisResult> => {
   const preferences = await loadPreferences();
+  const stack = currentVersion(photo).stack;
   const form = new FormData();
   const proxy = new File(photo.analysisProxyUri);
   form.append('image', proxy as unknown as Blob, proxy.name);
   form.append('version_id', photo.currentVersionId);
   form.append('checksum', photo.originalChecksum);
   form.append('exif_json', JSON.stringify(exifForRemoteAnalysis(photo.exif)));
+  form.append('layer_stack_json', JSON.stringify(stack));
+  const assets = layerAssetsForStack(stack);
+  for (const asset of assets) {
+    const file = new File(asset.uri);
+    form.append('assets', file as unknown as Blob, file.name);
+  }
+  form.append('asset_ids_json', JSON.stringify(assets.map((asset) => asset.id)));
   form.append('coaching_json', JSON.stringify({
     detail: preferences.detail,
     skillLevel: preferences.skillLevel,
@@ -56,13 +73,29 @@ export const analyzePhoto = async (photo: PhotoRecord): Promise<AnalysisResult> 
   return parseResponse<AnalysisResult>(response);
 };
 
-export const askCoach = async (analysis: AnalysisResult, question: string) => {
+export const askCoach = async (
+  analysis: AnalysisResult,
+  question: string,
+  context: { stack?: LayerStack; selectedIssueId?: string } = {},
+): Promise<CoachResponse> => {
+  const preferences = await loadPreferences();
   const response = await apiFetch('/v1/coach', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ analysis, question }),
+    body: JSON.stringify({
+      analysis,
+      question,
+      preferences: {
+        detail: preferences.detail,
+        skillLevel: preferences.skillLevel,
+        desiredMood: preferences.desiredMood,
+      },
+      layerStack: context.stack,
+      selectedIssueId: context.selectedIssueId,
+      availableTools: ['adjust_global', 'adjust_masked', 'crop', 'straighten', 'remove', 'add', 'expand', 'retake'],
+    }),
   });
-  return parseResponse<{ answer: string; model: string }>(response);
+  return parseResponse<CoachResponse>(response);
 };
 
 export const requestRender = async (
@@ -94,6 +127,7 @@ export type GenerativePatchResult = {
   driftScore: number;
   model: string;
   sourceVersionId: string;
+  expansion?: { top: number; right: number; bottom: number; left: number };
 };
 
 export const createGenerativePatch = async (
@@ -101,12 +135,18 @@ export const createGenerativePatch = async (
   stack: LayerStack,
   target: Region,
   prompt: string,
+  operation: GenerativeOperation = 'remove',
+  expansionDirection: 'top' | 'right' | 'bottom' | 'left' = 'right',
 ): Promise<GenerativePatchResult> => {
   const form = new FormData();
   const original = new File(photo.originalUri);
   form.append('image', original as unknown as Blob, original.name);
   form.append('target_json', JSON.stringify(target));
   form.append('prompt', prompt);
+  form.append('operation', operation);
+  if (operation === 'expand') {
+    form.append('expansion_json', JSON.stringify({ direction: expansionDirection, fraction: 0.25 }));
+  }
   form.append('source_version_id', photo.currentVersionId);
   form.append('layer_stack_json', JSON.stringify(stack));
   const assets = layerAssetsForStack(stack);

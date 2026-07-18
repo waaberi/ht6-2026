@@ -113,6 +113,34 @@ def _composite_asset(base: Image.Image, layer: dict[str, Any], assets: dict[str,
     return Image.composite(blended, base_rgb, alpha)
 
 
+def _composite_canvas_asset(
+    base: Image.Image,
+    layer: dict[str, Any],
+    assets: dict[str, bytes],
+    current_expansion: dict[str, Any],
+) -> Image.Image:
+    asset_id = layer.get("patchAssetId")
+    if not asset_id or asset_id not in assets:
+        return base
+    overlay = Image.open(io.BytesIO(assets[asset_id])).convert("RGBA")
+    opacity = max(0, min(1, float(layer.get("opacity", 1))))
+    alpha = overlay.getchannel("A").point(lambda value: round(value * opacity))
+    mask_id = layer.get("maskAssetId")
+    if mask_id and mask_id in assets:
+        supplied = Image.open(io.BytesIO(assets[mask_id])).convert("L").resize(overlay.size, Image.Resampling.LANCZOS)
+        alpha = Image.fromarray(
+            (np.asarray(alpha, dtype=np.float32) * np.asarray(supplied, dtype=np.float32) / 255).astype(np.uint8),
+            "L",
+        )
+    overlay.putalpha(alpha)
+    snapshot = layer.get("canvasExpansion") or current_expansion
+    x = int(current_expansion.get("left", 0)) - int(snapshot.get("left", 0))
+    y = int(current_expansion.get("top", 0)) - int(snapshot.get("top", 0))
+    canvas = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    canvas.alpha_composite(overlay, (x, y))
+    return Image.alpha_composite(base.convert("RGBA"), canvas).convert("RGB")
+
+
 def _apply_canvas_transform(image: Image.Image, transform: dict[str, Any]) -> Image.Image:
     result = image
     perspective = transform.get("perspective")
@@ -145,10 +173,22 @@ def render_layer_stack(image_bytes: bytes, stack: LayerStack, assets: dict[str, 
     assets = assets or {}
     with Image.open(io.BytesIO(image_bytes)) as source:
         rendered = ImageOps.exif_transpose(source).convert("RGB")
+    canvas_applied = False
+    adjustments_applied = False
+    current_expansion = stack.canvas_transform.get("expansion") or {}
     for layer in stack.layers:
         if not layer.get("enabled", True):
             continue
         layer_type = layer.get("type")
+        if layer_type == "generative-patch" and layer.get("canvasSpace"):
+            if not canvas_applied:
+                rendered = _apply_canvas_transform(rendered, stack.canvas_transform)
+                canvas_applied = True
+            if stack.adjustments and not adjustments_applied:
+                rendered = _adjust(rendered, stack.adjustments)
+                adjustments_applied = True
+            rendered = _composite_canvas_asset(rendered, layer, assets, current_expansion)
+            continue
         opacity = max(0, min(1, float(layer.get("opacity", 1))))
         if layer_type in {"adjustment", "style"}:
             values = dict(layer.get("adjustments", {}))
@@ -163,7 +203,11 @@ def render_layer_stack(image_bytes: bytes, stack: LayerStack, assets: dict[str, 
             rendered = Image.composite(adjusted, rendered, mask)
         elif layer_type in {"image", "retouch", "generative-patch"}:
             rendered = _composite_asset(rendered, layer, assets)
-    return _apply_canvas_transform(rendered, stack.canvas_transform)
+    if not canvas_applied:
+        rendered = _apply_canvas_transform(rendered, stack.canvas_transform)
+    if stack.adjustments and not adjustments_applied:
+        rendered = _adjust(rendered, stack.adjustments)
+    return rendered
 
 
 def export_exif(image_bytes: bytes, include_gps: bool = False) -> bytes | None:

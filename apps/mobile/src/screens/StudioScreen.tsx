@@ -1,21 +1,66 @@
 import { randomUUID } from 'expo-crypto';
-import * as ImagePicker from 'expo-image-picker';
-import React, { useState } from 'react';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { PhotoCanvas } from '../components/PhotoCanvas';
+import { AdjustmentSheet } from '../components/studio/AdjustmentSheet';
+import { LooksPanel } from '../components/studio/LooksPanel';
+import { StudioToolRail, type StudioTool } from '../components/studio/StudioToolRail';
 import { colors } from '../components/theme';
-import { saveGeneratedLayerAsset, saveImportedLayerAsset } from '../data/photoRepository';
+import { saveGeneratedLayerAsset } from '../data/photoRepository';
 import { recordRecommendationFeedback } from '../data/preferences';
-import { currentVersion, removeLayer, reorderLayer, toggleLayer } from '../domain/layers';
-import type { Issue, LayerStack } from '../domain/types';
-import { identityCanvasTransform } from '../domain/types';
+import { loadStyleProfiles, type SavedStyleProfile } from '../data/styleRepository';
+import { collectiveAdjustmentValues, currentVersion, removeLayer, reorderLayer, setCollectiveAdjustments, toggleLayer } from '../domain/layers';
+import type {
+  AdjustmentValues,
+  CoachAction,
+  CoachResponse,
+  GenerativeOperation,
+  Issue,
+  LayerStack,
+  Region,
+  StyleLayer,
+} from '../domain/types';
 import { ApiUnavailableError, askCoach, createGenerativePatch } from '../services/api';
 import { exportAndShare } from '../services/export';
 import { persistPreferences } from '../services/sync';
 import { useExposure } from '../state/ExposureContext';
 
-type StudioTab = 'coach' | 'edit' | 'layers' | 'history';
+const CENTER_TARGET: Region = { x: 0.3, y: 0.3, width: 0.4, height: 0.4 };
+const UPPER_TARGET: Region = { x: 0.2, y: 0.08, width: 0.6, height: 0.34 };
+const LOWER_TARGET: Region = { x: 0.2, y: 0.58, width: 0.6, height: 0.34 };
+type ExpansionDirection = 'top' | 'right' | 'bottom' | 'left';
+
+const removeStyleLayers = (stack: LayerStack): LayerStack => ({
+  ...stack,
+  layers: stack.layers.filter((layer) => layer.type !== 'style'),
+});
+
+const applyStyleLayer = (
+  stack: LayerStack,
+  look: SavedStyleProfile,
+  strength: number,
+  layerId: string,
+  createdAt: string,
+): LayerStack => ({
+  ...removeStyleLayers(stack),
+  layers: [
+    ...stack.layers.filter((layer) => layer.type !== 'style'),
+    {
+      id: layerId,
+      type: 'style',
+      name: look.name,
+      enabled: true,
+      opacity: 1,
+      createdAt,
+      styleProfileId: look.id,
+      adjustments: look.adjustments,
+      strength,
+    },
+  ],
+});
 
 export const StudioScreen = ({ onClose }: { onClose: () => void }) => {
   const {
@@ -28,54 +73,143 @@ export const StudioScreen = ({ onClose }: { onClose: () => void }) => {
     restore,
     runAnalysis,
   } = useExposure();
-  const [tab, setTab] = useState<StudioTab>('coach');
+  const [tool, setTool] = useState<StudioTool>('coach');
   const [message, setMessage] = useState<string>();
-  const [coachAnswer, setCoachAnswer] = useState<string>();
+  const [coachResponse, setCoachResponse] = useState<CoachResponse>();
+  const [coachQuestion, setCoachQuestion] = useState('What is the highest-impact change?');
+  const [coachBusy, setCoachBusy] = useState(false);
+  const [selectedIssueId, setSelectedIssueId] = useState<string>();
   const [exporting, setExporting] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [draftAdjustments, setDraftAdjustments] = useState<AdjustmentValues>({});
   const [assetBusy, setAssetBusy] = useState(false);
-  const [generativePrompt, setGenerativePrompt] = useState('Remove the distraction while reconstructing the surrounding background.');
-  const [generativeTarget, setGenerativeTarget] = useState({ x: 0.35, y: 0.35, width: 0.3, height: 0.3 });
+  const [generativeOperation, setGenerativeOperation] = useState<GenerativeOperation>('remove');
+  const [generativePrompt, setGenerativePrompt] = useState('Remove the selected distraction and reconstruct the background.');
+  const [generativeTarget, setGenerativeTarget] = useState<Region>(CENTER_TARGET);
+  const [expansionDirection, setExpansionDirection] = useState<ExpansionDirection>('right');
+  const adjustmentCommitRef = useRef(false);
+  const [savedLooks, setSavedLooks] = useState<SavedStyleProfile[]>([]);
+  const [looksLoading, setLooksLoading] = useState(true);
+  const [lookBusy, setLookBusy] = useState(false);
+  const [selectedLookId, setSelectedLookId] = useState<string>();
+  const [lookStrength, setLookStrength] = useState(0.75);
+  const [lookDraftLayerId, setLookDraftLayerId] = useState(() => randomUUID());
 
-  if (!selectedPhoto) {
+  const version = selectedPhoto ? currentVersion(selectedPhoto) : undefined;
+  const savedAdjustments = useMemo(
+    () => version ? collectiveAdjustmentValues(version.stack) : {},
+    [version],
+  );
+  const appliedLookLayer = useMemo<StyleLayer | undefined>(
+    () => version ? [...version.stack.layers].reverse().find((layer): layer is StyleLayer => layer.type === 'style') : undefined,
+    [version],
+  );
+  const styleLayerCount = useMemo(
+    () => version?.stack.layers.filter((layer) => layer.type === 'style').length ?? 0,
+    [version],
+  );
+  const selectedLook = savedLooks.find((look) => look.id === selectedLookId);
+  const lookChanged = Boolean(selectedLook) && (
+    styleLayerCount !== 1
+    || appliedLookLayer?.styleProfileId !== selectedLookId
+    || Math.abs((appliedLookLayer?.strength ?? -1) - lookStrength) > 0.001
+  );
+  const selectedIssue = analysis?.issues.find((issue) => issue.id === selectedIssueId) ?? analysis?.issues[0];
+
+  useEffect(() => {
+    let active = true;
+    loadStyleProfiles()
+      .then((looks) => { if (active) setSavedLooks(looks); })
+      .catch(() => { if (active) setMessage('Saved Looks could not be loaded.'); })
+      .finally(() => { if (active) setLooksLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    setDraftAdjustments(savedAdjustments);
+  }, [savedAdjustments, version?.id]);
+
+  useEffect(() => {
+    setSelectedLookId(appliedLookLayer?.styleProfileId);
+    setLookStrength(appliedLookLayer?.strength ?? 0.75);
+    setLookDraftLayerId(appliedLookLayer?.id ?? randomUUID());
+  }, [appliedLookLayer?.id, appliedLookLayer?.strength, appliedLookLayer?.styleProfileId, version?.id]);
+
+  const previewStack = useMemo<LayerStack | undefined>(() => {
+    if (!version) return undefined;
+    const adjustedStack = setCollectiveAdjustments(version.stack, draftAdjustments);
+    if (tool !== 'looks' || !selectedLook) return adjustedStack;
+    return applyStyleLayer(
+      adjustedStack,
+      selectedLook,
+      lookStrength,
+      appliedLookLayer?.id ?? lookDraftLayerId,
+      appliedLookLayer?.createdAt ?? new Date().toISOString(),
+    );
+  }, [appliedLookLayer?.createdAt, appliedLookLayer?.id, draftAdjustments, lookDraftLayerId, lookStrength, selectedLook, tool, version]);
+
+  if (!selectedPhoto || !version || !previewStack) {
     return (
-      <View style={styles.empty}>
-        <Text style={styles.emptyTitle}>Choose a photo from Library.</Text>
-        <Pressable onPress={onClose}><Text style={styles.link}>Back</Text></Pressable>
-      </View>
+      <SafeAreaView style={styles.empty}>
+        <Text style={styles.emptyTitle}>No photo selected</Text>
+        <Pressable accessibilityRole="button" style={styles.emptyButton} onPress={onClose}><Text style={styles.link}>Back to Library</Text></Pressable>
+      </SafeAreaView>
     );
   }
 
-  const version = currentVersion(selectedPhoto);
   const commit = async (stack: LayerStack, label: string) => {
     setMessage(undefined);
     try {
       await commitStack(stack, label);
+      return true;
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Edit failed.');
+      return false;
     }
   };
 
-  const applyIssue = async (issue: Issue) => {
+  const acceptRecommendation = async (issue?: Issue) => {
+    if (!issue) return;
     const preferences = await recordRecommendationFeedback(issue.id, true);
     void persistPreferences(preferences).catch(() => undefined);
+  };
+
+  const openGenerativeTool = (operation: GenerativeOperation, target: Region, prompt: string) => {
+    setGenerativeOperation(operation);
+    setGenerativeTarget(target);
+    setGenerativePrompt(prompt);
+    setTool('ai');
+  };
+
+  const applyIssue = async (issue: Issue) => {
     if (issue.fix?.kind === 'adjustment' && issue.fix.adjustments) {
-      await addAdjustment(issue.fix.adjustments, `Fix: ${issue.title}`);
-      setTab('layers');
+      setApplying(true);
+      try {
+        await addAdjustment(issue.fix.adjustments, `Fix: ${issue.title}`);
+        await acceptRecommendation(issue);
+        setTool('adjust');
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : 'Edit failed.');
+      } finally {
+        setApplying(false);
+      }
     } else if (issue.fix?.kind === 'masked-adjustment' && issue.fix.adjustments) {
-      await addLayer({
-        id: randomUUID(), type: 'masked-adjustment', name: `Fix: ${issue.title}`, enabled: true, opacity: 1,
-        createdAt: new Date().toISOString(), adjustments: issue.fix.adjustments,
-        mask: { type: 'polygon', region: issue.location },
-      }, `Fix: ${issue.title}`);
-      setTab('layers');
-    } else if (issue.fix?.kind === 'crop') {
-      await commit({
-        ...version.stack,
-        canvasTransform: { ...version.stack.canvasTransform, crop: { x: 0.05, y: 0.05, width: 0.9, height: 0.9 } },
-      }, `Fix: ${issue.title}`);
-      setTab('history');
+      setApplying(true);
+      try {
+        await addLayer({
+          id: randomUUID(), type: 'masked-adjustment', name: `Fix: ${issue.title}`, enabled: true, opacity: 1,
+          createdAt: new Date().toISOString(), adjustments: issue.fix.adjustments,
+          mask: { type: 'polygon', region: issue.location },
+        }, `Fix: ${issue.title}`);
+        await acceptRecommendation(issue);
+        setTool('layers');
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : 'Edit failed.');
+      } finally {
+        setApplying(false);
+      }
     } else if (issue.fix?.kind === 'transform' && issue.fix.canvasTransform) {
-      await commit({
+      const changed = await commit({
         ...version.stack,
         canvasTransform: {
           ...version.stack.canvasTransform,
@@ -83,37 +217,158 @@ export const StudioScreen = ({ onClose }: { onClose: () => void }) => {
           rotationDegrees: version.stack.canvasTransform.rotationDegrees + (issue.fix.canvasTransform.rotationDegrees ?? 0),
         },
       }, `Fix: ${issue.title}`);
-      setTab('history');
+      if (changed) {
+        await acceptRecommendation(issue);
+        setTool('history');
+      }
     } else if (issue.fix?.kind === 'retouch' || issue.fix?.kind === 'generative') {
-      setGenerativeTarget(issue.location);
-      setGenerativePrompt(issue.fix.kind === 'retouch' ? `Remove ${issue.title.toLowerCase()} and reconstruct the surrounding background.` : issue.recommendedAction);
-      setTab('edit');
+      openGenerativeTool(
+        issue.fix.kind === 'retouch' ? 'remove' : 'add',
+        issue.location,
+        issue.fix.kind === 'retouch'
+          ? `Remove ${issue.title.toLowerCase()} and reconstruct the surrounding background.`
+          : issue.recommendedAction,
+      );
     }
-  };
-
-  const rejectIssue = async (issue: Issue) => {
-    const preferences = await recordRecommendationFeedback(issue.id, false);
-    void persistPreferences(preferences).catch(() => undefined);
-    setMessage(`Saved feedback: “${issue.title}” is not useful for this photograph.`);
   };
 
   const analyze = async () => {
     setMessage(undefined);
     try {
-      await runAnalysis();
+      const result = await runAnalysis();
+      const firstIssue = result.issues[0];
+      setSelectedIssueId(firstIssue?.id);
+      if (firstIssue) setGenerativeTarget(firstIssue.location);
     } catch (error) {
       setMessage(error instanceof ApiUnavailableError ? error.message : error instanceof Error ? error.message : 'Analysis failed.');
     }
   };
 
   const ask = async () => {
-    if (!analysis) return;
+    if (!analysis || !coachQuestion.trim()) return;
     setMessage(undefined);
+    setCoachBusy(true);
     try {
-      const response = await askCoach(analysis, 'What is the single highest-impact change I should make?');
-      setCoachAnswer(response.answer);
+      setCoachResponse(await askCoach(analysis, coachQuestion.trim(), { stack: version.stack, selectedIssueId: selectedIssue?.id }));
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Coach is unavailable.');
+    } finally {
+      setCoachBusy(false);
+    }
+  };
+
+  const applyCoachAction = async (action: CoachAction) => {
+    if (!action.requiresConfirmation) return;
+    if (action.tool === 'adjust_global' && action.adjustments) {
+      await addAdjustment(action.adjustments, action.label);
+      setTool('adjust');
+    } else if (action.tool === 'adjust_masked' && action.adjustments && action.target) {
+      await addLayer({
+        id: randomUUID(), type: 'masked-adjustment', name: action.label, enabled: true, opacity: 1,
+        createdAt: new Date().toISOString(), adjustments: action.adjustments,
+        mask: { type: 'polygon', region: action.target },
+      }, action.label);
+      setTool('layers');
+    } else if ((action.tool === 'crop' || action.tool === 'straighten') && action.canvasTransform) {
+      const rotationDelta = action.canvasTransform.rotationDegrees ?? 0;
+      await commit({
+        ...version.stack,
+        canvasTransform: {
+          ...version.stack.canvasTransform,
+          ...action.canvasTransform,
+          rotationDegrees: version.stack.canvasTransform.rotationDegrees + rotationDelta,
+        },
+      }, action.label);
+      setTool('history');
+    } else if ((action.tool === 'remove' || action.tool === 'add') && action.target) {
+      openGenerativeTool(action.tool, action.target, action.prompt ?? action.reason);
+    } else if (action.tool === 'expand' && action.canvasTransform?.expansion) {
+      const direction = (['top', 'right', 'bottom', 'left'] as ExpansionDirection[])
+        .find((side) => (action.canvasTransform?.expansion?.[side] ?? 0) > 0) ?? 'right';
+      setExpansionDirection(direction);
+      setGenerativeOperation('expand');
+      setGenerativePrompt(action.prompt ?? 'Extend the scene naturally into the new canvas.');
+      setTool('ai');
+    } else if (action.tool === 'retake') {
+      setMessage(action.reason);
+    }
+  };
+
+  const commitAdjustment = async (key: keyof AdjustmentValues, value: number) => {
+    if (adjustmentCommitRef.current) return;
+    adjustmentCommitRef.current = true;
+    const next = { ...draftAdjustments, [key]: value };
+    setDraftAdjustments(next);
+    setApplying(true);
+    try {
+      const changed = await commit(setCollectiveAdjustments(version.stack, next), `Adjust ${String(key).replace('-', ' ')}`);
+      if (!changed) setDraftAdjustments(savedAdjustments);
+    } finally {
+      adjustmentCommitRef.current = false;
+      setApplying(false);
+    }
+  };
+
+  const restoreAdjustments = async () => {
+    if (adjustmentCommitRef.current) return;
+    adjustmentCommitRef.current = true;
+    setDraftAdjustments({});
+    setApplying(true);
+    try {
+      const changed = await commit(setCollectiveAdjustments(version.stack, {}), 'Restore adjustments');
+      if (!changed) setDraftAdjustments(savedAdjustments);
+    } finally {
+      adjustmentCommitRef.current = false;
+      setApplying(false);
+    }
+  };
+
+  const chooseLook = (look: SavedStyleProfile) => {
+    setSelectedLookId(look.id);
+    setLookStrength(appliedLookLayer?.styleProfileId === look.id ? appliedLookLayer.strength : 0.75);
+    if (appliedLookLayer?.styleProfileId !== look.id) setLookDraftLayerId(randomUUID());
+  };
+
+  const applyLook = async () => {
+    if (!selectedLook || !lookChanged) return;
+    setLookBusy(true);
+    try {
+      const changed = await commit(
+        applyStyleLayer(
+          version.stack,
+          selectedLook,
+          lookStrength,
+          appliedLookLayer?.id ?? lookDraftLayerId,
+          appliedLookLayer?.createdAt ?? new Date().toISOString(),
+        ),
+        `Look: ${selectedLook.name}`,
+      );
+      if (!changed) {
+        setSelectedLookId(appliedLookLayer?.styleProfileId);
+        setLookStrength(appliedLookLayer?.strength ?? 0.75);
+      }
+    } finally {
+      setLookBusy(false);
+    }
+  };
+
+  const restoreLook = async () => {
+    if (!appliedLookLayer) {
+      setSelectedLookId(undefined);
+      setLookStrength(0.75);
+      setLookDraftLayerId(randomUUID());
+      return;
+    }
+    setLookBusy(true);
+    try {
+      const changed = await commit(removeStyleLayers(version.stack), 'Restore look');
+      if (changed) {
+        setSelectedLookId(undefined);
+        setLookStrength(0.75);
+        setLookDraftLayerId(randomUUID());
+      }
+    } finally {
+      setLookBusy(false);
     }
   };
 
@@ -129,273 +384,493 @@ export const StudioScreen = ({ onClose }: { onClose: () => void }) => {
     }
   };
 
-  const importOverlay = async () => {
-    setMessage(undefined);
-    setAssetBusy(true);
-    try {
-      const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: 'images', quality: 1 });
-      if (result.canceled) return;
-      const source = result.assets[0];
-      const assetId = randomUUID();
-      const uri = await saveImportedLayerAsset(assetId, source.uri, source.mimeType);
-      await addLayer({
-        id: randomUUID(), type: 'image', name: source.fileName ?? 'Image overlay', enabled: true, opacity: 0.8,
-        createdAt: new Date().toISOString(), assetId, uri, transform: identityCanvasTransform(), blendMode: 'normal',
-      }, 'Add image overlay');
-      setTab('layers');
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Image layer import failed.');
-    } finally {
-      setAssetBusy(false);
-    }
-  };
-
-  const generatePatch = async () => {
+  const generateEdit = async () => {
     if (!generativePrompt.trim()) return;
     setMessage(undefined);
     setAssetBusy(true);
     try {
-      const result = await createGenerativePatch(selectedPhoto, version.stack, generativeTarget, generativePrompt.trim());
+      const result = await createGenerativePatch(
+        selectedPhoto,
+        version.stack,
+        generativeTarget,
+        generativePrompt.trim(),
+        generativeOperation,
+        expansionDirection,
+      );
       const patchAssetId = randomUUID();
       const maskAssetId = randomUUID();
       const patchUri = saveGeneratedLayerAsset(patchAssetId, result.patchBase64);
       const maskUri = saveGeneratedLayerAsset(maskAssetId, result.maskBase64);
-      await addLayer({
-        id: randomUUID(), type: 'generative-patch', name: 'Generative patch', enabled: true, opacity: 1,
+      const label = generativeOperation === 'remove'
+        ? `Removed ${selectedIssue?.title.toLowerCase() ?? 'selection'}`
+        : generativeOperation === 'expand'
+          ? `Expanded ${expansionDirection}`
+          : `Added ${generativePrompt.trim().slice(0, 42)}`;
+      const generatedLayer = {
+        id: randomUUID(), type: 'generative-patch', name: label, enabled: true, opacity: 1,
         createdAt: new Date().toISOString(), patchAssetId, patchUri, maskAssetId, maskUri,
         target: result.target, prompt: generativePrompt.trim(),
+        canvasSpace: true,
+        canvasExpansion: result.expansion ?? version.stack.canvasTransform.expansion ?? { top: 0, right: 0, bottom: 0, left: 0 },
         provenance: { model: result.model, sourceVersionId: result.sourceVersionId, driftScore: result.driftScore },
-      }, 'Add generative patch');
-      setTab('layers');
+      } as const;
+      if (generativeOperation === 'expand') {
+        if (!result.expansion) throw new Error('The expansion result did not include canvas geometry.');
+        await commit({
+          ...version.stack,
+          canvasTransform: { ...version.stack.canvasTransform, expansion: result.expansion },
+          layers: [...version.stack.layers, generatedLayer],
+        }, label);
+      } else {
+        await addLayer(generatedLayer, label);
+      }
+      await acceptRecommendation(selectedIssue);
+      setTool('layers');
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Generative patch failed.');
+      setMessage(error instanceof Error ? error.message : 'AI edit failed.');
     } finally {
       setAssetBusy(false);
     }
   };
 
+  const selectIssue = (issue: Issue) => {
+    setSelectedIssueId(issue.id);
+    setGenerativeTarget(issue.location);
+  };
+
   return (
-    <View style={styles.screen}>
+    <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
       <View style={styles.header}>
-        <Pressable style={styles.headerButton} onPress={onClose}><Text style={styles.headerButtonText}>‹</Text></Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="Close editor" style={styles.headerButton} onPress={onClose}>
+          <MaterialCommunityIcons name="arrow-left" size={26} color={colors.ink} />
+        </Pressable>
         <View style={styles.headerCenter}>
-          <Text style={styles.headerTitle}>STUDIO</Text>
-          <Text numberOfLines={1} style={styles.headerMeta}>{selectedPhoto.originalName} · v{selectedPhoto.versions.length}</Text>
+          <Text style={styles.headerTitle}>Edit</Text>
         </View>
-        <View style={styles.headerActions}>
-          <Text style={styles.originalSafe}>ORIGINAL SAFE</Text>
-          <Pressable style={styles.exportButton} onPress={exportPhoto} disabled={exporting}>
-            {exporting ? <ActivityIndicator size="small" color={colors.limeInk} /> : <Text style={styles.exportButtonText}>EXPORT</Text>}
-          </Pressable>
-        </View>
+        <Pressable accessibilityRole="button" style={styles.exportButton} onPress={exportPhoto} disabled={exporting}>
+          {exporting ? <ActivityIndicator size="small" color={colors.limeInk} /> : <Text style={styles.exportButtonText}>Export</Text>}
+        </Pressable>
       </View>
+
       <View style={styles.canvas}>
-        <PhotoCanvas uri={selectedPhoto.originalUri} stack={version.stack} analysis={analysis} />
+        <PhotoCanvas
+          uri={selectedPhoto.originalUri}
+          stack={previewStack}
+          analysis={analysis}
+          target={tool === 'ai' && generativeOperation !== 'expand' ? generativeTarget : undefined}
+          showIssues={tool === 'coach'}
+        />
       </View>
+
       <View style={styles.panel}>
-        <View style={styles.tabs}>
-          {(['coach', 'edit', 'layers', 'history'] as StudioTab[]).map((item) => (
-            <Pressable key={item} style={[styles.tab, tab === item && styles.tabActive]} onPress={() => setTab(item)}>
-              <Text style={[styles.tabText, tab === item && styles.tabTextActive]}>{item.toUpperCase()}</Text>
-            </Pressable>
-          ))}
-        </View>
-        {message ? <Text style={styles.message}>{message}</Text> : null}
-        <ScrollView contentContainerStyle={styles.panelContent} showsVerticalScrollIndicator={false}>
-          {tab === 'coach' ? (
-            <>
-              {!analysis ? (
-                <View style={styles.callout}>
-                  <Text style={styles.calloutEyebrow}>MEASURE FIRST</Text>
-                  <Text style={styles.calloutTitle}>Turn pixels into photographic evidence.</Text>
-                  <Text style={styles.calloutBody}>Exposure checks light, clipping, color, sharpness and composition before asking Gemini about intent.</Text>
-                  <Pressable style={styles.primary} onPress={analyze} disabled={analyzing}>
-                    {analyzing ? <ActivityIndicator color={colors.limeInk} /> : <Text style={styles.primaryText}>Analyze this version</Text>}
-                  </Pressable>
-                </View>
-              ) : (
-                <>
-                  <View style={styles.summaryRow}>
-                    <View style={styles.score}><Text style={styles.scoreValue}>{Math.max(0, 100 - Math.round(analysis.issues.reduce((sum, issue) => sum + issue.severity * 12, 0)))}</Text><Text style={styles.scoreLabel}>FRAME SCORE</Text></View>
-                    <Text style={styles.summary}>{analysis.summary}</Text>
-                  </View>
-                  {analysis.issues.map((issue) => (
-                    <View key={issue.id} style={styles.issueCard}>
-                      <View style={styles.issueHeading}>
-                        <Text style={styles.issueCategory}>{issue.category.toUpperCase()}</Text>
-                        <Text style={styles.issueConfidence}>{Math.round(issue.confidence * 100)}%</Text>
-                      </View>
-                      <Text style={styles.issueTitle}>{issue.title}</Text>
-                      <Text style={styles.issueBody}>{issue.explanation}</Text>
-                      <Text style={styles.issueAction}>{issue.recommendedAction}</Text>
-                      {issue.fix && issue.fix.kind !== 'retake' ? (
-                        <Pressable style={styles.fix} onPress={() => applyIssue(issue)}><Text style={styles.fixText}>{issue.fix.kind === 'crop' ? 'Apply reversible crop' : issue.fix.kind === 'transform' ? 'Apply reversible transform' : issue.fix.kind === 'retouch' || issue.fix.kind === 'generative' ? 'Prepare generative fix' : 'Apply as layer'}</Text></Pressable>
-                      ) : null}
-                      <Pressable style={styles.reject} onPress={() => rejectIssue(issue)}><Text style={styles.rejectText}>Not useful for this photo</Text></Pressable>
-                    </View>
-                  ))}
-                  <Pressable style={styles.coachButton} onPress={ask}><Text style={styles.coachButtonText}>Ask for the highest-impact change</Text></Pressable>
-                  {coachAnswer ? <Text style={styles.coachAnswer}>{coachAnswer}</Text> : null}
-                </>
-              )}
-            </>
+        {message ? <Text accessibilityRole="alert" style={styles.message}>{message}</Text> : null}
+        <ScrollView
+          key={tool}
+          contentContainerStyle={styles.panelContent}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          {tool === 'coach' ? (
+            <CoachPanel
+              analysis={analysis}
+              analyzing={analyzing}
+              selectedIssue={selectedIssue}
+              response={coachResponse}
+              question={coachQuestion}
+              coachBusy={coachBusy}
+              applying={applying}
+              onAnalyze={analyze}
+              onSelectIssue={selectIssue}
+              onQuestionChange={setCoachQuestion}
+              onAsk={ask}
+              onApplyIssue={applyIssue}
+              onApplyAction={applyCoachAction}
+            />
           ) : null}
-          {tab === 'edit' ? (
-            <>
-              <Text style={styles.sectionTitle}>Quick adjustments</Text>
-              <View style={styles.actionGrid}>
-                <EditButton label="Lift exposure" value="+0.25 EV" onPress={() => addAdjustment({ exposure: 0.25 }, 'Lift exposure')} />
-                <EditButton label="Lower exposure" value="−0.25 EV" onPress={() => addAdjustment({ exposure: -0.25 }, 'Lower exposure')} />
-                <EditButton label="Add contrast" value="+12" onPress={() => addAdjustment({ contrast: 0.12 }, 'Add contrast')} />
-                <EditButton label="Warm image" value="+8" onPress={() => addAdjustment({ temperature: 0.08 }, 'Warm image')} />
-                <EditButton label="More color" value="+10" onPress={() => addAdjustment({ saturation: 0.1 }, 'Increase saturation')} />
-                <EditButton label="Sharpen" value="+15" onPress={() => addAdjustment({ sharpening: 0.15 }, 'Sharpen')} />
-              </View>
-              <Text style={styles.sectionTitle}>Canvas transforms</Text>
-              <View style={styles.actionGrid}>
-                <EditButton label="Crop edges" value="5%" onPress={() => commit({ ...version.stack, canvasTransform: { ...version.stack.canvasTransform, crop: { x: 0.05, y: 0.05, width: 0.9, height: 0.9 } } }, 'Crop edges')} />
-                <EditButton label="Straighten" value="+1°" onPress={() => commit({ ...version.stack, canvasTransform: { ...version.stack.canvasTransform, rotationDegrees: version.stack.canvasTransform.rotationDegrees + 1 } }, 'Straighten')} />
-              </View>
-              <Text style={styles.safetyNote}>Each tap commits a separate version. The source file is never rewritten.</Text>
-              <Text style={styles.sectionTitle}>Image layer</Text>
-              <Pressable style={styles.secondaryAction} onPress={importOverlay} disabled={assetBusy}>
-                <Text style={styles.secondaryActionText}>Import image as independent overlay</Text>
-              </Pressable>
-              <Text style={styles.sectionTitle}>Generative patch</Text>
-              <Text style={styles.generatorHint}>The target is the highest-priority issue box, or the center region until analysis runs. The service rejects unrelated drift.</Text>
-              <TextInput
-                value={generativePrompt}
-                onChangeText={setGenerativePrompt}
-                multiline
-                placeholder="Describe only the intended local change"
-                placeholderTextColor={colors.muted}
-                style={styles.promptInput}
-              />
-              <Pressable style={[styles.primary, assetBusy && styles.busyButton]} onPress={generatePatch} disabled={assetBusy || !generativePrompt.trim()}>
-                {assetBusy ? <ActivityIndicator color={colors.limeInk} /> : <Text style={styles.primaryText}>Generate localized patch</Text>}
-              </Pressable>
-            </>
+
+          {tool === 'adjust' ? (
+            <AdjustmentSheet
+              values={draftAdjustments}
+              onChange={(key, value) => setDraftAdjustments((current) => ({ ...current, [key]: value }))}
+              onCommit={commitAdjustment}
+              onResetControl={(key) => void commitAdjustment(key, 0)}
+              onRestore={() => void restoreAdjustments()}
+              busy={applying}
+            />
           ) : null}
-          {tab === 'layers' ? (
-            <>
-              <View style={styles.sectionHeading}><Text style={styles.sectionTitle}>Layer stack</Text><Text style={styles.sectionMeta}>{version.stack.layers.length} layers</Text></View>
-              {version.stack.layers.length === 0 ? <Text style={styles.placeholder}>The original has no edits. Apply a fix or adjustment to add a layer.</Text> : null}
-              {[...version.stack.layers].reverse().map((layer, reverseIndex) => {
-                const index = version.stack.layers.length - 1 - reverseIndex;
-                return (
-                  <View key={layer.id} style={[styles.layerRow, !layer.enabled && styles.layerDisabled]}>
-                    <Pressable style={[styles.visibility, layer.enabled && styles.visibilityOn]} onPress={() => commit(toggleLayer(version.stack, layer.id), `${layer.enabled ? 'Hide' : 'Show'} ${layer.name}`)}><Text style={styles.visibilityText}>{layer.enabled ? '●' : '○'}</Text></Pressable>
-                    <View style={styles.layerInfo}><Text numberOfLines={1} style={styles.layerName}>{layer.name}</Text><Text style={styles.layerType}>{layer.type} · {Math.round(layer.opacity * 100)}%</Text></View>
-                    <Pressable onPress={() => commit(reorderLayer(version.stack, layer.id, 1), `Move ${layer.name}`)} disabled={index === version.stack.layers.length - 1}><Text style={styles.layerAction}>↑</Text></Pressable>
-                    <Pressable onPress={() => commit(reorderLayer(version.stack, layer.id, -1), `Move ${layer.name}`)} disabled={index === 0}><Text style={styles.layerAction}>↓</Text></Pressable>
-                    <Pressable onPress={() => commit(removeLayer(version.stack, layer.id), `Remove ${layer.name}`)}><Text style={[styles.layerAction, { color: colors.danger }]}>×</Text></Pressable>
-                  </View>
-                );
-              })}
-            </>
+
+          {tool === 'looks' ? (
+            <LooksPanel
+              looks={savedLooks}
+              selectedLookId={selectedLookId}
+              strength={lookStrength}
+              loading={looksLoading}
+              busy={lookBusy}
+              canApply={lookChanged}
+              canRestore={Boolean(appliedLookLayer || selectedLookId)}
+              onSelect={chooseLook}
+              onStrengthChange={setLookStrength}
+              onApply={() => void applyLook()}
+              onRestore={() => void restoreLook()}
+            />
           ) : null}
-          {tab === 'history' ? (
-            <>
-              <Text style={styles.sectionTitle}>Version history</Text>
-              {[...selectedPhoto.versions].reverse().map((item, index) => (
-                <View key={item.id} style={styles.historyRow}>
-                  <View style={[styles.timelineDot, item.id === selectedPhoto.currentVersionId && styles.timelineDotActive]} />
-                  <View style={styles.layerInfo}>
-                    <Text style={styles.layerName}>{item.label}</Text>
-                    <Text style={styles.layerType}>{new Date(item.createdAt).toLocaleString()} · {item.stack.layers.length} layers</Text>
-                  </View>
-                  {index !== 0 ? <Pressable onPress={() => restore(item.id)}><Text style={styles.restore}>RESTORE</Text></Pressable> : <Text style={styles.current}>CURRENT</Text>}
-                </View>
-              ))}
-            </>
+
+          {tool === 'ai' ? (
+            <AiPanel
+              operation={generativeOperation}
+              prompt={generativePrompt}
+              target={generativeTarget}
+              issues={analysis?.issues ?? []}
+              busy={assetBusy}
+              expansionDirection={expansionDirection}
+              onOperationChange={(operation) => {
+                setGenerativeOperation(operation);
+                setGenerativePrompt(operation === 'remove'
+                  ? 'Remove the selected distraction and reconstruct the background.'
+                  : operation === 'expand'
+                    ? 'Extend the scene naturally into the new canvas.'
+                    : '');
+              }}
+              onPromptChange={setGenerativePrompt}
+              onTargetChange={(target, issueId) => {
+                setGenerativeTarget(target);
+                setSelectedIssueId(issueId);
+              }}
+              onGenerate={generateEdit}
+              onExpansionDirectionChange={setExpansionDirection}
+            />
+          ) : null}
+
+          {tool === 'layers' ? (
+            <LayersPanel
+              stack={version.stack}
+              onCommit={commit}
+            />
+          ) : null}
+
+          {tool === 'history' ? (
+            <HistoryPanel photo={selectedPhoto} onRestore={restore} />
           ) : null}
         </ScrollView>
+        <StudioToolRail active={tool} onChange={setTool} />
       </View>
-    </View>
+    </SafeAreaView>
   );
 };
 
-const EditButton = ({ label, value, onPress }: { label: string; value: string; onPress: () => void }) => (
-  <Pressable style={styles.editButton} onPress={onPress}>
-    <Text style={styles.editValue}>{value}</Text><Text style={styles.editLabel}>{label}</Text>
-  </Pressable>
+const CoachPanel = ({
+  analysis,
+  analyzing,
+  selectedIssue,
+  response,
+  question,
+  coachBusy,
+  applying,
+  onAnalyze,
+  onSelectIssue,
+  onQuestionChange,
+  onAsk,
+  onApplyIssue,
+  onApplyAction,
+}: {
+  analysis: ReturnType<typeof useExposure>['analysis'];
+  analyzing: boolean;
+  selectedIssue?: Issue;
+  response?: CoachResponse;
+  question: string;
+  coachBusy: boolean;
+  applying: boolean;
+  onAnalyze: () => void;
+  onSelectIssue: (issue: Issue) => void;
+  onQuestionChange: (value: string) => void;
+  onAsk: () => void;
+  onApplyIssue: (issue: Issue) => void;
+  onApplyAction: (action: CoachAction) => void;
+}) => {
+  if (!analysis) {
+    return (
+      <View style={styles.centerAction}>
+        <Pressable accessibilityRole="button" style={styles.primary} onPress={onAnalyze} disabled={analyzing}>
+          {analyzing ? <ActivityIndicator color={colors.limeInk} /> : <Text style={styles.primaryText}>Analyze photo</Text>}
+        </Pressable>
+      </View>
+    );
+  }
+  const fixable = selectedIssue?.fix && !['crop', 'retake'].includes(selectedIssue.fix.kind);
+  return (
+    <>
+      <Text style={styles.summary}>{response?.headline ?? analysis.summary}</Text>
+      {response?.reason ? <Text style={styles.body}>{response.reason}</Text> : null}
+
+      {analysis.issues.length > 0 ? (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
+          {analysis.issues.slice(0, 6).map((issue) => (
+            <Pressable
+              key={issue.id}
+              accessibilityRole="button"
+              accessibilityState={{ selected: selectedIssue?.id === issue.id }}
+              onPress={() => onSelectIssue(issue)}
+              style={[styles.chip, selectedIssue?.id === issue.id && styles.chipActive]}
+            >
+              <Text style={[styles.chipText, selectedIssue?.id === issue.id && styles.chipTextActive]}>{issue.title}</Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+      ) : null}
+
+      {selectedIssue ? (
+        <View style={styles.focusedFinding}>
+          <View style={styles.findingHeading}>
+            <Text style={styles.findingTitle}>{selectedIssue.title}</Text>
+            <Text style={styles.confidence}>{Math.round(selectedIssue.confidence * 100)}%</Text>
+          </View>
+          <Text numberOfLines={3} style={styles.body}>{selectedIssue.explanation}</Text>
+          {fixable ? (
+            <Pressable accessibilityRole="button" style={styles.inlineAction} onPress={() => onApplyIssue(selectedIssue)} disabled={applying}>
+              <Text style={styles.inlineActionText}>{selectedIssue.fix?.kind === 'retouch' || selectedIssue.fix?.kind === 'generative' ? 'Review fix' : 'Apply fix'}</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
+
+      {analysis.cameraRecommendations.length > 0 ? (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Capture advice</Text>
+          {analysis.cameraRecommendations.map((advice, index) => (
+            <View key={`${advice.setting}-${index}`} style={styles.adviceRow}>
+              <Text style={styles.adviceSetting}>{advice.setting.replace('-', ' ')}</Text>
+              <View style={styles.adviceBody}>
+                {advice.value ? <Text style={styles.adviceValue}>{advice.value}</Text> : null}
+                <Text numberOfLines={2} style={styles.caption}>{advice.explanation}</Text>
+              </View>
+            </View>
+          ))}
+        </View>
+      ) : null}
+
+      {response?.evidence.length ? (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Evidence</Text>
+          {response.evidence.map((item) => <Text key={item.path} style={styles.caption}>• {item.meaning}</Text>)}
+        </View>
+      ) : null}
+
+      {response?.actions.map((action) => (
+        <View key={action.id} style={styles.actionRow}>
+          <View style={styles.actionCopy}><Text style={styles.findingTitle}>{action.label}</Text><Text numberOfLines={2} style={styles.caption}>{action.reason}</Text></View>
+          <Pressable accessibilityRole="button" style={styles.smallPrimary} onPress={() => onApplyAction(action)}>
+            <Text style={styles.smallPrimaryText}>{action.tool === 'remove' || action.tool === 'add' || action.tool === 'expand' ? 'Review' : 'Apply'}</Text>
+          </Pressable>
+        </View>
+      ))}
+
+      <View style={styles.askRow}>
+        <TextInput
+          accessibilityLabel="Ask the photo coach"
+          value={question}
+          onChangeText={onQuestionChange}
+          onSubmitEditing={onAsk}
+          placeholder="Ask about this photo"
+          placeholderTextColor={colors.muted}
+          style={styles.askInput}
+        />
+        <Pressable accessibilityRole="button" style={styles.askButton} onPress={onAsk} disabled={coachBusy || !question.trim()}>
+          {coachBusy ? <ActivityIndicator color={colors.limeInk} /> : <Text style={styles.askButtonText}>Ask</Text>}
+        </Pressable>
+      </View>
+    </>
+  );
+};
+
+const AiPanel = ({
+  operation,
+  prompt,
+  target,
+  issues,
+  busy,
+  expansionDirection,
+  onOperationChange,
+  onPromptChange,
+  onTargetChange,
+  onGenerate,
+  onExpansionDirectionChange,
+}: {
+  operation: GenerativeOperation;
+  prompt: string;
+  target: Region;
+  issues: Issue[];
+  busy: boolean;
+  expansionDirection: ExpansionDirection;
+  onOperationChange: (operation: GenerativeOperation) => void;
+  onPromptChange: (value: string) => void;
+  onTargetChange: (target: Region, issueId?: string) => void;
+  onGenerate: () => void;
+  onExpansionDirectionChange: (direction: ExpansionDirection) => void;
+}) => {
+  const selected = (candidate: Region) => JSON.stringify(candidate) === JSON.stringify(target);
+  return (
+    <>
+      <View style={styles.segmented}>
+        {(['remove', 'add', 'expand'] as GenerativeOperation[]).map((item) => (
+          <Pressable key={item} accessibilityRole="tab" accessibilityState={{ selected: operation === item }} style={[styles.segment, operation === item && styles.segmentActive]} onPress={() => onOperationChange(item)}>
+            <Text style={[styles.segmentText, operation === item && styles.segmentTextActive]}>{item[0].toUpperCase() + item.slice(1)}</Text>
+          </Pressable>
+        ))}
+      </View>
+
+      <Text style={styles.sectionTitle}>{operation === 'expand' ? 'Expand edge' : 'Select area'}</Text>
+      {operation === 'expand' ? (
+        <View style={styles.directionGrid}>
+          {(['left', 'top', 'bottom', 'right'] as ExpansionDirection[]).map((direction) => (
+            <Pressable
+              key={direction}
+              accessibilityRole="button"
+              accessibilityState={{ selected: expansionDirection === direction }}
+              style={[styles.directionButton, expansionDirection === direction && styles.chipActive]}
+              onPress={() => onExpansionDirectionChange(direction)}
+            >
+              <Text style={[styles.chipText, expansionDirection === direction && styles.chipTextActive]}>{direction[0].toUpperCase() + direction.slice(1)}</Text>
+            </Pressable>
+          ))}
+        </View>
+      ) : (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
+          {issues.slice(0, 3).map((issue) => (
+            <Pressable key={issue.id} accessibilityRole="button" style={[styles.chip, selected(issue.location) && styles.chipActive]} onPress={() => onTargetChange(issue.location, issue.id)}>
+              <Text style={[styles.chipText, selected(issue.location) && styles.chipTextActive]}>{issue.title}</Text>
+            </Pressable>
+          ))}
+          {[
+            { label: 'Center', region: CENTER_TARGET },
+            { label: 'Upper', region: UPPER_TARGET },
+            { label: 'Lower', region: LOWER_TARGET },
+          ].map((preset) => (
+            <Pressable key={preset.label} accessibilityRole="button" style={[styles.chip, selected(preset.region) && styles.chipActive]} onPress={() => onTargetChange(preset.region)}>
+              <Text style={[styles.chipText, selected(preset.region) && styles.chipTextActive]}>{preset.label}</Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+      )}
+
+      <TextInput
+        accessibilityLabel={operation === 'remove' ? 'Removal instructions' : operation === 'expand' ? 'Expansion instructions' : 'Element to add'}
+        value={prompt}
+        onChangeText={onPromptChange}
+        multiline
+        placeholder={operation === 'remove' ? 'What should be removed?' : operation === 'expand' ? 'How should the scene continue?' : 'What should be added?'}
+        placeholderTextColor={colors.muted}
+        style={styles.promptInput}
+      />
+      <Pressable accessibilityRole="button" style={[styles.primary, (busy || !prompt.trim()) && styles.disabled]} onPress={onGenerate} disabled={busy || !prompt.trim()}>
+        {busy ? <ActivityIndicator color={colors.limeInk} /> : <Text style={styles.primaryText}>{operation === 'remove' ? 'Generate removal' : operation === 'expand' ? 'Expand canvas' : 'Generate addition'}</Text>}
+      </Pressable>
+    </>
+  );
+};
+
+const LayersPanel = ({ stack, onCommit }: { stack: LayerStack; onCommit: (stack: LayerStack, label: string) => Promise<boolean> }) => (
+  <>
+    {stack.layers.length === 0 ? <Text style={styles.placeholder}>No edits yet</Text> : null}
+    {[...stack.layers].reverse().map((layer, reverseIndex) => {
+      const index = stack.layers.length - 1 - reverseIndex;
+      return (
+        <View key={layer.id} style={[styles.layerRow, !layer.enabled && styles.layerDisabled]}>
+          <Pressable accessibilityRole="switch" accessibilityState={{ checked: layer.enabled }} accessibilityLabel={`${layer.enabled ? 'Hide' : 'Show'} ${layer.name}`} style={styles.layerControl} onPress={() => onCommit(toggleLayer(stack, layer.id), `${layer.enabled ? 'Hide' : 'Show'} ${layer.name}`)}>
+            <MaterialCommunityIcons name={layer.enabled ? 'eye' : 'eye-off-outline'} size={20} color={colors.lime} />
+          </Pressable>
+          <View style={styles.layerInfo}><Text numberOfLines={1} style={styles.layerName}>{layer.name}</Text><Text style={styles.caption}>{Math.round(layer.opacity * 100)}%</Text></View>
+          <Pressable accessibilityRole="button" accessibilityLabel={`Move ${layer.name} up`} style={styles.layerControl} onPress={() => onCommit(reorderLayer(stack, layer.id, 1), `Move ${layer.name}`)} disabled={index === stack.layers.length - 1}><MaterialCommunityIcons name="arrow-up" size={20} color={colors.ink} /></Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel={`Move ${layer.name} down`} style={styles.layerControl} onPress={() => onCommit(reorderLayer(stack, layer.id, -1), `Move ${layer.name}`)} disabled={index === 0}><MaterialCommunityIcons name="arrow-down" size={20} color={colors.ink} /></Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${layer.name}`} style={styles.layerControl} onPress={() => onCommit(removeLayer(stack, layer.id), `Remove ${layer.name}`)}><MaterialCommunityIcons name="close" size={22} color={colors.danger} /></Pressable>
+        </View>
+      );
+    })}
+  </>
+);
+
+const HistoryPanel = ({ photo, onRestore }: { photo: NonNullable<ReturnType<typeof useExposure>['selectedPhoto']>; onRestore: (versionId: string) => Promise<void> }) => (
+  <>
+    {[...photo.versions].reverse().map((item, index) => (
+      <View key={item.id} style={styles.historyRow}>
+        <View style={[styles.timelineDot, item.id === photo.currentVersionId && styles.timelineDotActive]} />
+        <View style={styles.layerInfo}>
+          <Text style={styles.layerName}>{item.label}</Text>
+          <Text style={styles.caption}>{new Date(item.createdAt).toLocaleString()}</Text>
+        </View>
+        {index !== 0 ? (
+          <Pressable accessibilityRole="button" style={styles.restoreButton} onPress={() => onRestore(item.id)}><Text style={styles.restore}>Restore</Text></Pressable>
+        ) : <Text style={styles.current}>Current</Text>}
+      </View>
+    ))}
+  </>
 );
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.canvas },
-  header: { height: 62, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line, backgroundColor: colors.panel },
-  headerButton: { width: 42, height: 42, alignItems: 'center', justifyContent: 'center' },
-  headerButtonText: { color: colors.ink, fontSize: 34, lineHeight: 36 },
+  header: { minHeight: 58, paddingHorizontal: 8, flexDirection: 'row', alignItems: 'center', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line, backgroundColor: colors.panel },
+  headerButton: { width: 88, height: 48, alignItems: 'flex-start', justifyContent: 'center', paddingLeft: 12 },
   headerCenter: { flex: 1, alignItems: 'center' },
-  headerTitle: { color: colors.ink, fontWeight: '900', letterSpacing: 2.4, fontSize: 13 },
-  headerMeta: { color: colors.muted, fontSize: 9, marginTop: 2, maxWidth: 190 },
-  headerActions: { width: 74, alignItems: 'stretch', gap: 3 },
-  originalSafe: { color: colors.lime, fontSize: 6, fontWeight: '900', letterSpacing: 0.5, textAlign: 'center' },
-  exportButton: { minHeight: 28, borderRadius: 3, backgroundColor: colors.lime, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8 },
-  exportButtonText: { color: colors.limeInk, fontSize: 8, fontWeight: '900', letterSpacing: 0.8 },
-  canvas: { flex: 1, minHeight: 210 },
-  panel: { height: '48%', minHeight: 330, backgroundColor: colors.panel },
-  tabs: { height: 48, flexDirection: 'row', borderBottomColor: colors.line, borderBottomWidth: 1 },
-  tab: { flex: 1, alignItems: 'center', justifyContent: 'center', borderBottomWidth: 2, borderBottomColor: 'transparent' },
-  tabActive: { borderBottomColor: colors.lime },
-  tabText: { color: colors.muted, fontSize: 10, fontWeight: '800', letterSpacing: 1 },
-  tabTextActive: { color: colors.ink },
-  panelContent: { padding: 16, paddingBottom: 36 },
-  message: { color: colors.danger, fontSize: 11, paddingHorizontal: 16, paddingTop: 10 },
-  callout: { backgroundColor: colors.panelRaised, padding: 18, borderLeftWidth: 3, borderLeftColor: colors.lime },
-  calloutEyebrow: { color: colors.lime, fontSize: 9, fontWeight: '900', letterSpacing: 1.7 },
-  calloutTitle: { color: colors.ink, fontWeight: '800', fontSize: 21, lineHeight: 25, marginTop: 7 },
-  calloutBody: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 8 },
-  primary: { backgroundColor: colors.lime, marginTop: 16, minHeight: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 3 },
-  primaryText: { color: colors.limeInk, fontWeight: '900', fontSize: 12, letterSpacing: 0.4 },
-  summaryRow: { flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: 12 },
-  score: { width: 72, height: 72, borderRadius: 36, borderWidth: 3, borderColor: colors.lime, alignItems: 'center', justifyContent: 'center' },
-  scoreValue: { color: colors.ink, fontWeight: '900', fontSize: 24 },
-  scoreLabel: { color: colors.muted, fontSize: 6, letterSpacing: 0.8 },
-  summary: { flex: 1, color: colors.ink, lineHeight: 18, fontSize: 12 },
-  issueCard: { backgroundColor: colors.panelRaised, borderWidth: 1, borderColor: colors.line, padding: 14, marginTop: 9, borderRadius: 4 },
-  issueHeading: { flexDirection: 'row', justifyContent: 'space-between' },
-  issueCategory: { color: colors.lime, fontSize: 8, fontWeight: '900', letterSpacing: 1.4 },
-  issueConfidence: { color: colors.muted, fontSize: 9 },
-  issueTitle: { color: colors.ink, fontSize: 15, fontWeight: '800', marginTop: 7 },
-  issueBody: { color: colors.muted, fontSize: 11, lineHeight: 16, marginTop: 4 },
-  issueAction: { color: colors.ink, fontSize: 11, lineHeight: 16, marginTop: 8 },
-  fix: { alignSelf: 'flex-start', backgroundColor: colors.lime, paddingHorizontal: 12, paddingVertical: 8, marginTop: 10, borderRadius: 2 },
-  fixText: { color: colors.limeInk, fontSize: 10, fontWeight: '900' },
-  reject: { alignSelf: 'flex-start', paddingVertical: 8, marginTop: 2 },
-  rejectText: { color: colors.muted, fontSize: 9, fontWeight: '700' },
-  coachButton: { borderColor: colors.line, borderWidth: 1, alignItems: 'center', padding: 12, marginTop: 12 },
-  coachButtonText: { color: colors.ink, fontSize: 11, fontWeight: '700' },
-  coachAnswer: { color: colors.ink, backgroundColor: colors.panelRaised, padding: 14, lineHeight: 18, fontSize: 12 },
-  sectionHeading: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  sectionTitle: { color: colors.ink, fontWeight: '900', fontSize: 15, marginBottom: 10 },
-  sectionMeta: { color: colors.muted, fontSize: 10 },
-  actionGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 18 },
-  editButton: { width: '31%', minHeight: 72, backgroundColor: colors.panelRaised, borderWidth: 1, borderColor: colors.line, alignItems: 'center', justifyContent: 'center', padding: 8, borderRadius: 3 },
-  editValue: { color: colors.lime, fontSize: 14, fontWeight: '900' },
-  editLabel: { color: colors.muted, fontSize: 9, textAlign: 'center', marginTop: 5 },
-  safetyNote: { color: colors.muted, fontSize: 10, fontStyle: 'italic', lineHeight: 15 },
-  secondaryAction: { minHeight: 44, borderWidth: 1, borderColor: colors.line, alignItems: 'center', justifyContent: 'center', marginBottom: 18 },
-  secondaryActionText: { color: colors.ink, fontSize: 11, fontWeight: '800' },
-  generatorHint: { color: colors.muted, fontSize: 10, lineHeight: 15, marginBottom: 8 },
-  promptInput: { minHeight: 76, color: colors.ink, backgroundColor: colors.canvas, borderWidth: 1, borderColor: colors.line, padding: 11, textAlignVertical: 'top' },
-  busyButton: { opacity: 0.55 },
-  placeholder: { color: colors.muted, fontSize: 12, lineHeight: 18, paddingVertical: 20 },
-  layerRow: { minHeight: 58, flexDirection: 'row', gap: 8, alignItems: 'center', borderBottomColor: colors.line, borderBottomWidth: StyleSheet.hairlineWidth },
-  layerDisabled: { opacity: 0.5 },
-  visibility: { width: 28, height: 28, borderRadius: 14, borderWidth: 1, borderColor: colors.line, alignItems: 'center', justifyContent: 'center' },
-  visibilityOn: { borderColor: colors.lime },
-  visibilityText: { color: colors.lime, fontSize: 11 },
+  headerTitle: { color: colors.ink, fontWeight: '800', fontSize: 16 },
+  exportButton: { width: 88, minHeight: 48, borderRadius: 8, backgroundColor: colors.lime, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12 },
+  exportButtonText: { color: colors.limeInk, fontSize: 12, fontWeight: '800' },
+  canvas: { flex: 1, minHeight: 190 },
+  panel: { maxHeight: '50%', minHeight: 214, backgroundColor: colors.panel },
+  panelContent: { padding: 16, paddingBottom: 20 },
+  message: { color: colors.ink, backgroundColor: colors.panelRaised, fontSize: 12, lineHeight: 17, paddingHorizontal: 16, paddingVertical: 10 },
+  centerAction: { minHeight: 100, justifyContent: 'center' },
+  primary: { backgroundColor: colors.lime, minHeight: 48, alignItems: 'center', justifyContent: 'center', borderRadius: 8, paddingHorizontal: 16 },
+  primaryText: { color: colors.limeInk, fontWeight: '800', fontSize: 13 },
+  summary: { color: colors.ink, fontSize: 18, fontWeight: '800', lineHeight: 23 },
+  body: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 4 },
+  caption: { color: colors.muted, fontSize: 12, lineHeight: 17 },
+  chips: { gap: 8, paddingVertical: 12 },
+  chip: { minHeight: 40, maxWidth: 180, borderRadius: 20, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.line },
+  chipActive: { backgroundColor: colors.lime, borderColor: colors.lime },
+  chipText: { color: colors.muted, fontSize: 12, fontWeight: '700' },
+  chipTextActive: { color: colors.limeInk },
+  directionGrid: { flexDirection: 'row', gap: 8, marginBottom: 12 },
+  directionButton: { flex: 1, minHeight: 48, borderRadius: 8, borderWidth: 1, borderColor: colors.line, alignItems: 'center', justifyContent: 'center' },
+  focusedFinding: { paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
+  findingHeading: { flexDirection: 'row', justifyContent: 'space-between', gap: 12 },
+  findingTitle: { flex: 1, color: colors.ink, fontSize: 13, fontWeight: '800' },
+  confidence: { color: colors.muted, fontSize: 12 },
+  inlineAction: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', marginTop: 4 },
+  inlineActionText: { color: colors.lime, fontSize: 12, fontWeight: '800' },
+  section: { marginTop: 16 },
+  sectionTitle: { color: colors.ink, fontSize: 13, fontWeight: '800', marginBottom: 8 },
+  adviceRow: { minHeight: 54, flexDirection: 'row', alignItems: 'flex-start', paddingVertical: 7, borderBottomColor: colors.line, borderBottomWidth: StyleSheet.hairlineWidth },
+  adviceSetting: { width: 88, color: colors.muted, fontSize: 12, fontWeight: '700' },
+  adviceBody: { flex: 1 },
+  adviceValue: { color: colors.ink, fontSize: 13, fontWeight: '700', marginBottom: 2 },
+  actionRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
+  actionCopy: { flex: 1 },
+  smallPrimary: { minWidth: 68, minHeight: 44, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.lime, borderRadius: 8 },
+  smallPrimaryText: { color: colors.limeInk, fontSize: 12, fontWeight: '800' },
+  askRow: { flexDirection: 'row', gap: 8, marginTop: 16 },
+  askInput: { flex: 1, minHeight: 48, color: colors.ink, backgroundColor: colors.canvas, borderWidth: 1, borderColor: colors.line, borderRadius: 8, paddingHorizontal: 12, fontSize: 13 },
+  askButton: { minWidth: 64, minHeight: 48, borderRadius: 8, backgroundColor: colors.lime, alignItems: 'center', justifyContent: 'center' },
+  askButtonText: { color: colors.limeInk, fontSize: 12, fontWeight: '800' },
+  segmented: { flexDirection: 'row', minHeight: 48, borderRadius: 9, padding: 3, backgroundColor: colors.canvas, marginBottom: 16 },
+  segment: { flex: 1, minHeight: 42, borderRadius: 7, alignItems: 'center', justifyContent: 'center' },
+  segmentActive: { backgroundColor: colors.panelRaised },
+  segmentText: { color: colors.muted, fontSize: 13, fontWeight: '700' },
+  segmentTextActive: { color: colors.ink },
+  promptInput: { minHeight: 76, color: colors.ink, backgroundColor: colors.canvas, borderWidth: 1, borderColor: colors.line, borderRadius: 8, padding: 12, textAlignVertical: 'top', marginBottom: 12, fontSize: 13 },
+  disabled: { opacity: 0.45 },
+  placeholder: { color: colors.muted, fontSize: 13, textAlign: 'center', paddingVertical: 24 },
+  layerRow: { minHeight: 58, flexDirection: 'row', gap: 2, alignItems: 'center', borderBottomColor: colors.line, borderBottomWidth: StyleSheet.hairlineWidth },
+  layerDisabled: { opacity: 0.48 },
+  layerControl: { width: 44, height: 48, alignItems: 'center', justifyContent: 'center' },
   layerInfo: { flex: 1 },
-  layerName: { color: colors.ink, fontSize: 12, fontWeight: '700' },
-  layerType: { color: colors.muted, fontSize: 9, marginTop: 3, textTransform: 'uppercase' },
-  layerAction: { color: colors.ink, fontSize: 18, padding: 5 },
+  layerName: { color: colors.ink, fontSize: 13, fontWeight: '700' },
   historyRow: { minHeight: 62, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomColor: colors.line, borderBottomWidth: StyleSheet.hairlineWidth },
   timelineDot: { width: 10, height: 10, borderRadius: 5, borderWidth: 2, borderColor: colors.muted },
   timelineDotActive: { borderColor: colors.lime, backgroundColor: colors.lime },
-  restore: { color: colors.lime, fontSize: 9, fontWeight: '900' },
-  current: { color: colors.muted, fontSize: 8, fontWeight: '900' },
+  restoreButton: { minWidth: 64, minHeight: 48, justifyContent: 'center', alignItems: 'center' },
+  restore: { color: colors.lime, fontSize: 11, fontWeight: '800' },
+  current: { color: colors.muted, fontSize: 10, fontWeight: '800', paddingHorizontal: 8 },
   empty: { flex: 1, backgroundColor: colors.canvas, alignItems: 'center', justifyContent: 'center' },
-  emptyTitle: { color: colors.ink },
-  link: { color: colors.lime, marginTop: 12 },
+  emptyTitle: { color: colors.ink, fontSize: 18, fontWeight: '800' },
+  emptyButton: { minHeight: 48, justifyContent: 'center' },
+  link: { color: colors.lime, fontSize: 13, fontWeight: '700' },
 });

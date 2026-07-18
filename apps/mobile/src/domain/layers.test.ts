@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { commitVersion, emptyLayerStack, makeAdjustmentLayer, restoreVersion } from './layers';
+import {
+  collectiveAdjustmentValues,
+  commitVersion,
+  emptyLayerStack,
+  makeAdjustmentLayer,
+  mergeCollectiveAdjustments,
+  restoreVersion,
+  setCollectiveAdjustments,
+} from './layers';
 import type { PhotoRecord } from './types';
 
 const photoFixture = (): PhotoRecord => ({
@@ -50,4 +58,36 @@ test('restoring history creates a new current version and keeps intervening hist
   assert.equal(restored.currentVersionId, 'restore');
   assert.equal(restored.versions[2].restoredFromVersionId, 'original');
   assert.equal(restored.versions[2].parentVersionId, 'edit');
+});
+
+test('collective adjustments fold legacy global layers without touching advanced layers', () => {
+  const stack = emptyLayerStack();
+  stack.adjustments = { exposure: 0.2 };
+  stack.layers.push(makeAdjustmentLayer('legacy', { exposure: 0.15, contrast: 0.3 }));
+  stack.layers.push({
+    id: 'masked',
+    type: 'masked-adjustment',
+    name: 'Face',
+    enabled: true,
+    opacity: 1,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    adjustments: { exposure: 0.1 },
+    mask: { type: 'subject' },
+  });
+
+  assert.deepEqual(collectiveAdjustmentValues(stack), { exposure: 0.35, contrast: 0.3 });
+  const consolidated = setCollectiveAdjustments(stack, { exposure: 0.4 });
+  assert.deepEqual(consolidated.adjustments, { exposure: 0.4 });
+  assert.deepEqual(consolidated.layers.map((layer) => layer.id), ['masked']);
+});
+
+test('collective edits stay on one photo stack and do not become defaults', () => {
+  const original = emptyLayerStack();
+  const edited = mergeCollectiveAdjustments(original, { exposure: 0.25 });
+  const revised = mergeCollectiveAdjustments(edited, { exposure: -0.1, saturation: 0.2 });
+
+  assert.deepEqual(original.adjustments, {});
+  assert.deepEqual(revised.adjustments, { exposure: 0.15, saturation: 0.2 });
+  assert.deepEqual(emptyLayerStack().adjustments, {});
+  assert.equal(revised.layers.length, 0);
 });

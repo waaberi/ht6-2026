@@ -83,6 +83,8 @@ export type GenerativePatchLayer = LayerBase & {
   maskUri?: string;
   target: Region;
   prompt: string;
+  canvasSpace?: boolean;
+  canvasExpansion?: { top: number; right: number; bottom: number; left: number };
   provenance: { model: string; sourceVersionId: Id; driftScore: number };
 };
 
@@ -103,6 +105,7 @@ export type Layer =
 
 export type LayerStack = {
   canvasTransform: CanvasTransform;
+  adjustments?: AdjustmentValues;
   layers: Layer[];
 };
 
@@ -175,6 +178,52 @@ export type CameraRecommendation = {
   explanation: string;
   basedOn: string[];
 };
+
+export type CoachTool =
+  | 'adjust_global'
+  | 'adjust_masked'
+  | 'crop'
+  | 'straighten'
+  | 'remove'
+  | 'add'
+  | 'expand'
+  | 'retake';
+
+export type CoachEvidence = {
+  path: string;
+  value?: string;
+  meaning: string;
+};
+
+export type CoachCaptureAdvice = {
+  setting: CameraRecommendation['setting'];
+  value?: string;
+  tradeoff?: string;
+  basedOn: string[];
+};
+
+export type CoachAction = {
+  id: Id;
+  tool: CoachTool;
+  label: string;
+  reason: string;
+  requiresConfirmation: boolean;
+  adjustments?: AdjustmentValues;
+  target?: Region;
+  prompt?: string;
+  canvasTransform?: Partial<CanvasTransform>;
+};
+
+export type CoachResponse = {
+  headline: string;
+  reason: string;
+  evidence: CoachEvidence[];
+  captureAdvice: CoachCaptureAdvice[];
+  actions: CoachAction[];
+  model: string;
+};
+
+export type GenerativeOperation = 'remove' | 'add' | 'expand';
 
 export type AnalysisResult = {
   versionId: Id;

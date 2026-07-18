@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def _camel(value: str) -> str:
@@ -90,17 +90,96 @@ class SemanticAnalysis(ApiModel):
 
 class LayerStack(ApiModel):
     canvas_transform: dict[str, Any]
+    adjustments: dict[str, float] = Field(default_factory=dict)
     layers: list[dict[str, Any]]
+
+
+CoachTool = Literal[
+    "adjust_global",
+    "adjust_masked",
+    "crop",
+    "straighten",
+    "remove",
+    "add",
+    "expand",
+    "retake",
+]
+
+
+class CoachPreferences(ApiModel):
+    detail: Literal["concise", "detailed"] = "concise"
+    skill_level: Literal["beginner", "enthusiast", "professional"] = "enthusiast"
+    desired_mood: str = Field(default="", max_length=120)
 
 
 class CoachRequest(ApiModel):
     analysis: AnalysisResult
     question: str = Field(min_length=1, max_length=500)
+    preferences: CoachPreferences = Field(default_factory=CoachPreferences)
+    layer_stack: LayerStack | None = None
+    selected_issue_id: str | None = None
+    available_tools: list[CoachTool] = Field(default_factory=list, max_length=8)
+
+
+class CoachEvidence(ApiModel):
+    path: str = Field(min_length=1, max_length=120)
+    value: str | float | int | bool | None = None
+    meaning: str = Field(min_length=1, max_length=180)
+
+
+class CoachCaptureAdvice(ApiModel):
+    setting: Literal["iso", "aperture", "shutter", "focal-length", "distance", "stability", "lighting"]
+    value: str | None = Field(default=None, max_length=120)
+    tradeoff: str | None = Field(default=None, max_length=180)
+    based_on: list[str] = Field(default_factory=list, max_length=6)
+
+
+class CoachAction(ApiModel):
+    id: str = Field(min_length=1, max_length=80)
+    tool: CoachTool
+    label: str = Field(min_length=1, max_length=48)
+    reason: str = Field(min_length=1, max_length=180)
+    requires_confirmation: bool = True
+    adjustments: dict[str, float] | None = None
+    target: Region | None = None
+    prompt: str | None = Field(default=None, max_length=500)
+    canvas_transform: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def validate_tool_contract(self) -> "CoachAction":
+        adjustment_keys = {
+            "exposure", "contrast", "highlights", "shadows", "temperature", "tint",
+            "saturation", "vibrance", "sharpening", "denoise", "grain", "vignette",
+        }
+        if self.adjustments:
+            if set(self.adjustments) - adjustment_keys:
+                raise ValueError("Coach action contains an unsupported adjustment")
+            if any(value < -1 or value > 1 for value in self.adjustments.values()):
+                raise ValueError("Coach adjustment values must stay within -1..1")
+        if self.tool in {"adjust_global", "adjust_masked"} and not self.adjustments:
+            raise ValueError("Adjustment tools require adjustments")
+        if self.tool in {"adjust_masked", "remove", "add"} and self.target is None:
+            raise ValueError(f"{self.tool} requires an explicit target")
+        if self.tool == "add" and not self.prompt:
+            raise ValueError("add requires a prompt describing the element")
+        if self.tool in {"crop", "straighten"} and not self.canvas_transform:
+            raise ValueError(f"{self.tool} requires a canvas transform")
+        if self.tool == "expand":
+            expansion = (self.canvas_transform or {}).get("expansion")
+            if not isinstance(expansion, dict) or sum(float(expansion.get(side, 0)) > 0 for side in ("top", "right", "bottom", "left")) != 1:
+                raise ValueError("expand requires one positive canvas expansion side")
+        if not self.requires_confirmation:
+            raise ValueError("Coach actions must require confirmation")
+        return self
 
 
 class CoachResponse(ApiModel):
-    answer: str
-    model: str
+    headline: str = Field(min_length=1, max_length=100)
+    reason: str = Field(min_length=1, max_length=240)
+    evidence: list[CoachEvidence] = Field(default_factory=list, max_length=4)
+    capture_advice: list[CoachCaptureAdvice] = Field(default_factory=list, max_length=3)
+    actions: list[CoachAction] = Field(default_factory=list, max_length=2)
+    model: str = ""
 
 
 class PortfolioReview(ApiModel):
@@ -126,3 +205,4 @@ class GenerativePatchResult(ApiModel):
     drift_score: float
     model: str
     source_version_id: str
+    expansion: dict[Literal["top", "right", "bottom", "left"], int] | None = None

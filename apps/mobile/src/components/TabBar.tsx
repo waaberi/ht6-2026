@@ -1,50 +1,75 @@
+import { Ionicons } from '@expo/vector-icons';
+import type { ComponentProps } from 'react';
 import React from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { colors } from './theme';
+import { colors, layout, spacing, typography } from './theme';
 
-export type MainTab = 'camera' | 'library' | 'portfolio' | 'looks' | 'settings';
+export type MainTab = 'camera' | 'library' | 'settings';
 
-const items: Array<{ id: MainTab; label: string; glyph: string }> = [
-  { id: 'camera', label: 'Camera', glyph: '◎' },
-  { id: 'library', label: 'Library', glyph: '▦' },
-  { id: 'portfolio', label: 'Portfolio', glyph: '◇' },
-  { id: 'looks', label: 'Looks', glyph: '◐' },
-  { id: 'settings', label: 'Settings', glyph: '⚙' },
+type IoniconName = ComponentProps<typeof Ionicons>['name'];
+
+const items: Array<{ id: MainTab; label: string; icon: IoniconName; activeIcon: IoniconName }> = [
+  { id: 'camera', label: 'Camera', icon: 'camera-outline', activeIcon: 'camera' },
+  { id: 'library', label: 'Library', icon: 'images-outline', activeIcon: 'images' },
+  { id: 'settings', label: 'Settings', icon: 'settings-outline', activeIcon: 'settings' },
 ];
 
-export const TabBar = ({ active, onChange }: { active: MainTab; onChange: (tab: MainTab) => void }) => (
-  <View style={styles.bar}>
-    {items.map((item) => {
-      const selected = item.id === active;
-      return (
-        <Pressable
-          key={item.id}
-          onPress={() => onChange(item.id)}
-          style={styles.item}
-          accessibilityRole="tab"
-          accessibilityState={{ selected }}
-        >
-          <Text style={[styles.glyph, selected && styles.selected]}>{item.glyph}</Text>
-          <Text style={[styles.label, selected && styles.selected]}>{item.label}</Text>
-        </Pressable>
-      );
-    })}
-  </View>
-);
+export const TabBar = ({ active, onChange }: { active: MainTab; onChange: (tab: MainTab) => void }) => {
+  const insets = useSafeAreaInsets();
+
+  return (
+    <View style={[styles.bar, { paddingBottom: Math.max(insets.bottom, spacing.xs) }]}>
+      {items.map((item) => {
+        const selected = item.id === active;
+        return (
+          <Pressable
+            key={item.id}
+            onPress={() => onChange(item.id)}
+            style={({ pressed }) => [styles.item, pressed && styles.pressed]}
+            accessibilityRole="tab"
+            accessibilityLabel={item.label}
+            accessibilityState={{ selected }}
+          >
+            <View style={styles.iconWrap}>
+              <Ionicons
+                name={selected ? item.activeIcon : item.icon}
+                size={23}
+                color={selected ? colors.text : colors.textSecondary}
+              />
+            </View>
+            <Text style={[styles.label, selected && styles.selectedLabel]}>{item.label}</Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+};
 
 const styles = StyleSheet.create({
   bar: {
-    minHeight: 70,
-    paddingBottom: 6,
+    minHeight: 64,
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: colors.panel,
-    borderTopColor: colors.line,
+    backgroundColor: 'rgba(34, 26, 27, 0.98)',
+    borderTopColor: colors.outline,
     borderTopWidth: StyleSheet.hairlineWidth,
   },
-  item: { flex: 1, minHeight: 54, alignItems: 'center', justifyContent: 'center', gap: 2 },
-  glyph: { color: colors.muted, fontSize: 20 },
-  label: { color: colors.muted, fontSize: 10, letterSpacing: 0.2 },
-  selected: { color: colors.lime },
+  item: {
+    flex: 1,
+    minHeight: layout.minTouchTarget,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+  },
+  iconWrap: {
+    width: 40,
+    height: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  label: { color: colors.textSecondary, ...typography.caption, fontWeight: '600' },
+  selectedLabel: { color: colors.text, fontWeight: '700' },
+  pressed: { opacity: 0.72 },
 });
