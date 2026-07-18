@@ -40,7 +40,14 @@ from .providers import (
     GeminiProvider,
     SemanticProviderResult,
 )
-from .renderer import canvas_content_size, encode_image, export_exif, render_layer_stack, resolve_canvas_expansion
+from .renderer import (
+    canvas_content_size,
+    encode_image,
+    export_exif,
+    render_generation_source,
+    render_layer_stack,
+    resolve_canvas_expansion,
+)
 
 MAX_UPLOAD_BYTES = int(os.getenv("EXPOSURE_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 SEMANTIC_TIMEOUT_SECONDS = max(5.0, min(40.0, float(os.getenv("EXPOSURE_SEMANTIC_TIMEOUT_SECONDS", "25"))))
@@ -284,7 +291,7 @@ async def generative_layer(
     except ValidationError as error:
         raise HTTPException(422, "target_json and layer_stack_json must use Exposure contracts") from error
     asset_bytes = await _read_assets(assets, asset_ids_json)
-    rendered = await asyncio.to_thread(render_layer_stack, image_bytes, stack, asset_bytes)
+    rendered = await asyncio.to_thread(render_generation_source, image_bytes, stack, asset_bytes)
     cumulative_expansion: CanvasExpansion | None = None
     if operation == "expand":
         try:
