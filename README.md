@@ -8,7 +8,7 @@ immutable original + reversible canvas transform + ordered layer stack
 
 The repository contains:
 
-- `apps/mobile`: Expo SDK 57 / React Native application with camera and Android file import, local offline persistence, Skia previews, coaching, layers, history, portfolio curation, Looks, and Supabase sync.
+- `apps/mobile`: Expo SDK 54 / React Native application with camera and Android file import, local offline persistence, Skia previews, coaching, layers, history, portfolio curation, Looks, and Supabase sync.
 - `services/api`: FastAPI service for deterministic analysis, validated Gemini orchestration, authoritative rendering, portfolio/style computation, and localized Nano Banana patches.
 - `supabase`: Postgres schema, owner-only RLS, immutable versions, private Storage buckets, Realtime jobs, and pgTAP security tests.
 
@@ -28,9 +28,7 @@ pnpm dev
 
 Use `pnpm dev` every day. It starts the emulator when needed, starts Metro, opens Exposure, and applies JavaScript/TypeScript edits with Fast Refresh without rebuilding with Gradle. Run `pnpm android` again only after changing `app.json`, native dependencies, or files under `apps/mobile/plugins/`.
 
-For a physical Android phone, install Expo Go, connect the phone to the same Wi-Fi network, run `pnpm phone`, and scan the terminal QR code in Expo Go.
-
-On eduroam, run `pnpm phone:hotspot` instead. It starts the `uottawashed` hotspot when needed, serves the API and Expo Go at `10.42.0.1`, and prints one QR code for every teammate connected to the hotspot. Press Ctrl+C when finished, then run `uottawashed off`.
+For physical Android phones and iPhones, install Expo Go and Tailscale, join the same tailnet as the development machine, and run `pnpm phone`. The command starts the API and Expo Go on the development machine's Tailscale address without changing its Wi-Fi settings. Scan the terminal QR code in Expo Go on Android or with the Camera app on iPhone.
 
 The first development launch shows Expo's one-time developer-menu introduction. Press **Continue**, then close the menu to reveal Exposure. Fast Refresh is enabled by default.
 

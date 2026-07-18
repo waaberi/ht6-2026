@@ -4,45 +4,35 @@ import { spawn, spawnSync } from 'node:child_process';
 import process from 'node:process';
 
 const workspaceRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const hotspotAddress = '10.42.0.1';
-const apiUrl = `http://${hotspotAddress}:8000`;
 const forwardedArgs = process.argv.slice(2);
 const expoArgs = forwardedArgs[0] === '--' ? forwardedArgs.slice(1) : forwardedArgs;
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 const executable = (name) => process.platform === 'win32' ? `${name}.cmd` : name;
 
-const hotspotIsReady = () => {
-  const result = spawnSync('ip', ['-4', '-o', 'address', 'show', 'dev', 'ap0'], {
-    encoding: 'utf8',
-  });
-  return result.status === 0 && result.stdout.includes(`${hotspotAddress}/24`);
-};
-
-if (!hotspotIsReady()) {
-  console.log('Starting the uottawashed hotspot...');
-  const result = spawnSync('uottawashed', ['on'], { stdio: 'inherit' });
-  if (result.error) {
-    console.error(`Could not start uottawashed: ${result.error.message}`);
-    process.exit(1);
-  }
-  if (result.status !== 0) process.exit(result.status ?? 1);
+const tailscale = spawnSync('tailscale', ['ip', '-4'], { encoding: 'utf8' });
+if (tailscale.error) {
+  console.error(`Could not run Tailscale: ${tailscale.error.message}`);
+  process.exit(1);
 }
+if (tailscale.status !== 0) process.exit(tailscale.status ?? 1);
 
-console.log('Waiting for the hotspot at 10.42.0.1...');
-for (let attempt = 0; attempt < 120 && !hotspotIsReady(); attempt += 1) {
-  await delay(1000);
-}
-if (!hotspotIsReady()) {
-  console.error('uottawashed did not become ready within 2 minutes.');
+const tailscaleAddress = tailscale.stdout
+  .split('\n')
+  .map((address) => address.trim())
+  .find((address) => /^\d{1,3}(?:\.\d{1,3}){3}$/.test(address));
+if (!tailscaleAddress) {
+  console.error('Tailscale is not connected. Open Tailscale, sign in, and try again.');
   process.exit(1);
 }
 
-console.log('Hotspot ready. Teammates can connect to uottawashed.');
+const apiUrl = `http://${tailscaleAddress}:8000`;
+console.log(`Tailscale ready at ${tailscaleAddress}.`);
+console.log('Teammates must install Tailscale and join the same tailnet.');
 
 const env = {
   ...process.env,
   EXPO_PUBLIC_API_URL: apiUrl,
-  REACT_NATIVE_PACKAGER_HOSTNAME: hotspotAddress,
+  REACT_NATIVE_PACKAGER_HOSTNAME: tailscaleAddress,
 };
 const children = [];
 let stopping = false;
@@ -105,7 +95,7 @@ const api = spawn(executable('uv'), [
   '--env-file',
   '.env.local',
   '--host',
-  hotspotAddress,
+  tailscaleAddress,
 ], {
   cwd: workspaceRoot,
   env,
@@ -126,11 +116,11 @@ for (let attempt = 0; attempt < 120 && !apiReady; attempt += 1) {
   if (!apiReady) await delay(250);
 }
 if (!apiReady) {
-  console.error('Exposure API did not become ready at http://10.42.0.1:8000.');
+  console.error(`Exposure API did not become ready at ${apiUrl}.`);
   stopChildren(1);
   await new Promise(() => {});
 }
-console.log('API ready at http://10.42.0.1:8000');
+console.log(`API ready at ${apiUrl}`);
 
 const expo = spawn(executable('pnpm'), [
   '--filter',
@@ -150,4 +140,4 @@ const expo = spawn(executable('pnpm'), [
 watchChild(expo, 'Expo Go server');
 
 console.log('Scan the Expo Go QR code below. Press Ctrl+C when finished.');
-console.log('The hotspot stays on afterward; run `uottawashed off` to restore normal Wi-Fi performance.');
+console.log('This workflow does not change Wi-Fi or hotspot settings.');
