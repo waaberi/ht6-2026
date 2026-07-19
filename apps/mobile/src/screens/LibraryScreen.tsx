@@ -7,6 +7,7 @@ import {
   AccessibilityInfo,
   ActivityIndicator,
   Alert,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -14,6 +15,7 @@ import {
   View,
   useWindowDimensions,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { EditedPhotoThumbnail } from '../components/EditedPhotoThumbnail';
 import { colors, layout, radii, spacing, typography } from '../components/theme';
@@ -21,6 +23,8 @@ import { ActionButton } from '../components/ui/ActionButton';
 import { EmptyState } from '../components/ui/EmptyState';
 import { ScreenHeader } from '../components/ui/ScreenHeader';
 import { StickyActionBar } from '../components/ui/StickyActionBar';
+import { resolveCanvasExpansion, visibleRotatedCanvasSize } from '../domain/canvasTransforms';
+import { currentVersion } from '../domain/layers';
 import type { PhotoRecord } from '../domain/types';
 import {
   reviewPortfolio,
@@ -30,6 +34,20 @@ import { persistPortfolioReview } from '../services/sync';
 import { useExposure } from '../state/ExposureContext';
 
 type LibraryView = 'browse' | 'select' | 'portfolio-result';
+const PORTFOLIO_INK = '#181714';
+const PORTFOLIO_PAPER = '#F4F0E7';
+
+const portfolioAspectFor = (photo: PhotoRecord) => {
+  const transform = currentVersion(photo).stack.canvasTransform;
+  const canvas = visibleRotatedCanvasSize(photo.width, photo.height, transform.rotationDegrees);
+  const crop = transform.crop ?? { x: 0, y: 0, width: 1, height: 1 };
+  const contentWidth = canvas.width * crop.width;
+  const contentHeight = canvas.height * crop.height;
+  const expansion = resolveCanvasExpansion(transform.expansion, contentWidth, contentHeight);
+  const aspect = (contentWidth + expansion.left + expansion.right)
+    / Math.max(1, contentHeight + expansion.top + expansion.bottom);
+  return Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
+};
 
 type LibraryScreenProps = {
   onOpenStudio: () => void;
@@ -325,26 +343,112 @@ const PortfolioResult = ({ review, photoById, onReset }: {
   review: PortfolioReview;
   photoById: Map<string, PhotoRecord>;
   onReset: () => void;
-}) => (
-  <ScrollView contentContainerStyle={styles.resultContent}>
-    <Text accessibilityRole="header" style={styles.resultTitle}>Recommended order</Text>
-    {review.summary ? <Text numberOfLines={3} style={styles.resultSummary}>{review.summary}</Text> : null}
-    <View style={styles.ranking}>
-      {review.orderedPhotoIds.map((id, index) => {
-        const photo = photoById.get(id);
-        if (!photo) return null;
-        return (
-          <View key={id} style={styles.rankRow}>
-            <Text style={styles.rankNumber}>{index + 1}</Text>
-            <EditedPhotoThumbnail photo={photo} style={styles.rankImage} />
-            <Text numberOfLines={2} style={styles.rankText}>{review.explanations[id] ?? photo.originalName}</Text>
-          </View>
-        );
-      })}
-    </View>
-    <ActionButton label="Curate another set" variant="outlined" onPress={onReset} />
-  </ScrollView>
-);
+}) => {
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const orderedPhotos = review.orderedPhotoIds
+    .map((id) => photoById.get(id))
+    .filter((photo): photo is PhotoRecord => Boolean(photo));
+  return (
+    <>
+      <ScrollView contentContainerStyle={styles.resultContent}>
+        <Text accessibilityRole="header" style={styles.resultTitle}>Recommended order</Text>
+        {review.summary ? <Text style={styles.resultSummary}>{review.summary}</Text> : null}
+        <View style={styles.ranking}>
+          {orderedPhotos.map((photo, index) => (
+            <View key={photo.id} style={styles.rankRow}>
+              <Text style={styles.rankNumber}>{index + 1}</Text>
+              <EditedPhotoThumbnail photo={photo} style={styles.rankImage} />
+              <Text style={styles.rankText}>{review.explanations[photo.id] ?? photo.originalName}</Text>
+            </View>
+          ))}
+        </View>
+        <View style={styles.resultActions}>
+          <ActionButton label="Preview portfolio" icon="eye-outline" onPress={() => setPreviewOpen(true)} />
+          <ActionButton label="Curate another set" variant="outlined" onPress={onReset} />
+        </View>
+      </ScrollView>
+      <PortfolioPreview
+        photos={orderedPhotos}
+        visible={previewOpen}
+        onClose={() => setPreviewOpen(false)}
+      />
+    </>
+  );
+};
+
+const PortfolioPreview = ({
+  photos,
+  visible,
+  onClose,
+}: {
+  photos: PhotoRecord[];
+  visible: boolean;
+  onClose: () => void;
+}) => {
+  const { height } = useWindowDimensions();
+  return (
+    <Modal
+      animationType="fade"
+      onRequestClose={onClose}
+      presentationStyle="fullScreen"
+      statusBarTranslucent
+      visible={visible}
+    >
+      <View style={styles.portfolioPreview}>
+        <FlashList
+          data={photos}
+          keyExtractor={(photo) => photo.id}
+          ListHeaderComponent={(
+            <View style={[styles.portfolioHero, { height }]}>
+              <Text accessibilityRole="header" style={styles.portfolioHeroTitle}>photography portfolio</Text>
+              <View style={styles.portfolioScrollCue}>
+                <Text style={styles.portfolioScrollText}>scroll to view</Text>
+                <Ionicons color={PORTFOLIO_INK} name="arrow-down" size={17} />
+              </View>
+            </View>
+          )}
+          ListFooterComponent={(
+            <SafeAreaView edges={['bottom']} style={styles.portfolioFooter}>
+              <Text style={styles.portfolioFooterText}>selected work</Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Exit portfolio preview"
+                onPress={onClose}
+                style={({ pressed }) => [styles.portfolioExit, pressed && styles.portfolioExitPressed]}
+              >
+                <Text style={styles.portfolioExitText}>Exit preview</Text>
+                <Ionicons color={PORTFOLIO_PAPER} name="close" size={19} />
+              </Pressable>
+            </SafeAreaView>
+          )}
+          renderItem={({ item: photo, index }) => {
+            return (
+              <View style={styles.portfolioPhotoBlock}>
+                <Text style={styles.portfolioIndex}>{String(index + 1).padStart(2, '0')}</Text>
+                <EditedPhotoThumbnail
+                  photo={photo}
+                  style={[styles.portfolioPhoto, { aspectRatio: portfolioAspectFor(photo) }]}
+                />
+              </View>
+            );
+          }}
+          showsVerticalScrollIndicator={false}
+          style={styles.portfolioList}
+        />
+        <SafeAreaView edges={['top']} pointerEvents="box-none" style={styles.portfolioControls}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Close portfolio preview"
+            onPress={onClose}
+            style={({ pressed }) => [styles.portfolioClose, pressed && styles.portfolioClosePressed]}
+          >
+            <Ionicons color={PORTFOLIO_PAPER} name="close" size={24} />
+          </Pressable>
+        </SafeAreaView>
+      </View>
+    </Modal>
+  );
+};
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.background },
@@ -425,6 +529,24 @@ const styles = StyleSheet.create({
   rankNumber: { width: 24, color: colors.text, ...typography.section, fontWeight: '800', textAlign: 'center' },
   rankImage: { width: 52, height: 52, borderRadius: radii.sm, backgroundColor: colors.surface },
   rankText: { flex: 1, color: colors.text, ...typography.label },
+  resultActions: { gap: spacing.sm },
+  portfolioPreview: { flex: 1, backgroundColor: PORTFOLIO_PAPER },
+  portfolioList: { flex: 1 },
+  portfolioHero: { alignItems: 'center', justifyContent: 'center', paddingHorizontal: spacing.xl, backgroundColor: PORTFOLIO_PAPER },
+  portfolioHeroTitle: { maxWidth: 720, color: PORTFOLIO_INK, fontSize: 48, lineHeight: 56, fontWeight: '300', letterSpacing: -1.8, textAlign: 'center', textTransform: 'lowercase' },
+  portfolioScrollCue: { position: 'absolute', bottom: spacing.xl, flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
+  portfolioScrollText: { color: PORTFOLIO_INK, ...typography.caption, letterSpacing: 1.2, textTransform: 'uppercase' },
+  portfolioPhotoBlock: { paddingHorizontal: spacing.lg, paddingTop: spacing.xl, paddingBottom: 72, backgroundColor: PORTFOLIO_PAPER },
+  portfolioIndex: { color: PORTFOLIO_INK, ...typography.caption, letterSpacing: 1.4, marginBottom: spacing.sm },
+  portfolioPhoto: { width: '100%', backgroundColor: '#D8D3C9' },
+  portfolioFooter: { minHeight: 260, alignItems: 'center', justifyContent: 'center', paddingHorizontal: spacing.lg, paddingTop: spacing.xl, backgroundColor: PORTFOLIO_PAPER },
+  portfolioFooterText: { color: PORTFOLIO_INK, ...typography.caption, letterSpacing: 2, textTransform: 'uppercase' },
+  portfolioExit: { minWidth: 176, minHeight: 48, marginTop: spacing.lg, paddingHorizontal: spacing.md, borderRadius: 24, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.sm, backgroundColor: PORTFOLIO_INK },
+  portfolioExitPressed: { opacity: 0.78 },
+  portfolioExitText: { color: PORTFOLIO_PAPER, ...typography.label, fontWeight: '800' },
+  portfolioControls: { position: 'absolute', top: 0, left: 0, right: 0, alignItems: 'flex-end', paddingTop: spacing.md, paddingHorizontal: spacing.lg },
+  portfolioClose: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(24,23,20,0.84)' },
+  portfolioClosePressed: { backgroundColor: PORTFOLIO_INK },
   taskActions: { flexDirection: 'row', gap: spacing.sm },
   importFab: {
     position: 'absolute',
