@@ -7,8 +7,15 @@ import process from 'node:process';
 const workspaceRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const forwardedArgs = process.argv.slice(2);
 const expoArgs = forwardedArgs[0] === '--' ? forwardedArgs.slice(1) : forwardedArgs;
+const isWindows = process.platform === 'win32';
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-const executable = (name) => process.platform === 'win32' ? `${name}.cmd` : name;
+
+const spawnTool = (command, args, options) => {
+  if (isWindows && command === 'pnpm') {
+    return spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', 'pnpm.cmd', ...args], options);
+  }
+  return spawn(isWindows ? `${command}.exe` : command, args, options);
+};
 
 const tailscale = spawnSync('tailscale', ['ip', '-4'], { encoding: 'utf8' });
 if (tailscale.error) {
@@ -63,7 +70,7 @@ let stopping = false;
 const signalChildGroup = (child, signal) => {
   if (!child.pid) return;
   try {
-    if (process.platform === 'win32') child.kill(signal);
+    if (isWindows) spawnSync('taskkill', ['/pid', String(child.pid), '/t', '/f'], { stdio: 'ignore' });
     else process.kill(-child.pid, signal);
   } catch (error) {
     if (error.code !== 'ESRCH') throw error;
@@ -108,7 +115,7 @@ const watchChild = (child, name) => {
 process.on('SIGINT', () => stopChildren(0, 'SIGINT'));
 process.on('SIGTERM', () => stopChildren(0, 'SIGTERM'));
 
-const api = spawn(executable('uv'), [
+const api = spawnTool('uv', [
   '--directory',
   'services/api',
   'run',
@@ -122,7 +129,7 @@ const api = spawn(executable('uv'), [
 ], {
   cwd: workspaceRoot,
   env,
-  detached: process.platform !== 'win32',
+  detached: !isWindows,
   stdio: 'inherit',
 });
 watchChild(api, 'Exposure API');
@@ -145,7 +152,7 @@ if (!apiReady) {
 }
 console.log(`API ready at ${apiUrl}`);
 
-const expo = spawn(executable('pnpm'), [
+const expo = spawnTool('pnpm', [
   '--filter',
   'exposure',
   'exec',
@@ -157,7 +164,7 @@ const expo = spawn(executable('pnpm'), [
 ], {
   cwd: workspaceRoot,
   env,
-  detached: process.platform !== 'win32',
+  detached: !isWindows,
   stdio: 'inherit',
 });
 watchChild(expo, 'Expo Go server');
