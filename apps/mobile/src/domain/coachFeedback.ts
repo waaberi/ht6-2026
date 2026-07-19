@@ -7,6 +7,7 @@ export type CoachFeedbackItem = {
   section: CoachFeedbackSection;
   title: string;
   description: string;
+  target?: Region;
   adjustments?: AdjustmentValues;
   crop?: Region;
   changed: boolean;
@@ -37,6 +38,19 @@ const target = (current: number | undefined, delta: number, minimum = -1, maximu
 const hasAdjustmentChange = (current: AdjustmentValues, next: AdjustmentValues) =>
   (Object.keys(next) as Array<keyof AdjustmentValues>)
     .some((key) => Math.abs((next[key] ?? 0) - (current[key] ?? 0)) > 0.001);
+
+const strongestTarget = (
+  analysis: AnalysisResult,
+  categories: Array<(typeof analysis.issues)[number]['category']>,
+) => {
+  const candidates = [
+    ...analysis.issues.filter((issue) => categories.includes(issue.category)),
+    ...analysis.signals.filter((signal) => categories.includes(signal.category)),
+  ];
+  return candidates.sort((left, right) => (
+    right.severity * right.confidence - left.severity * left.confidence
+  ))[0]?.location ?? FULL_FRAME;
+};
 
 const touchesFrameEdge = (region: Region) => (
   region.x < 0.24
@@ -104,6 +118,7 @@ const cropRecommendation = (analysis: AnalysisResult, transform: CanvasTransform
     section: 'crop',
     title: `Crop the ${relative.edge} edge`,
     description: `Trim the ${relative.edge} edge to remove the strongest border distraction while retaining most of the frame.`,
+    target: source.location,
     crop,
     changed: true,
   };
@@ -130,6 +145,7 @@ export const buildCoachFeedback = (
     highlights: target(current.highlights, -clamp(analysis.lighting.clippedHighlights * 5, 0, 0.7)),
     shadows: target(current.shadows, clamp(analysis.lighting.clippedShadows * 3, 0, 0.65)),
   };
+  const lightChanged = hasAdjustmentChange(current, light);
   const lightItem: CoachFeedbackItem = {
     section: 'light',
     title: meanLuminance < 0.42
@@ -142,8 +158,9 @@ export const buildCoachFeedback = (
       : meanLuminance > 0.62
         ? 'Lower exposure and highlights to recover bright detail without crushing shadows.'
         : 'Keep overall exposure stable while recovering any clipped highlight or shadow detail.',
+    target: lightChanged ? strongestTarget(analysis, ['lighting']) : undefined,
     adjustments: light,
-    changed: hasAdjustmentChange(current, light),
+    changed: lightChanged,
   };
 
   const meanSaturation = metric(analysis, 'meanSaturation', 0.28);
@@ -162,6 +179,7 @@ export const buildCoachFeedback = (
     saturation: target(current.saturation, saturationDelta),
     vibrance: target(current.vibrance, vibranceDelta),
   };
+  const colorChanged = hasAdjustmentChange(current, color);
   const colorItem: CoachFeedbackItem = {
     section: 'color',
     title: meanSaturation < 0.22
@@ -174,8 +192,9 @@ export const buildCoachFeedback = (
       : meanSaturation > 0.72
         ? 'Reduce saturation while preserving natural color contrast and correcting the cast.'
         : 'Keep color intensity natural and make a small white-balance correction where needed.',
+    target: colorChanged ? strongestTarget(analysis, ['color']) : undefined,
     adjustments: color,
-    changed: hasAdjustmentChange(current, color),
+    changed: colorChanged,
   };
 
   const sharpness = metric(analysis, 'sharpnessLaplacianVariance', 0.003);
@@ -196,6 +215,7 @@ export const buildCoachFeedback = (
     sharpening: target(current.sharpening, sharpeningDelta, 0, 1),
     denoise: target(current.denoise, denoiseDelta, 0, 1),
   };
+  const detailChanged = hasAdjustmentChange(current, detail);
   const detailItem: CoachFeedbackItem = {
     section: 'detail',
     title: isSoft ? 'Clarify soft detail' : isHarsh ? 'Soften harsh detail' : noise > 0.035 ? 'Reduce visible noise' : 'Detail is balanced',
@@ -206,8 +226,9 @@ export const buildCoachFeedback = (
         : noise > 0.035
           ? 'Use denoise to calm texture while leaving sharpening near its current level.'
           : 'Keep sharpening and denoise restrained because the measured detail is already balanced.',
+    target: detailChanged ? strongestTarget(analysis, ['focus']) : undefined,
     adjustments: detail,
-    changed: hasAdjustmentChange(current, detail),
+    changed: detailChanged,
   };
 
   const cropItem = cropRecommendation(analysis, transform);

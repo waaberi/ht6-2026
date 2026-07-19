@@ -47,7 +47,41 @@ test('Coach feedback always returns Light, Color, Detail, and Crop in order', ()
   assert.deepEqual(Object.keys(feedback.items[0].adjustments ?? {}), ['exposure', 'contrast', 'highlights', 'shadows']);
   assert.deepEqual(Object.keys(feedback.items[1].adjustments ?? {}), ['temperature', 'tint', 'saturation', 'vibrance']);
   assert.deepEqual(Object.keys(feedback.items[2].adjustments ?? {}), ['sharpening', 'denoise']);
+  assert.deepEqual(feedback.items[0].target, { x: 0, y: 0, width: 1, height: 1 });
+  assert.deepEqual(feedback.items[3].target, analysisFixture().signals[0].location);
   assert.ok((feedback.items[3].crop?.x ?? 0) > 0);
+});
+
+test('Coach feedback targets the strongest matching analysis region', () => {
+  const analysis = analysisFixture();
+  analysis.issues = [
+    {
+      id: 'dim-corner',
+      category: 'lighting',
+      title: 'Dim corner',
+      explanation: 'A corner is dark.',
+      evidence: {},
+      severity: 0.4,
+      confidence: 0.8,
+      location: { x: 0, y: 0, width: 0.2, height: 0.2 },
+      recommendedAction: 'Lift the shadows.',
+    },
+    {
+      id: 'deep-shadow',
+      category: 'lighting',
+      title: 'Deep shadow',
+      explanation: 'The subject is underexposed.',
+      evidence: {},
+      severity: 0.9,
+      confidence: 0.9,
+      location: { x: 0.3, y: 0.2, width: 0.4, height: 0.5 },
+      recommendedAction: 'Raise exposure.',
+    },
+  ];
+
+  const feedback = buildCoachFeedback(analysis, {}, identityCanvasTransform());
+
+  assert.deepEqual(feedback.items[0].target, analysis.issues[1].location);
 });
 
 test('accepting Coach feedback replaces manual tweaks and preserves non-adjustment layers', () => {

@@ -11,7 +11,7 @@ import {
   useImage,
 } from '@shopify/react-native-skia';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { PanResponder, StyleSheet, View } from 'react-native';
+import { Animated, Easing, PanResponder, StyleSheet, View } from 'react-native';
 
 import { addPreviewAdjustments, adjustmentPreviewMatrix, globalPreviewAdjustments } from '../domain/adjustmentPreview';
 import { quarterTurnsForRotation, resolveCanvasExpansion } from '../domain/canvasTransforms';
@@ -24,6 +24,7 @@ export const PhotoCanvas = ({
   uri,
   stack,
   analysis,
+  emphasizedRegion,
   target,
   onTargetChange,
   showIssues = true,
@@ -43,6 +44,7 @@ export const PhotoCanvas = ({
   uri: string;
   stack: LayerStack;
   analysis?: AnalysisResult;
+  emphasizedRegion?: Region;
   target?: Region;
   onTargetChange?: (target: Region) => void;
   showIssues?: boolean;
@@ -71,6 +73,32 @@ export const PhotoCanvas = ({
   const swapsDimensions = Math.abs(quarterTurns) % 2 === 1;
   const straightenDegrees = rotationDegrees - quarterTurns * 90;
   const rotation = -rotationDegrees * Math.PI / 180;
+  const emphasisOpacity = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (!emphasizedRegion) {
+      emphasisOpacity.stopAnimation();
+      emphasisOpacity.setValue(0);
+      return undefined;
+    }
+    emphasisOpacity.setValue(0.06);
+    const animation = Animated.loop(Animated.sequence([
+      Animated.timing(emphasisOpacity, {
+        toValue: 0.3,
+        duration: 460,
+        easing: Easing.inOut(Easing.ease),
+        useNativeDriver: true,
+      }),
+      Animated.timing(emphasisOpacity, {
+        toValue: 0.06,
+        duration: 460,
+        easing: Easing.inOut(Easing.ease),
+        useNativeDriver: true,
+      }),
+    ]));
+    animation.start();
+    return () => animation.stop();
+  }, [emphasisOpacity, emphasizedRegion]);
 
   useEffect(() => {
     if (!image || !onImageSizeChange) return;
@@ -239,6 +267,12 @@ export const PhotoCanvas = ({
     width: target.width * geometry.display.width,
     height: target.height * geometry.display.height,
   } : undefined;
+  const emphasizedRect = emphasizedRegion ? {
+    x: geometry.display.x + emphasizedRegion.x * geometry.display.width,
+    y: geometry.display.y + emphasizedRegion.y * geometry.display.height,
+    width: emphasizedRegion.width * geometry.display.width,
+    height: emphasizedRegion.height * geometry.display.height,
+  } : undefined;
 
   return (
     <View
@@ -385,6 +419,22 @@ export const PhotoCanvas = ({
           ) : null}
         </Group>
       </Canvas>
+      {emphasizedRect ? (
+        <View
+          pointerEvents="none"
+          style={[
+            styles.emphasizedRegion,
+            {
+              left: emphasizedRect.x,
+              top: emphasizedRect.y,
+              width: emphasizedRect.width,
+              height: emphasizedRect.height,
+            },
+          ]}
+        >
+          <Animated.View style={[StyleSheet.absoluteFillObject, styles.emphasizedRegionFlash, { opacity: emphasisOpacity }]} />
+        </View>
+      ) : null}
       {editingCrop && onCropChange && onCropCommit ? (
         <View
           pointerEvents="box-none"
@@ -465,5 +515,7 @@ const OverlayImage = ({
 
 const styles = StyleSheet.create({
   frame: { flex: 1, overflow: 'hidden', backgroundColor: colors.canvas },
+  emphasizedRegion: { position: 'absolute', borderWidth: 2, borderColor: 'rgba(255,255,255,0.96)', zIndex: 2 },
+  emphasizedRegionFlash: { backgroundColor: '#FFFFFF' },
   cropViewport: { position: 'absolute' },
 });

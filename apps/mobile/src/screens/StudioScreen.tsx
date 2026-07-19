@@ -4,7 +4,7 @@ import Slider from '@react-native-community/slider';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type LayoutRectangle } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { PhotoCanvas } from '../components/PhotoCanvas';
@@ -89,6 +89,11 @@ type ReusableLayerSource = {
   uri: string;
   mimeType: 'image/jpeg' | 'image/png';
 };
+type CoachPanelScrollMetrics = {
+  offsetY: number;
+  viewportHeight: number;
+};
+type CoachPanelScrollTracker = (metrics: CoachPanelScrollMetrics) => void;
 
 const aspectLabel = (aspect: number) => {
   if (Math.abs(aspect - 1) < 0.001) return '1:1';
@@ -156,6 +161,9 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   const [coachResponse, setCoachResponse] = useState<CoachResponse>();
   const [coachFeedback, setCoachFeedback] = useState<CoachFeedbackPlan>();
   const [feedbackBusy, setFeedbackBusy] = useState(false);
+  const [activeCoachFeedbackSection, setActiveCoachFeedbackSection] = useState<CoachFeedbackSection>();
+  const coachPanelScrollMetricsRef = useRef<CoachPanelScrollMetrics>({ offsetY: 0, viewportHeight: 0 });
+  const coachPanelScrollTrackerRef = useRef<CoachPanelScrollTracker | undefined>(undefined);
   const [coachQuestion, setCoachQuestion] = useState('');
   const [coachBusy, setCoachBusy] = useState(false);
   const [metadataDraft, setMetadataDraft] = useState<EditablePhotoMetadata>(() => (
@@ -226,6 +234,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     [analysis?.issues, dismissedIssueIds],
   );
   const selectedIssue = visibleIssues.find((issue) => issue.id === selectedIssueId) ?? visibleIssues[0];
+  const activeCoachFeedback = coachFeedback?.items.find((item) => item.section === activeCoachFeedbackSection);
   const explicitRecommendation = generativeRecommendationId
     ? visibleIssues.find((issue) => issue.id === generativeRecommendationId)
     : undefined;
@@ -321,6 +330,13 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   useEffect(() => {
     setCoachResponse(undefined);
   }, [version?.id]);
+
+  useEffect(() => {
+    const metrics = { ...coachPanelScrollMetricsRef.current, offsetY: 0 };
+    coachPanelScrollMetricsRef.current = metrics;
+    coachPanelScrollTrackerRef.current?.(metrics);
+    if (tool !== 'coach' || coachEditDraft) setActiveCoachFeedbackSection(undefined);
+  }, [coachEditDraft, tool]);
 
   useEffect(() => {
     setMetadataDraft(editableMetadataFrom(selectedPhoto?.exif ?? {}));
@@ -1205,6 +1221,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
           uri={selectedPhoto.analysisProxyUri}
           stack={previewStack}
           analysis={analysis}
+          emphasizedRegion={tool === 'coach' && !coachEditDraft ? activeCoachFeedback?.target : undefined}
           target={tool === 'ai' && generativeOperation === 'amplify' ? generativeTarget : undefined}
           onTargetChange={tool === 'ai' && generativeOperation === 'amplify' ? updateGenerativeTarget : undefined}
           showIssues={tool === 'coach' && !coachEditDraft} // may be a regression, if so, put false
@@ -1230,6 +1247,23 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
           key={tool}
           contentContainerStyle={styles.panelContent}
           keyboardShouldPersistTaps="handled"
+          onLayout={(event) => {
+            const metrics = {
+              ...coachPanelScrollMetricsRef.current,
+              viewportHeight: event.nativeEvent.layout.height,
+            };
+            coachPanelScrollMetricsRef.current = metrics;
+            coachPanelScrollTrackerRef.current?.(metrics);
+          }}
+          onScroll={(event) => {
+            const metrics = {
+              offsetY: event.nativeEvent.contentOffset.y,
+              viewportHeight: event.nativeEvent.layoutMeasurement.height,
+            };
+            coachPanelScrollMetricsRef.current = metrics;
+            coachPanelScrollTrackerRef.current?.(metrics);
+          }}
+          scrollEventThrottle={32}
           showsVerticalScrollIndicator={false}
         >
           {tool === 'coach' ? (
@@ -1245,12 +1279,15 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
             ) : (
               <CoachPanel
                 analysisBusy={analyzing}
+                activeFeedbackSection={activeCoachFeedbackSection}
                 applying={applying}
                 feedbackBusy={feedbackBusy}
                 feedback={coachFeedback}
                 metadata={metadataDraft}
                 metadataAdvice={metadataAdvice}
                 metadataAdviceBusy={metadataAdviceBusy}
+                scrollMetricsRef={coachPanelScrollMetricsRef}
+                scrollTrackerRef={coachPanelScrollTrackerRef}
                 onAnalyze={analyze}
                 onAccept={() => void acceptAllCoachFeedback()}
                 onMetadataAdvice={() => void requestMetadataAdvice()}
@@ -1258,6 +1295,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
                   setMetadataDraft((current) => ({ ...current, [key]: value }));
                 }}
                 onMetadataCommit={() => void saveMetadataDraft()}
+                onActiveFeedbackChange={setActiveCoachFeedbackSection}
                 onOpenSection={(section) => {
                   setAdjustmentSection(section);
                   setTool('adjust');
@@ -1498,9 +1536,13 @@ const formatCoachTarget = (key: keyof AdjustmentValues, value: number) => {
 
 const CoachFeedbackCard = ({
   item,
+  emphasized,
+  onLayout,
   onOpenSection,
 }: {
   item: CoachFeedbackItem;
+  emphasized: boolean;
+  onLayout: (layout: LayoutRectangle) => void;
   onOpenSection: (section: CoachFeedbackSection) => void;
 }) => {
   const targets = Object.entries(item.adjustments ?? {}) as Array<[keyof AdjustmentValues, number]>;
@@ -1512,7 +1554,13 @@ const CoachFeedbackCard = ({
         ? 'image-filter-center-focus'
         : 'crop';
   return (
-    <View accessibilityLabel={`${item.section} feedback`} style={styles.coachFeedbackCard}>
+    <View
+      accessibilityLabel={`${item.section} feedback`}
+      accessibilityState={{ selected: emphasized }}
+      onLayout={(event) => onLayout(event.nativeEvent.layout)}
+      style={styles.coachFeedbackCard}
+    >
+      {emphasized ? <View pointerEvents="none" style={styles.coachFeedbackCardOutline} /> : null}
       <View style={styles.coachFeedbackHeader}>
         <View style={styles.coachFeedbackSectionTitle}>
           <MaterialCommunityIcons color={colors.textSecondary} name={icon} size={18} />
@@ -1662,34 +1710,90 @@ const MetadataPanel = ({
 
 const CoachPanel = ({
   analysisBusy,
+  activeFeedbackSection,
   applying,
   feedbackBusy,
   feedback,
   metadata,
   metadataAdvice,
   metadataAdviceBusy,
+  scrollMetricsRef,
+  scrollTrackerRef,
   onAnalyze,
   onAccept,
+  onActiveFeedbackChange,
   onMetadataAdvice,
   onMetadataChange,
   onMetadataCommit,
   onOpenSection,
 }: {
   analysisBusy: boolean;
+  activeFeedbackSection?: CoachFeedbackSection;
   applying: boolean;
   feedbackBusy: boolean;
   feedback?: CoachFeedbackPlan;
   metadata: EditablePhotoMetadata;
   metadataAdvice?: MetadataAdvice;
   metadataAdviceBusy: boolean;
+  scrollMetricsRef: React.MutableRefObject<CoachPanelScrollMetrics>;
+  scrollTrackerRef: React.MutableRefObject<CoachPanelScrollTracker | undefined>;
   onAnalyze: () => void;
   onAccept: () => void;
+  onActiveFeedbackChange: (section?: CoachFeedbackSection) => void;
   onMetadataAdvice: () => void;
   onMetadataChange: (key: keyof EditablePhotoMetadata, value: string) => void;
   onMetadataCommit: () => void;
   onOpenSection: (section: CoachFeedbackSection) => void;
 }) => {
   const [section, setSection] = useState<CoachPanelSection>('feedback');
+  const feedbackListYRef = useRef<number | undefined>(undefined);
+  const feedbackCardLayoutsRef = useRef<Partial<Record<CoachFeedbackSection, LayoutRectangle>>>({});
+  const lastActiveSectionRef = useRef<CoachFeedbackSection | undefined>(undefined);
+
+  const publishActiveSection = useCallback((next?: CoachFeedbackSection) => {
+    if (lastActiveSectionRef.current === next) return;
+    lastActiveSectionRef.current = next;
+    onActiveFeedbackChange(next);
+  }, [onActiveFeedbackChange]);
+
+  const updateActiveFeedback = useCallback((metrics: CoachPanelScrollMetrics) => {
+    const listY = feedbackListYRef.current;
+    if (section !== 'feedback' || !feedback || listY === undefined || metrics.viewportHeight <= 0) {
+      publishActiveSection(undefined);
+      return;
+    }
+    const viewportTop = metrics.offsetY;
+    const viewportBottom = viewportTop + metrics.viewportHeight;
+    const viewportFocus = viewportTop + metrics.viewportHeight * 0.48;
+    let bestSection: CoachFeedbackSection | undefined;
+    let bestVisiblePixels = 0;
+    for (const item of feedback.items) {
+      const layout = feedbackCardLayoutsRef.current[item.section];
+      if (!layout) continue;
+      const top = listY + layout.y;
+      const bottom = top + layout.height;
+      const visiblePixels = Math.max(0, Math.min(bottom, viewportBottom) - Math.max(top, viewportTop));
+      if (viewportFocus >= top && viewportFocus <= bottom) {
+        bestSection = item.section;
+        bestVisiblePixels = visiblePixels;
+        break;
+      }
+      if (visiblePixels > bestVisiblePixels) {
+        bestSection = item.section;
+        bestVisiblePixels = visiblePixels;
+      }
+    }
+    publishActiveSection(bestVisiblePixels >= 24 ? bestSection : undefined);
+  }, [feedback, publishActiveSection, section]);
+
+  useEffect(() => {
+    scrollTrackerRef.current = updateActiveFeedback;
+    updateActiveFeedback(scrollMetricsRef.current);
+    return () => {
+      if (scrollTrackerRef.current === updateActiveFeedback) scrollTrackerRef.current = undefined;
+    };
+  }, [scrollMetricsRef, scrollTrackerRef, updateActiveFeedback]);
+
   return (
     <>
       <View accessibilityRole="tablist" style={styles.segmented}>
@@ -1718,9 +1822,24 @@ const CoachPanel = ({
           <>
             <Text style={styles.summary}>Four fixes for this photo</Text>
             <Text style={styles.body}>Review each area, then apply the complete adjustment set at once.</Text>
-            <View style={styles.coachFeedbackList}>
+            <View
+              onLayout={(event) => {
+                feedbackListYRef.current = event.nativeEvent.layout.y;
+                updateActiveFeedback(scrollMetricsRef.current);
+              }}
+              style={styles.coachFeedbackList}
+            >
               {feedback.items.map((item) => (
-                <CoachFeedbackCard key={item.section} item={item} onOpenSection={onOpenSection} />
+                <CoachFeedbackCard
+                  key={item.section}
+                  item={item}
+                  emphasized={activeFeedbackSection === item.section}
+                  onLayout={(layout) => {
+                    feedbackCardLayoutsRef.current[item.section] = layout;
+                    updateActiveFeedback(scrollMetricsRef.current);
+                  }}
+                  onOpenSection={onOpenSection}
+                />
               ))}
             </View>
             <Pressable
@@ -2265,6 +2384,7 @@ const styles = StyleSheet.create({
   askButtonText: { color: colors.onPrimary, fontSize: 12, fontWeight: '800' },
   coachFeedbackList: { gap: 10, marginTop: 16 },
   coachFeedbackCard: { padding: 14, borderRadius: 10, borderWidth: 1, borderColor: colors.separator, backgroundColor: colors.background },
+  coachFeedbackCardOutline: { ...StyleSheet.absoluteFillObject, borderRadius: 10, borderWidth: 2, borderColor: 'rgba(255,255,255,0.96)' },
   coachFeedbackHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 9 },
   coachFeedbackSectionTitle: { flexDirection: 'row', alignItems: 'center', gap: 7 },
   coachFeedbackSectionLabel: { color: colors.textSecondary, fontSize: 11, fontWeight: '800', letterSpacing: 0.7 },
