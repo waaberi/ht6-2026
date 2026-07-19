@@ -61,7 +61,14 @@
       "./plugins/withAndroidCleartextTraffic",
       "expo-video",
       "expo-web-browser",
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": false,
+          "recordAudioAndroid": false
+        }
+      ]
     ]
   }
 }

@@ -13,20 +13,32 @@ import {
   type OwnerId,
 } from '../domain/ownership';
 import {
-  chunkValues,
-  collectPages,
   fulfilledValues,
-  groupValuesBy,
   mapSettledWithConcurrency,
   retryBestEffort,
 } from '../domain/syncReliability';
 import type { AnalysisResult, Layer, PhotoRecord, PhotoVersion } from '../domain/types';
 import type { PortfolioReview, StyleProfileResult } from './api';
 import { getCurrentAuthUser } from './auth';
+import {
+  deleteCloudPhoto,
+  deleteCloudStyle,
+  getCloudPreferences,
+  insertCloudPortfolioReview,
+  listCloudAnalyses,
+  listCloudPhotos,
+  listCloudStyles,
+  upsertCloudAnalysis,
+  upsertCloudPhoto,
+  upsertCloudPreferences,
+  upsertCloudStyle,
+  type CloudLayerAsset,
+  type CloudPhoto,
+  type CloudPhotoVersion,
+} from './cloudDatabase';
 import { supabase } from './supabase';
 
 const requireSessionOwner = async (ownerId: OwnerId) => {
-  if (!supabase) throw new Error('Cloud sync is not configured.');
   return assertAuthenticatedOwner(ownerId, getCurrentAuthUser()?.sub);
 };
 
@@ -50,47 +62,21 @@ const removePrivateObjectsBestEffort = async (bucket: string, paths: string[]) =
 
 export const syncPhotoDeletions = async (ownerId: OwnerId, photoIds: string[]): Promise<string[]> => {
   if (!supabase || photoIds.length === 0) return [];
-  const userId = await requireSessionOwner(ownerId);
+  await requireSessionOwner(ownerId);
 
   const completed: string[] = [];
   for (const photoId of photoIds) {
     await requireSessionOwner(ownerId);
-    const [{ data: photo, error: photoError }, { data: assets, error: assetsError }] = await Promise.all([
-      supabase.from('photos').select('original_path').eq('id', photoId).eq('owner_id', userId).maybeSingle(),
-      supabase.from('layer_assets').select('storage_path').eq('photo_id', photoId).eq('owner_id', userId),
-    ]);
-    if (photoError) throw photoError;
-    if (assetsError) throw assetsError;
-
-    const originalPath = photo?.original_path as string | undefined;
+    const deletedPhoto = await deleteCloudPhoto(photoId);
+    const originalPath = deletedPhoto.originalPath ?? undefined;
     if (originalPath) {
       if (!originalPath.startsWith(`${ownerId}/`)) {
         throw new Error('The remote original belongs to a different account.');
       }
     }
-    const assetPaths = (assets ?? []).map((asset) => asset.storage_path as string);
+    const assetPaths = deletedPhoto.layerAssetPaths;
     if (assetPaths.some((path) => !path.startsWith(`${ownerId}/`))) {
       throw new Error('A remote layer asset belongs to a different account.');
-    }
-
-    await requireSessionOwner(ownerId);
-    const { data: deletedPhoto, error: deleteError } = await supabase
-      .from('photos')
-      .delete()
-      .eq('id', photoId)
-      .eq('owner_id', userId)
-      .select('id')
-      .maybeSingle();
-    if (deleteError) throw deleteError;
-    if (!deletedPhoto) {
-      const { data: remainingPhoto, error: verificationError } = await supabase
-        .from('photos')
-        .select('id')
-        .eq('id', photoId)
-        .eq('owner_id', userId)
-        .maybeSingle();
-      if (verificationError) throw verificationError;
-      if (remainingPhoto) throw new Error('The owned cloud photo could not be deleted.');
     }
 
     await Promise.all([
@@ -111,17 +97,12 @@ export const syncStyleProfileDeletions = async (
   ownerId: OwnerId,
   styleIds: string[],
 ): Promise<string[]> => {
-  if (!supabase || styleIds.length === 0) return [];
-  const userId = await requireSessionOwner(ownerId);
+  if (styleIds.length === 0) return [];
+  await requireSessionOwner(ownerId);
   const completed: string[] = [];
   for (const styleId of styleIds) {
     await requireSessionOwner(ownerId);
-    const { error } = await supabase
-      .from('style_profiles')
-      .delete()
-      .eq('id', styleId)
-      .eq('owner_id', userId);
-    if (error) throw error;
+    await deleteCloudStyle(styleId);
     await clearStyleProfileDeletionId(styleId, ownerId);
     completed.push(styleId);
   }
@@ -161,56 +142,46 @@ export const syncQueuedPhotos = async (
         uploadOnce('derived', `${base}/analysis-proxy.jpg`, photo.analysisProxyUri, 'image/jpeg'),
         uploadOnce('derived', `${base}/thumbnail.jpg`, photo.thumbnailUri, 'image/jpeg'),
       ]);
-      const { error: photoError } = await supabase.from('photos').upsert({
-        id: photo.id,
-        owner_id: userId,
-        original_path: originalPath,
-        original_name: photo.originalName,
-        original_mime_type: photo.originalMimeType,
-        original_byte_size: photo.originalByteSize,
-        original_checksum: photo.originalChecksum,
-        capture_source: photo.captureSource,
-        width: photo.width,
-        height: photo.height,
-        exif: photo.exif,
-        created_at: photo.createdAt,
-        current_version_id: null,
-        sync_state: 'syncing',
-      }, { onConflict: 'id', ignoreDuplicates: true });
-      if (photoError) throw photoError;
       const layerAssets = layerAssetsForStacks(photo.versions.map((version) => version.stack));
+      const cloudLayerAssets: CloudLayerAsset[] = [];
       for (const asset of layerAssets) {
         const file = new File(asset.uri);
         const storagePath = `${base}/layers/${asset.id}.${asset.mimeType === 'image/png' ? 'png' : 'jpg'}`;
         await uploadOnce('layer-assets', storagePath, asset.uri, asset.mimeType);
-        const { error: assetError } = await supabase.from('layer_assets').upsert({
+        cloudLayerAssets.push({
           id: asset.id,
-          owner_id: userId,
-          photo_id: photo.id,
           kind: asset.kind,
-          storage_path: storagePath,
+          storagePath,
           checksum: file.md5 ?? `${file.size}:${asset.id}`,
-          mime_type: asset.mimeType,
-          provenance: {},
-        }, { onConflict: 'id', ignoreDuplicates: true });
-        if (assetError) throw assetError;
+          mimeType: asset.mimeType,
+        });
       }
-      const { error: versionsError } = await supabase.from('photo_versions').upsert(photo.versions.map((version) => ({
+      const cloudVersions: CloudPhotoVersion[] = photo.versions.map((version) => ({
         id: version.id,
-        photo_id: photo.id,
-        parent_version_id: version.parentVersionId,
-        restored_from_version_id: version.restoredFromVersionId,
+        parentVersionId: version.parentVersionId,
+        restoredFromVersionId: version.restoredFromVersionId,
         label: version.label,
-        canvas_transform: version.stack.canvasTransform,
-        adjustments: version.stack.adjustments ?? {},
-        layer_stack: version.stack.layers,
-        analysis_proxy_path: `${base}/analysis-proxy.jpg`,
-        thumbnail_path: `${base}/thumbnail.jpg`,
-        created_at: version.createdAt,
-      })), { onConflict: 'id', ignoreDuplicates: true });
-      if (versionsError) throw versionsError;
-      const { error: currentError } = await supabase.from('photos').update({ current_version_id: photo.currentVersionId, sync_state: 'synced' }).eq('id', photo.id);
-      if (currentError) throw currentError;
+        stack: version.stack,
+        analysisProxyPath: `${base}/analysis-proxy.jpg`,
+        thumbnailPath: `${base}/thumbnail.jpg`,
+        createdAt: version.createdAt,
+      }));
+      await upsertCloudPhoto({
+        id: photo.id,
+        originalPath,
+        originalName: photo.originalName,
+        originalMimeType: photo.originalMimeType,
+        originalByteSize: photo.originalByteSize,
+        originalChecksum: photo.originalChecksum,
+        captureSource: photo.captureSource,
+        width: photo.width,
+        height: photo.height,
+        exif: photo.exif,
+        currentVersionId: photo.currentVersionId,
+        createdAt: photo.createdAt,
+        versions: cloudVersions,
+        layerAssets: cloudLayerAssets,
+      });
       synced[index] = { ...photo, remoteOriginalPath: originalPath, syncState: 'synced' };
       onProgress?.([...synced]);
     } catch {
@@ -219,42 +190,6 @@ export const syncQueuedPhotos = async (
     }
   }
   return synced;
-};
-
-type RemotePhotoRow = {
-  id: string;
-  created_at: string;
-  capture_source: PhotoRecord['captureSource'];
-  original_path: string;
-  original_name: string;
-  original_mime_type: string;
-  original_byte_size: number;
-  original_checksum: string;
-  width?: number | null;
-  height?: number | null;
-  exif?: Record<string, unknown> | null;
-  current_version_id: string | null;
-};
-
-type RemoteVersionRow = {
-  id: string;
-  photo_id: string;
-  parent_version_id?: string | null;
-  restored_from_version_id?: string | null;
-  label: string;
-  canvas_transform: PhotoVersion['stack']['canvasTransform'];
-  adjustments?: PhotoVersion['stack']['adjustments'] | null;
-  layer_stack: Layer[];
-  analysis_proxy_path?: string | null;
-  thumbnail_path?: string | null;
-  created_at: string;
-};
-
-type RemoteLayerAssetRow = {
-  id: string;
-  photo_id: string;
-  storage_path: string;
-  mime_type: string;
 };
 
 const exposureDirectory = new Directory(Paths.document, 'exposure');
@@ -303,38 +238,6 @@ const mapWithConcurrency = async <T, R>(items: T[], limit: number, work: (item: 
   return results;
 };
 
-const SUPABASE_PAGE_SIZE = 500;
-const PHOTO_ID_BATCH_SIZE = 100;
-
-type SupabasePage<T> = {
-  data: T[] | null;
-  error: unknown;
-};
-
-const readAllPages = async <T>(
-  readPage: (from: number, to: number) => PromiseLike<SupabasePage<T>>,
-): Promise<T[]> => collectPages(SUPABASE_PAGE_SIZE, async (from, to) => {
-    const { data, error } = await readPage(from, to);
-    if (error) throw error;
-    return data ?? [];
-  });
-
-const readRowsForPhotoIds = async <T>(
-  table: 'photo_versions' | 'layer_assets',
-  photoIds: string[],
-): Promise<T[]> => {
-  const client = supabase;
-  if (!client) return [];
-  const pages = await mapWithConcurrency(chunkValues(photoIds, PHOTO_ID_BATCH_SIZE), 3, (photoIdBatch) =>
-    readAllPages<T>((from, to) => client
-      .from(table)
-      .select('*')
-      .in('photo_id', photoIdBatch)
-      .order('id', { ascending: true })
-      .range(from, to)));
-  return pages.flat();
-};
-
 const withLocalAssetUris = (layer: Layer, assetUris: Map<string, string>): Layer => {
   if (layer.type === 'image') {
     return { ...layer, uri: assetUris.get(layer.assetId) ?? layer.uri };
@@ -354,66 +257,63 @@ const withLocalAssetUris = (layer: Layer, assetUris: Map<string, string>): Layer
 
 const hydrateRemotePhoto = async (
   ownerId: OwnerId,
-  photo: RemotePhotoRow,
-  versions: RemoteVersionRow[],
-  assets: RemoteLayerAssetRow[],
+  photo: CloudPhoto,
 ): Promise<PhotoRecord> => {
   const { originalsDirectory, proxiesDirectory, thumbnailsDirectory, layerAssetsDirectory } = ensureSyncDirectories(ownerId);
-  const original = new File(originalsDirectory, `${photo.id}.${extensionForPath(photo.original_path)}`);
+  const original = new File(originalsDirectory, `${photo.id}.${extensionForPath(photo.originalPath)}`);
   const proxy = new File(proxiesDirectory, `${photo.id}.jpg`);
   const thumbnail = new File(thumbnailsDirectory, `${photo.id}.jpg`);
-  const currentVersion = versions.find((version) => version.id === photo.current_version_id) ?? versions.at(-1);
+  const currentVersion = photo.versions.find((version) => version.id === photo.currentVersionId) ?? photo.versions.at(-1);
 
   await Promise.all([
-    currentVersion?.analysis_proxy_path ? Promise.resolve() : downloadPrivateObject('originals', photo.original_path, original),
-    currentVersion?.analysis_proxy_path
-      ? downloadPrivateObject('derived', currentVersion.analysis_proxy_path, proxy)
+    currentVersion?.analysisProxyPath ? Promise.resolve() : downloadPrivateObject('originals', photo.originalPath, original),
+    currentVersion?.analysisProxyPath
+      ? downloadPrivateObject('derived', currentVersion.analysisProxyPath, proxy)
       : Promise.resolve(),
-    currentVersion?.thumbnail_path
-      ? downloadPrivateObject('derived', currentVersion.thumbnail_path, thumbnail)
+    currentVersion?.thumbnailPath
+      ? downloadPrivateObject('derived', currentVersion.thumbnailPath, thumbnail)
       : Promise.resolve(),
   ]);
 
   const assetUris = new Map<string, string>();
-  await mapWithConcurrency(assets, 4, async (asset) => {
-    const local = new File(layerAssetsDirectory, `${asset.id}.${extensionForPath(asset.storage_path, asset.mime_type === 'image/png' ? 'png' : 'jpg')}`);
-    await downloadPrivateObject('layer-assets', asset.storage_path, local);
+  await mapWithConcurrency(photo.layerAssets, 4, async (asset) => {
+    const local = new File(layerAssetsDirectory, `${asset.id}.${extensionForPath(asset.storagePath, asset.mimeType === 'image/png' ? 'png' : 'jpg')}`);
+    await downloadPrivateObject('layer-assets', asset.storagePath, local);
     assetUris.set(asset.id, local.uri);
   });
 
-  const hydratedVersions: PhotoVersion[] = versions
-    .sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at))
+  const hydratedVersions: PhotoVersion[] = photo.versions
+    .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))
     .map((version) => ({
       id: version.id,
       photoId: photo.id,
-      parentVersionId: version.parent_version_id ?? undefined,
-      restoredFromVersionId: version.restored_from_version_id ?? undefined,
-      createdAt: version.created_at,
+      parentVersionId: version.parentVersionId ?? undefined,
+      restoredFromVersionId: version.restoredFromVersionId ?? undefined,
+      createdAt: version.createdAt,
       label: version.label,
       stack: {
-        canvasTransform: version.canvas_transform,
-        adjustments: version.adjustments ?? {},
-        layers: version.layer_stack.map((layer) => withLocalAssetUris(layer, assetUris)),
+        ...version.stack,
+        layers: version.stack.layers.map((layer) => withLocalAssetUris(layer, assetUris)),
       },
     }));
 
   return {
     id: photo.id,
     ownerId,
-    createdAt: photo.created_at,
-    captureSource: photo.capture_source,
+    createdAt: photo.createdAt,
+    captureSource: photo.captureSource,
     originalUri: original.uri,
-    remoteOriginalPath: photo.original_path,
-    originalName: photo.original_name,
-    originalMimeType: photo.original_mime_type,
-    originalByteSize: Number(photo.original_byte_size),
-    originalChecksum: photo.original_checksum,
+    remoteOriginalPath: photo.originalPath,
+    originalName: photo.originalName,
+    originalMimeType: photo.originalMimeType,
+    originalByteSize: Number(photo.originalByteSize),
+    originalChecksum: photo.originalChecksum,
     analysisProxyUri: proxy.exists ? proxy.uri : original.uri,
     thumbnailUri: thumbnail.exists ? thumbnail.uri : proxy.exists ? proxy.uri : original.uri,
     width: photo.width ?? undefined,
     height: photo.height ?? undefined,
-    exif: photo.exif ?? {},
-    currentVersionId: photo.current_version_id ?? currentVersion?.id ?? hydratedVersions.at(-1)?.id ?? '',
+    exif: photo.exif,
+    currentVersionId: photo.currentVersionId,
     versions: hydratedVersions,
     syncState: 'synced',
   };
@@ -428,35 +328,17 @@ export const pullRemotePhotos = async (
   localPhotos: PhotoRecord[],
   excludedPhotoIds: string[] = [],
 ): Promise<PhotoRecord[]> => {
-  const client = supabase;
-  if (!client) return localPhotos;
+  if (!supabase) return localPhotos;
   localPhotos.forEach((photo) => assertOwnerMatches(photo.ownerId, ownerId));
-  const userId = await requireSessionOwner(ownerId);
+  await requireSessionOwner(ownerId);
 
-  const photoRows = await readAllPages<RemotePhotoRow>((from, to) => client
-    .from('photos')
-    .select('*')
-    .eq('owner_id', userId)
-    .order('created_at', { ascending: false })
-    .order('id', { ascending: true })
-    .range(from, to));
+  const photoRows = await listCloudPhotos();
   const excluded = new Set(excludedPhotoIds);
   const visibleRows = photoRows.filter((row) => !excluded.has(row.id));
   if (!visibleRows.length) return localPhotos;
 
-  const photoIds = visibleRows.map((row) => row.id);
-  const [versionRows, assetRows] = await Promise.all([
-    readRowsForPhotoIds<RemoteVersionRow>('photo_versions', photoIds),
-    readRowsForPhotoIds<RemoteLayerAssetRow>('layer_assets', photoIds),
-  ]);
-  const versionsByPhoto = groupValuesBy(versionRows, (version) => version.photo_id);
-  const assetsByPhoto = groupValuesBy(assetRows, (asset) => asset.photo_id);
-  const hydrationResults = await mapSettledWithConcurrency(visibleRows, 3, (photo) => hydrateRemotePhoto(
-    ownerId,
-    photo,
-    versionsByPhoto.get(photo.id) ?? [],
-    assetsByPhoto.get(photo.id) ?? [],
-  ));
+  const hydrationResults = await mapSettledWithConcurrency(visibleRows, 3, (photo) =>
+    hydrateRemotePhoto(ownerId, photo));
   const remote = fulfilledValues(hydrationResults);
 
   const merged = new Map(localPhotos.map((photo) => [photo.id, photo]));
@@ -469,158 +351,76 @@ export const pullRemotePhotos = async (
 };
 
 export const pullRemoteAnalyses = async (ownerId: OwnerId): Promise<Record<string, AnalysisResult>> => {
-  const client = supabase;
-  if (!client) return {};
-  const userId = await requireSessionOwner(ownerId);
-  const data = await readAllPages<Record<string, unknown>>((from, to) => client
-    .from('analyses')
-    .select('*')
-    .eq('owner_id', userId)
-    .order('created_at', { ascending: false })
-    .order('id', { ascending: true })
-    .range(from, to));
+  await requireSessionOwner(ownerId);
+  const data = await listCloudAnalyses();
 
   const analyses: Record<string, AnalysisResult> = {};
-  for (const row of data) {
-    if (row.schema_version !== 'analysis-2') continue;
-    const versionId = row.version_id as string;
-    if (analyses[versionId]) continue;
-    analyses[versionId] = {
-      versionId,
-      checksum: row.checksum as string,
-      createdAt: row.created_at as string,
-      deterministicModel: row.deterministic_model as string,
-      semanticModel: (row.semantic_model as string | null) ?? undefined,
-      metrics: (row.metrics ?? {}) as AnalysisResult['metrics'],
-      lighting: row.lighting as AnalysisResult['lighting'],
-      signals: (row.signals ?? []) as AnalysisResult['signals'],
-      cameraRecommendations: (row.camera_recommendations ?? []) as AnalysisResult['cameraRecommendations'],
-      issues: (row.issues ?? []) as AnalysisResult['issues'],
-      summary: row.summary as string,
-    };
+  for (const analysis of data) {
+    if (!analyses[analysis.versionId]) analyses[analysis.versionId] = analysis;
   }
   return analyses;
 };
 
 export const pullRemoteStyles = async (ownerId: OwnerId) => {
-  const client = supabase;
-  if (!client) return;
-  const userId = await requireSessionOwner(ownerId);
-  const data = await readAllPages<Record<string, unknown>>((from, to) => client
-    .from('style_profiles')
-    .select('*')
-    .eq('owner_id', userId)
-    .order('created_at', { ascending: false })
-    .order('id', { ascending: true })
-    .range(from, to));
+  await requireSessionOwner(ownerId);
+  const data = await listCloudStyles();
   await mergeStyleProfiles(data.map((row) => ({
-    id: row.id as string,
+    id: row.id,
     ownerId,
-    name: row.name as string,
-    referencePhotoIds: (row.reference_photo_ids ?? []) as string[],
-    palette: (row.palette ?? []) as string[],
-    adjustments: (row.adjustments ?? {}) as SavedStyleProfile['adjustments'],
-    mood: row.mood as string,
-    createdAt: row.created_at as string,
-    updatedAt: (row.updated_at ?? row.created_at) as string,
+    name: row.name,
+    referencePhotoIds: row.referencePhotoIds,
+    palette: row.palette,
+    adjustments: row.adjustments,
+    mood: row.mood,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
   })), ownerId);
 };
 
 export const pullRemotePreferences = async (ownerId: OwnerId) => {
-  if (!supabase) return;
-  const userId = await requireSessionOwner(ownerId);
-  const { data, error } = await supabase.from('profiles').select('*').eq('id', userId).maybeSingle();
-  if (error) throw error;
+  await requireSessionOwner(ownerId);
+  const data = await getCloudPreferences();
   if (!data) return;
   const local = await loadPreferences(ownerId);
   await savePreferences({
     ...local,
-    skillLevel: data.skill_level ?? local.skillLevel,
-    detail: data.feedback_detail ?? local.detail,
-    desiredMood: data.desired_mood ?? '',
-    exportMetadata: data.export_metadata ?? local.exportMetadata,
-    exportGps: data.export_gps ?? local.exportGps,
-    recommendationFeedback: data.recommendation_feedback ?? local.recommendationFeedback,
-    camera: { ...local.camera, ...(data.camera_preferences ?? {}) },
+    skillLevel: data.skillLevel,
+    detail: data.feedbackDetail,
+    desiredMood: data.desiredMood,
+    exportMetadata: data.exportMetadata,
+    exportGps: data.exportGps,
+    recommendationFeedback: data.recommendationFeedback,
+    camera: { ...local.camera, ...data.cameraPreferences },
   }, ownerId);
 };
 
 export const persistAnalysis = async (photo: PhotoRecord, analysis: AnalysisResult) => {
-  if (!supabase) return;
   if (photo.ownerId === GUEST_OWNER_ID) return;
   const ownerId = await requireSessionOwner(photo.ownerId);
   assertOwnerMatches(photo.ownerId, ownerId);
-  const { error } = await supabase.from('analyses').upsert({
-    owner_id: ownerId,
-    photo_id: photo.id,
-    version_id: photo.currentVersionId,
-    checksum: analysis.checksum,
-    schema_version: 'analysis-2',
-    deterministic_model: analysis.deterministicModel,
-    semantic_model: analysis.semanticModel,
-    metrics: analysis.metrics,
-    lighting: analysis.lighting,
-    signals: analysis.signals,
-    camera_recommendations: analysis.cameraRecommendations,
-    issues: analysis.issues,
-    summary: analysis.summary,
-  }, { ignoreDuplicates: true });
-  if (error) throw error;
+  await upsertCloudAnalysis(photo.id, analysis);
 };
 
 export const persistStyleProfile = async (style: StyleProfileResult, referencePhotoIds: string[]) => {
-  if (!supabase) return;
   const activeOwnerId = getActiveOwnerId();
   if (activeOwnerId === GUEST_OWNER_ID) return;
-  const ownerId = await requireSessionOwner(activeOwnerId);
-  const { error } = await supabase.from('style_profiles').upsert({
-    id: style.id,
-    owner_id: ownerId,
-    name: style.name,
-    reference_photo_ids: referencePhotoIds,
-    palette: style.palette,
-    adjustments: style.adjustments,
-    mood: style.mood,
-    model_versions: referencePhotoIds.length
-      ? { extractor: 'exposure-style-1', source: 'generated' }
-      : { source: 'manual' },
-  }, { onConflict: 'id' });
-  if (error) throw error;
+  await requireSessionOwner(activeOwnerId);
+  const timestamps = style as StyleProfileResult & Partial<Pick<SavedStyleProfile, 'createdAt' | 'updatedAt'>>;
+  await upsertCloudStyle(style, referencePhotoIds, timestamps);
 };
 
 export const persistPortfolioReview = async (review: PortfolioReview, selectedPhotoIds: string[]) => {
-  if (!supabase) return;
   const activeOwnerId = getActiveOwnerId();
   if (activeOwnerId === GUEST_OWNER_ID) return;
-  const ownerId = await requireSessionOwner(activeOwnerId);
-  const { error } = await supabase.from('portfolio_reviews').insert({
-    owner_id: ownerId,
-    selected_photo_ids: selectedPhotoIds,
-    ordered_photo_ids: review.orderedPhotoIds,
-    excluded_photo_ids: review.excludedPhotoIds,
-    duplicate_groups: review.duplicateGroups,
-    explanations: review.explanations,
-    summary: review.summary,
-  });
-  if (error) throw error;
+  await requireSessionOwner(activeOwnerId);
+  await insertCloudPortfolioReview(review, selectedPhotoIds);
 };
 
 export const persistPreferences = async (
   preferences: ExposurePreferences,
   expectedOwnerId: OwnerId = getActiveOwnerId(),
 ) => {
-  if (!supabase) return;
   if (expectedOwnerId === GUEST_OWNER_ID) return;
-  const userId = await requireSessionOwner(expectedOwnerId);
-  const { error } = await supabase.from('profiles').upsert({
-    id: userId,
-    skill_level: preferences.skillLevel,
-    feedback_detail: preferences.detail,
-    desired_mood: preferences.desiredMood || null,
-    export_metadata: preferences.exportMetadata,
-    export_gps: preferences.exportGps,
-    recommendation_feedback: preferences.recommendationFeedback,
-    camera_preferences: preferences.camera,
-  });
-  if (error) throw error;
+  await requireSessionOwner(expectedOwnerId);
+  await upsertCloudPreferences(preferences);
 };

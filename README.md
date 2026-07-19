@@ -8,9 +8,9 @@ immutable original + reversible canvas transform + ordered layer stack
 
 The repository contains:
 
-- `apps/mobile`: Expo SDK 54 / React Native application with camera and Android file import, local offline persistence, Skia previews, coaching, layers, history, portfolio curation, Looks, and Supabase sync.
-- `services/api`: FastAPI service for deterministic analysis, validated Gemini orchestration, authoritative rendering, portfolio/style computation, and localized Nano Banana patches.
-- `supabase`: Postgres schema, owner-only RLS, immutable versions, private Storage buckets, Realtime jobs, and pgTAP security tests.
+- `apps/mobile`: Expo SDK 54 / React Native application with camera and Android file import, local offline persistence, Skia previews, coaching, layers, history, portfolio curation, Looks, and cloud sync through the API.
+- `services/api`: FastAPI service for MongoDB Atlas persistence, deterministic analysis, validated Gemini orchestration, authoritative rendering, portfolio/style computation, and localized Nano Banana patches.
+- `supabase`: Private object Storage for originals, derived previews, and layer assets. Structured application data lives in MongoDB Atlas.
 
 The cross-platform capture policy, implementation guarantees, and physical-device validation matrix are documented in [`apps/mobile/PHOTO_QUALITY.md`](apps/mobile/PHOTO_QUALITY.md).
 
@@ -44,7 +44,7 @@ Run the API with reload:
 pnpm api
 ```
 
-Verify the local API, Supabase project, structured Gemini Coach response, and Gemini image-edit model with the configured development credentials:
+Verify the local API, MongoDB Atlas, Supabase Storage, structured Gemini Coach response, and Gemini image-edit model with the configured development credentials:
 
 ```bash
 pnpm network:smoke
@@ -52,16 +52,16 @@ pnpm network:smoke
 
 `GEMINI_API_KEY` is optional for deterministic analysis, rendering, portfolio review, style extraction, and the local Coach. It is required for semantic interpretation and generative layers. Model identifiers remain environment-configurable.
 
-Manage the local database:
+Verify the managed Atlas database and, when retiring an existing Supabase database, run the idempotent data transfer:
 
 ```bash
-pnpm db:start
-pnpm db:reset
 pnpm db:test
-pnpm db:stop
+pnpm db:migrate
 ```
 
-The migration creates private `originals`, `derived`, and `layer-assets` buckets. Object paths must begin with the authenticated user's Auth0 `sub`. Originals have no client update or delete policy.
+Atlas credentials belong only in `services/api/.env.local` and `services/api/.env.production`; never expose them through an `EXPO_PUBLIC_` variable. `pnpm db:migrate` reads every existing Exposure row through the Supabase service role and upserts MongoDB documents, so it is safe to retry.
+
+Supabase retains the private `originals`, `derived`, and `layer-assets` buckets. Object paths must begin with the authenticated user's Auth0 `sub`. The mobile app never connects to Atlas directly: it sends an Auth0 access token to FastAPI, and FastAPI derives every MongoDB owner scope from the verified token.
 
 ## Auth0
 
@@ -77,7 +77,7 @@ exp://100.117.203.24:8081/--/auth/callback
 
 The `exp://` URL is the stable Tailscale address used by `pnpm phone`. If that development host or Metro port changes, add the URI printed by Expo Go to both Auth0 URL lists before signing in.
 
-Supabase remains the database and storage service, but it accepts the Auth0 ID token through its third-party Auth configuration. FastAPI validates the separate Auth0 access token issued for the Exposure API audience. Production API processes must set `EXPOSURE_REQUIRE_AUTH=true`.
+MongoDB Atlas is the structured database. Supabase is used only for private image-object Storage and accepts the Auth0 ID token through its third-party Auth configuration. FastAPI validates the separate Auth0 access token issued for the Exposure API audience; all `/v1/sync/*` routes require it even when public local analysis is enabled. Production API processes must set `EXPOSURE_REQUIRE_AUTH=true`.
 
 Run every mobile, API, and database check:
 

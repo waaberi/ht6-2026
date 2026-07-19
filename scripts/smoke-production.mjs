@@ -76,6 +76,8 @@ assert(health.service === 'Exposure', '/health is not an Exposure API.');
 assert(health.authRequired === true, 'authentication is not required.');
 assert(health.authConfigured === true, 'Auth0 authentication is not configured.');
 assert(health.geminiConfigured === true, 'Gemini is not configured.');
+assert(health.database === 'mongodb-atlas', 'MongoDB Atlas is not the configured database.');
+assert(health.databaseConnected === true, 'MongoDB Atlas is not connected.');
 
 const unsigned = await fetch(`${apiUrl}/v1/analyze`, {
   method: 'POST',

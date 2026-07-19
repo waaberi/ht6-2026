@@ -154,7 +154,11 @@ try {
   const apiHealth = await health();
   if (!apiHealth) throw new Error('Exposure API health check failed.');
   if (!apiHealth.geminiConfigured) throw new Error('Exposure API started without GEMINI_API_KEY.');
+  if (apiHealth.database !== 'mongodb-atlas' || !apiHealth.databaseConnected) {
+    throw new Error('Exposure API started without a live MongoDB Atlas connection.');
+  }
   console.log('Exposure API: ok');
+  console.log('MongoDB Atlas: connected');
 
   const analysis = await analyze();
   if (analysis.mode === 'semantic') {
@@ -183,23 +187,6 @@ try {
   const serviceKey = serviceEnv.SUPABASE_SERVICE_ROLE_KEY || serviceEnv.SUPABASE_SECRET_KEY;
   if (!serviceUrl || !serviceKey) throw new Error('Supabase service configuration is missing.');
   const serviceHeaders = { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` };
-  const schemaChecks = [
-    ['photos', 'id'],
-    ['profiles', 'id,camera_preferences,recommendation_feedback'],
-    ['photo_versions', 'id,adjustments'],
-    ['analyses', 'id,schema_version,signals'],
-  ];
-  for (const [table, columns] of schemaChecks) {
-    const schemaResponse = await fetch(`${serviceUrl}/rest/v1/${table}?select=${columns}&limit=1`, {
-      headers: serviceHeaders,
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!schemaResponse.ok) {
-      throw new Error(`Supabase Exposure schema is missing ${table} (${schemaResponse.status}). Apply the linked migrations.`);
-    }
-  }
-  console.log('Supabase schema: ok');
-
   const bucketResponse = await fetch(`${serviceUrl}/storage/v1/bucket`, {
     headers: serviceHeaders,
     signal: AbortSignal.timeout(10000),

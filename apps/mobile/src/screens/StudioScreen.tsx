@@ -1,10 +1,12 @@
 import { randomUUID } from 'expo-crypto';
+import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import Slider from '@react-native-community/slider';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type LayoutRectangle } from 'react-native';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-controller';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { PhotoCanvas } from '../components/PhotoCanvas';
@@ -23,6 +25,7 @@ import {
   type CoachFeedbackPlan,
   type CoachFeedbackSection,
 } from '../domain/coachFeedback';
+import { buildCoachNarration } from '../domain/coachNarration';
 import {
   analysisWithEditableMetadata,
   editableMetadataFrom,
@@ -59,6 +62,7 @@ import type {
 import { ApiUnavailableError, askCoach, createGenerativeLayers, getMetadataAdvice } from '../services/api';
 import { exportAndShare } from '../services/export';
 import { persistPreferences, persistStyleProfile, syncStyleProfileDeletions } from '../services/sync';
+import { prepareCoachNarrationAudio } from '../services/voice';
 import { useExposure } from '../state/ExposureContext';
 import { identityCanvasTransform } from '../domain/types';
 
@@ -166,6 +170,10 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   const coachPanelScrollTrackerRef = useRef<CoachPanelScrollTracker | undefined>(undefined);
   const [coachQuestion, setCoachQuestion] = useState('');
   const [coachBusy, setCoachBusy] = useState(false);
+  const coachAudioPlayer = useAudioPlayer();
+  const coachAudioStatus = useAudioPlayerStatus(coachAudioPlayer);
+  const [coachVoiceBusy, setCoachVoiceBusy] = useState(false);
+  const [coachAudioUri, setCoachAudioUri] = useState<string>();
   const [metadataDraft, setMetadataDraft] = useState<EditablePhotoMetadata>(() => (
     editableMetadataFrom(selectedPhoto?.exif ?? {}, analysis)
   ));
@@ -235,6 +243,27 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   );
   const selectedIssue = visibleIssues.find((issue) => issue.id === selectedIssueId) ?? visibleIssues[0];
   const activeCoachFeedback = coachFeedback?.items.find((item) => item.section === activeCoachFeedbackSection);
+  const coachNarration = useMemo(
+    () => analysis && coachFeedback ? buildCoachNarration(analysis, coachFeedback) : undefined,
+    [analysis, coachFeedback],
+  );
+
+  useEffect(() => {
+    void setAudioModeAsync({
+      interruptionMode: 'duckOthers',
+      playsInSilentMode: true,
+      shouldPlayInBackground: false,
+    });
+  }, []);
+
+  useEffect(() => {
+    coachAudioPlayer.pause();
+    setCoachAudioUri(undefined);
+  }, [analysis?.versionId, coachAudioPlayer]);
+
+  useEffect(() => {
+    if (tool !== 'coach') coachAudioPlayer.pause();
+  }, [coachAudioPlayer, tool]);
   const explicitRecommendation = generativeRecommendationId
     ? visibleIssues.find((issue) => issue.id === generativeRecommendationId)
     : undefined;
@@ -606,6 +635,32 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
       setMessage(error instanceof Error ? error.message : 'Coach is unavailable.');
     } finally {
       setCoachBusy(false);
+    }
+  };
+
+  const toggleCoachNarration = async () => {
+    if (coachAudioStatus.playing) {
+      coachAudioPlayer.pause();
+      await coachAudioPlayer.seekTo(0);
+      return;
+    }
+    if (!coachNarration || coachVoiceBusy) return;
+
+    setMessage(undefined);
+    setCoachVoiceBusy(true);
+    try {
+      const uri = await prepareCoachNarrationAudio(coachNarration);
+      if (uri === coachAudioUri) {
+        await coachAudioPlayer.seekTo(0);
+      } else {
+        coachAudioPlayer.replace({ uri });
+        setCoachAudioUri(uri);
+      }
+      coachAudioPlayer.play();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Coach voice is unavailable.');
+    } finally {
+      setCoachVoiceBusy(false);
     }
   };
 
@@ -1243,7 +1298,8 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
 
       <View style={styles.panel}>
         {message ? <Text accessibilityRole="alert" numberOfLines={3} style={styles.message}>{message}</Text> : null}
-        <ScrollView
+        <KeyboardAwareScrollView
+          bottomOffset={20}
           key={tool}
           contentContainerStyle={styles.panelContent}
           keyboardShouldPersistTaps="handled"
@@ -1283,6 +1339,8 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
                 applying={applying}
                 feedbackBusy={feedbackBusy}
                 feedback={coachFeedback}
+                voiceBusy={coachVoiceBusy}
+                voicePlaying={coachAudioStatus.playing}
                 metadata={metadataDraft}
                 metadataAdvice={metadataAdvice}
                 metadataAdviceBusy={metadataAdviceBusy}
@@ -1296,6 +1354,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
                 }}
                 onMetadataCommit={() => void saveMetadataDraft()}
                 onActiveFeedbackChange={setActiveCoachFeedbackSection}
+                onVoice={() => void toggleCoachNarration()}
                 onOpenSection={(section) => {
                   setAdjustmentSection(section);
                   setTool('adjust');
@@ -1418,7 +1477,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
           {tool === 'history' ? (
             <HistoryPanel photo={selectedPhoto} onRestore={restore} />
           ) : null}
-        </ScrollView>
+        </KeyboardAwareScrollView>
         <StudioToolRail
           active={tool}
           onChange={(nextTool) => {
@@ -1714,6 +1773,8 @@ const CoachPanel = ({
   applying,
   feedbackBusy,
   feedback,
+  voiceBusy,
+  voicePlaying,
   metadata,
   metadataAdvice,
   metadataAdviceBusy,
@@ -1722,6 +1783,7 @@ const CoachPanel = ({
   onAnalyze,
   onAccept,
   onActiveFeedbackChange,
+  onVoice,
   onMetadataAdvice,
   onMetadataChange,
   onMetadataCommit,
@@ -1732,6 +1794,8 @@ const CoachPanel = ({
   applying: boolean;
   feedbackBusy: boolean;
   feedback?: CoachFeedbackPlan;
+  voiceBusy: boolean;
+  voicePlaying: boolean;
   metadata: EditablePhotoMetadata;
   metadataAdvice?: MetadataAdvice;
   metadataAdviceBusy: boolean;
@@ -1740,6 +1804,7 @@ const CoachPanel = ({
   onAnalyze: () => void;
   onAccept: () => void;
   onActiveFeedbackChange: (section?: CoachFeedbackSection) => void;
+  onVoice: () => void;
   onMetadataAdvice: () => void;
   onMetadataChange: (key: keyof EditablePhotoMetadata, value: string) => void;
   onMetadataCommit: () => void;
@@ -1822,6 +1887,31 @@ const CoachPanel = ({
           <>
             <Text style={styles.summary}>Four fixes for this photo</Text>
             <Text style={styles.body}>Review each area, then apply the complete adjustment set at once.</Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={voicePlaying ? 'Stop Coach narration' : 'Listen to Coach feedback'}
+              accessibilityState={{ busy: voiceBusy, disabled: voiceBusy }}
+              disabled={voiceBusy}
+              onPress={onVoice}
+              style={({ pressed }) => [
+                styles.coachVoiceButton,
+                pressed && styles.controlPressed,
+                voiceBusy && styles.disabled,
+              ]}
+            >
+              {voiceBusy ? (
+                <ActivityIndicator color={colors.text} size="small" />
+              ) : (
+                <MaterialCommunityIcons
+                  color={colors.actionText}
+                  name={voicePlaying ? 'stop-circle-outline' : 'volume-high'}
+                  size={20}
+                />
+              )}
+              <Text style={styles.coachVoiceButtonText}>
+                {voiceBusy ? 'Preparing voice…' : voicePlaying ? 'Stop' : 'Listen'}
+              </Text>
+            </Pressable>
             <View
               onLayout={(event) => {
                 feedbackListYRef.current = event.nativeEvent.layout.y;
@@ -2383,6 +2473,8 @@ const styles = StyleSheet.create({
   askButton: { minWidth: 64, minHeight: 48, borderRadius: 8, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' },
   askButtonText: { color: colors.onPrimary, fontSize: 12, fontWeight: '800' },
   coachFeedbackList: { gap: 10, marginTop: 16 },
+  coachVoiceButton: { alignSelf: 'flex-start', minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 12, paddingHorizontal: 14, borderRadius: 8, borderWidth: 1, borderColor: colors.outline, backgroundColor: colors.controlSurface },
+  coachVoiceButtonText: { color: colors.actionText, fontSize: 13, fontWeight: '800' },
   coachFeedbackCard: { padding: 14, borderRadius: 10, borderWidth: 1, borderColor: colors.separator, backgroundColor: colors.background },
   coachFeedbackCardOutline: { ...StyleSheet.absoluteFillObject, borderRadius: 10, borderWidth: 2, borderColor: 'rgba(255,255,255,0.96)' },
   coachFeedbackHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 9 },

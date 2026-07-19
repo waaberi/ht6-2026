@@ -4,6 +4,7 @@ import { useFonts } from 'expo-font';
 import { StatusBar } from 'expo-status-bar';
 import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, BackHandler, StyleSheet, View } from 'react-native';
+import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { SafeAreaProvider, initialWindowMetrics } from 'react-native-safe-area-context';
 
 import { TabBar, type MainTab } from './src/components/TabBar';
@@ -30,16 +31,18 @@ export default function App() {
   const ready = fontsLoaded || Boolean(fontError);
   return (
     <SafeAreaProvider initialMetrics={initialWindowMetrics}>
-      <AuthProvider>
-        {!ready || onboardingComplete === undefined ? (
-          <LoadingScreen />
-        ) : onboardingComplete ? (
-          <ExposureProvider><ExposureApp /></ExposureProvider>
-        ) : (
-          <OnboardingScreen onComplete={() => setOnboardingComplete(true)} />
-        )}
-        <StatusBar style="light" backgroundColor={colors.background} />
-      </AuthProvider>
+      <KeyboardProvider>
+        <AuthProvider>
+          {!ready || onboardingComplete === undefined ? (
+            <LoadingScreen />
+          ) : onboardingComplete ? (
+            <ExposureProvider><ExposureApp /></ExposureProvider>
+          ) : (
+            <OnboardingScreen onComplete={() => setOnboardingComplete(true)} />
+          )}
+          <StatusBar style="light" backgroundColor={colors.background} />
+        </AuthProvider>
+      </KeyboardProvider>
     </SafeAreaProvider>
   );
 }

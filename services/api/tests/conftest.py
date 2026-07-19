@@ -19,13 +19,22 @@ class ApiTestClient:
     timeout tests deterministic.
     """
 
-    async def _post(self, url: str, **kwargs: Any) -> httpx.Response:
+    async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            return await client.post(url, **kwargs)
+            return await client.request(method, url, **kwargs)
 
     def post(self, url: str, **kwargs: Any) -> httpx.Response:
-        return asyncio.run(self._post(url, **kwargs))
+        return asyncio.run(self._request("POST", url, **kwargs))
+
+    def get(self, url: str, **kwargs: Any) -> httpx.Response:
+        return asyncio.run(self._request("GET", url, **kwargs))
+
+    def put(self, url: str, **kwargs: Any) -> httpx.Response:
+        return asyncio.run(self._request("PUT", url, **kwargs))
+
+    def delete(self, url: str, **kwargs: Any) -> httpx.Response:
+        return asyncio.run(self._request("DELETE", url, **kwargs))
 
 
 @pytest.fixture(autouse=True)

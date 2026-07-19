@@ -9,7 +9,7 @@ from auth0_api_python.errors import VerifyAccessTokenError
 from fastapi import HTTPException
 
 from exposure_api import auth
-from exposure_api.auth import require_authenticated_user
+from exposure_api.auth import require_authenticated_user, require_database_user
 from exposure_api.main import app
 
 
@@ -26,8 +26,17 @@ def test_every_v1_route_uses_auth_dependency_and_health_stays_public() -> None:
 
     assert protected
     assert all(
-        any(dependency.call is require_authenticated_user for dependency in route.dependant.dependencies)
+        any(
+            dependency.call in {require_authenticated_user, require_database_user}
+            for dependency in route.dependant.dependencies
+        )
         for route in protected
+    )
+    sync_routes = [route for path, route in routes.items() if path.startswith("/v1/sync/")]
+    assert sync_routes
+    assert all(
+        any(dependency.call is require_database_user for dependency in route.dependant.dependencies)
+        for route in sync_routes
     )
     assert all(
         dependency.call is not require_authenticated_user

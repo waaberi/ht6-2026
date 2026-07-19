@@ -1,7 +1,8 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { DeviceMotion } from 'expo-sensors';
 import React, { useEffect, useRef, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-controller';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { colors, layout, typography } from '../components/theme';
@@ -125,7 +126,8 @@ export const SettingsScreen = () => {
         : `${queuedCount} waiting to sync`;
 
   return (
-    <ScrollView
+    <KeyboardAwareScrollView
+      bottomOffset={20}
       style={styles.screen}
       contentContainerStyle={[styles.content, { paddingTop: insets.top + 14, paddingBottom: insets.bottom + 36 }]}
       keyboardShouldPersistTaps="handled"
@@ -251,7 +253,7 @@ export const SettingsScreen = () => {
           />
         </Section>
       ) : null}
-    </ScrollView>
+    </KeyboardAwareScrollView>
   );
 };
 

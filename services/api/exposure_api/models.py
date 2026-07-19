@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import math
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def _camel(value: str) -> str:
@@ -325,6 +325,18 @@ class CoachResponse(ApiModel):
         if len(self.reason.split()) > 24:
             raise ValueError("Coach reasons must be at most 24 words")
         return self
+
+
+class SpeechRequest(ApiModel):
+    text: str = Field(min_length=1, max_length=1600)
+
+    @field_validator("text")
+    @classmethod
+    def normalize_text(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("Narration text cannot be empty")
+        return normalized
 
 
 class PhotoMetadataInput(ApiModel):

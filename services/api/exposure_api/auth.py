@@ -115,3 +115,12 @@ async def require_authenticated_user(
     if credentials is None or credentials.scheme.lower() != "bearer" or not credentials.credentials:
         raise _unauthorized()
     return await validate_auth0_access_token(credentials.credentials)
+
+
+async def require_database_user(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+) -> dict[str, Any]:
+    """Require Auth0 for owner-scoped data even when public analysis is enabled."""
+    if credentials is None or credentials.scheme.lower() != "bearer" or not credentials.credentials:
+        raise _unauthorized()
+    return await validate_auth0_access_token(credentials.credentials)

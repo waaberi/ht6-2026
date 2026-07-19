@@ -99,6 +99,12 @@ if (geminiKeyIsConfigured && !apiHealth.geminiConfigured) {
   await new Promise(() => {});
 }
 
+if (!apiHealth.databaseConnected) {
+  console.error('Exposure API is running without MongoDB Atlas. Stop the existing API, verify services/api/.env.local, and restart pnpm dev.');
+  stop(1);
+  await new Promise(() => {});
+}
+
 const mobile = spawnTool('pnpm', ['--filter', 'exposure', 'run', 'dev:android'], {
   detached: !isWindows,
   stdio: 'inherit',

@@ -7,6 +7,7 @@ import logging
 import os
 import re
 from collections import OrderedDict
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
@@ -17,8 +18,9 @@ from pydantic import ValidationError
 
 from . import auth
 from .analysis import analyze_deterministic, merge_semantic
-from .auth import require_authenticated_user
+from .auth import require_authenticated_user, require_database_user
 from .curation import create_style_profile, review_portfolio
+from .database import ImmutablePhotoError, MongoDatabase, get_mongo_database, mongo_database
 from .generative import embed_localized_patch, extract_localized_patch, prepare_local_generation
 from .models import (
     AnalysisResult,
@@ -38,6 +40,7 @@ from .models import (
     MetadataAdviceResponse,
     PortfolioReview,
     Region,
+    SpeechRequest,
     StyleProfile,
 )
 from .providers import (
@@ -55,6 +58,21 @@ from .renderer import (
     render_layer_stack,
     resolve_canvas_expansion,
 )
+from .speech import (
+    ElevenLabsSpeechProvider,
+    SpeechProviderError,
+    SpeechProviderNotConfiguredError,
+    SpeechProviderQuotaError,
+    SpeechProviderTimeoutError,
+)
+from .sync_models import (
+    AnalysisWrite,
+    CloudPhoto,
+    CloudPortfolioReview,
+    CloudPreferences,
+    CloudStyleProfile,
+    DeletedCloudPhoto,
+)
 
 MAX_UPLOAD_BYTES = int(os.getenv("EXPOSURE_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 SEMANTIC_TIMEOUT_SECONDS = max(5.0, min(40.0, float(os.getenv("EXPOSURE_SEMANTIC_TIMEOUT_SECONDS", "25"))))
@@ -70,14 +88,25 @@ GPS_KEY = re.compile(r"gps|latitude|longitude|location", re.IGNORECASE)
 SCHEMA_VERSION = "analysis-2"
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Exposure API", version="0.1.0", docs_url="/docs")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    await mongo_database.startup()
+    try:
+        yield
+    finally:
+        await mongo_database.shutdown()
+
+
+app = FastAPI(title="Exposure API", version="0.1.0", docs_url="/docs", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[origin for origin in os.getenv("EXPOSURE_ALLOWED_ORIGINS", "").split(",") if origin],
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
 )
 provider = GeminiProvider()
+speech_provider = ElevenLabsSpeechProvider()
 AnalysisCacheKey = tuple[str, str, str, str, str, str]
 analysis_cache: OrderedDict[AnalysisCacheKey, AnalysisResult] = OrderedDict()
 
@@ -212,9 +241,126 @@ async def health() -> dict[str, object]:
         "semanticFallbackModels": list(getattr(provider, "semantic_models", (provider.semantic_model,))[1:]),
         "semanticThinkingLevel": getattr(provider, "thinking_level", "low"),
         "imageModel": provider.image_model,
+        "elevenLabsConfigured": speech_provider.configured,
+        "speechModel": speech_provider.model_id,
         "authRequired": auth.AUTH_REQUIRED,
         "authConfigured": auth.auth_configured(),
+        "database": "mongodb-atlas",
+        "databaseConfigured": mongo_database.configured,
+        "databaseConnected": mongo_database.connected,
     }
+
+
+def _owner_id(user: dict[str, object]) -> str:
+    owner_id = user.get("sub")
+    if not isinstance(owner_id, str) or not owner_id:
+        raise HTTPException(401, "A valid Auth0 subject is required.")
+    return owner_id
+
+
+async def _ready_database(database: Annotated[MongoDatabase, Depends(get_mongo_database)]) -> MongoDatabase:
+    if not database.connected:
+        raise HTTPException(503, "MongoDB Atlas is not configured or connected.")
+    return database
+
+
+DatabaseUser = Annotated[dict[str, object], Depends(require_database_user)]
+ReadyDatabase = Annotated[MongoDatabase, Depends(_ready_database)]
+
+
+@app.get("/v1/sync/photos", response_model=list[CloudPhoto])
+async def list_cloud_photos(user: DatabaseUser, database: ReadyDatabase) -> list[CloudPhoto]:
+    return await database.list_photos(_owner_id(user))
+
+
+@app.put("/v1/sync/photos/{photo_id}", response_model=CloudPhoto)
+async def upsert_cloud_photo(
+    photo_id: str,
+    photo: CloudPhoto,
+    user: DatabaseUser,
+    database: ReadyDatabase,
+) -> CloudPhoto:
+    if photo.id != photo_id:
+        raise HTTPException(422, "The photo ID in the path and body must match.")
+    owner_id = _owner_id(user)
+    owner_prefix = f"{owner_id}/"
+    if not photo.original_path.startswith(owner_prefix) or any(
+        not asset.storage_path.startswith(owner_prefix) for asset in photo.layer_assets
+    ):
+        raise HTTPException(422, "Every storage path must belong to the authenticated account.")
+    try:
+        return await database.upsert_photo(owner_id, photo)
+    except ImmutablePhotoError as error:
+        raise HTTPException(409, str(error)) from error
+
+
+@app.delete("/v1/sync/photos/{photo_id}", response_model=DeletedCloudPhoto)
+async def delete_cloud_photo(photo_id: str, user: DatabaseUser, database: ReadyDatabase) -> DeletedCloudPhoto:
+    return await database.delete_photo(_owner_id(user), photo_id)
+
+
+@app.get("/v1/sync/analyses", response_model=list[AnalysisResult])
+async def list_cloud_analyses(user: DatabaseUser, database: ReadyDatabase) -> list[AnalysisResult]:
+    return await database.list_analyses(_owner_id(user))
+
+
+@app.put("/v1/sync/analyses/{version_id}", response_model=AnalysisResult)
+async def upsert_cloud_analysis(
+    version_id: str,
+    request: AnalysisWrite,
+    user: DatabaseUser,
+    database: ReadyDatabase,
+) -> AnalysisResult:
+    if request.analysis.version_id != version_id:
+        raise HTTPException(422, "The version ID in the path and body must match.")
+    return await database.upsert_analysis(_owner_id(user), request)
+
+
+@app.get("/v1/sync/styles", response_model=list[CloudStyleProfile])
+async def list_cloud_styles(user: DatabaseUser, database: ReadyDatabase) -> list[CloudStyleProfile]:
+    return await database.list_style_profiles(_owner_id(user))
+
+
+@app.put("/v1/sync/styles/{style_id}", response_model=CloudStyleProfile)
+async def upsert_cloud_style(
+    style_id: str,
+    style: CloudStyleProfile,
+    user: DatabaseUser,
+    database: ReadyDatabase,
+) -> CloudStyleProfile:
+    if style.id != style_id:
+        raise HTTPException(422, "The style ID in the path and body must match.")
+    return await database.upsert_style_profile(_owner_id(user), style)
+
+
+@app.delete("/v1/sync/styles/{style_id}", status_code=204)
+async def delete_cloud_style(style_id: str, user: DatabaseUser, database: ReadyDatabase) -> Response:
+    await database.delete_style_profile(_owner_id(user), style_id)
+    return Response(status_code=204)
+
+
+@app.get("/v1/sync/preferences", response_model=CloudPreferences | None)
+async def get_cloud_preferences(user: DatabaseUser, database: ReadyDatabase) -> CloudPreferences | None:
+    return await database.get_preferences(_owner_id(user))
+
+
+@app.put("/v1/sync/preferences", response_model=CloudPreferences)
+async def upsert_cloud_preferences(
+    preferences: CloudPreferences,
+    user: DatabaseUser,
+    database: ReadyDatabase,
+) -> CloudPreferences:
+    return await database.upsert_preferences(_owner_id(user), preferences)
+
+
+@app.post("/v1/sync/portfolio-reviews", status_code=204)
+async def insert_cloud_portfolio_review(
+    review: CloudPortfolioReview,
+    user: DatabaseUser,
+    database: ReadyDatabase,
+) -> Response:
+    await database.insert_portfolio_review(_owner_id(user), review)
+    return Response(status_code=204)
 
 
 @app.post("/v1/analyze", response_model=AnalysisResult)
@@ -554,6 +700,28 @@ async def coach(request: CoachRequest) -> CoachResponse:
         actions=[],
         model="exposure-fallback-coach-1",
     )
+
+
+@app.post("/v1/voice/synthesize", dependencies=[Depends(require_authenticated_user)])
+async def synthesize_voice(request: SpeechRequest) -> Response:
+    try:
+        audio = await speech_provider.synthesize(request.text)
+    except SpeechProviderNotConfiguredError as error:
+        raise HTTPException(503, str(error)) from error
+    except SpeechProviderQuotaError as error:
+        raise HTTPException(429, str(error)) from error
+    except SpeechProviderTimeoutError as error:
+        raise HTTPException(504, str(error)) from error
+    except SpeechProviderError as error:
+        logger.exception("ElevenLabs speech request failed")
+        raise HTTPException(502, str(error)) from error
+
+    headers = {"Cache-Control": "private, no-store"}
+    if audio.request_id:
+        headers["X-ElevenLabs-Request-Id"] = audio.request_id
+    if audio.character_cost:
+        headers["X-ElevenLabs-Character-Cost"] = audio.character_cost
+    return Response(audio.data, media_type=audio.media_type, headers=headers)
 
 
 @app.post(

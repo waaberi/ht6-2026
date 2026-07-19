@@ -16,13 +16,11 @@
     "api": "uv --directory services/api run uvicorn exposure_api.main:app --reload --env-file .env.local",
     "network:smoke": "node scripts/smoke-network.mjs",
     "production:smoke": "node scripts/smoke-production.mjs",
-    "db:start": "supabase start",
-    "db:reset": "supabase db reset",
-    "db:test": "supabase test db",
-    "db:stop": "supabase stop",
+    "db:test": "uv --directory services/api run --env-file .env.local python scripts/smoke_mongodb.py",
+    "db:migrate": "uv --directory services/api run --env-file .env.local python scripts/migrate_supabase_to_mongodb.py",
     "test:mobile": "pnpm --filter exposure run typecheck && pnpm --filter exposure run test && pnpm --filter exposure run doctor",
     "test:api": "uv --directory services/api run pytest",
-    "test:db": "node scripts/test-db.mjs",
+    "test:db": "pnpm db:test",
     "test": "pnpm test:mobile && pnpm test:api && pnpm test:db"
   },
   "devDependencies": {

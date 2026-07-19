@@ -24,7 +24,7 @@ Hard requirements:
 Use:
 
 - Expo SDK 57/React Native for the Android application.
-- Auth0 for accounts; Supabase for Postgres, private Storage, Realtime status, preferences, and history.
+- Auth0 for accounts; MongoDB Atlas for structured data, preferences, and history; Supabase for private image-object Storage.
 - One FastAPI service for deterministic analysis, Gemini orchestration, authoritative rendering, and generative diff extraction.
 
 The source of truth for every photo is:
@@ -240,7 +240,7 @@ Acceptance tests:
 - All user-facing branding uses `Exposure`.
 - Android is guaranteed; iOS remains source-compatible but is not a release gate. Web is excluded.
 - RAW development and direct tethered camera control are excluded from v1.
-- Supabase is the only account, database, and storage platform.
+- MongoDB Atlas is the only structured database. Auth0 owns identity, and Supabase is limited to private image-object Storage.
 - Lightroom APIs are not required; exports use Android’s share sheet.
 - Gemini output is validated and model IDs remain environment-configurable. [Gemini structured outputs](https://ai.google.dev/gemini-api/docs/structured-output).
-- The current blank Expo SDK 57 scaffold and Supabase CLI configuration are retained; no feature implementation or database migration has been completed.
+- The implemented app routes all owner-scoped structured sync through FastAPI and MongoDB Atlas; the phone retains direct access only to Supabase Storage for image blobs.

@@ -37,7 +37,7 @@ const requireApiUrl = async () => {
   return apiUrl;
 };
 
-const apiFetch = async (path: string, init: Parameters<typeof fetch>[1]) => {
+export const apiFetch = async (path: string, init: Parameters<typeof fetch>[1]) => {
   const apiUrl = await requireApiUrl();
   const controller = new AbortController();
   const timeout = setTimeout(
@@ -59,7 +59,7 @@ const apiFetch = async (path: string, init: Parameters<typeof fetch>[1]) => {
   }
 };
 
-const parseResponse = async <T>(response: Response): Promise<T> => {
+export const parseResponse = async <T>(response: Response): Promise<T> => {
   if (!response.ok) {
     const body = await response.text();
     throw new Error(apiErrorMessage(body, response.status));
@@ -118,6 +118,19 @@ export const askCoach = async (
     }),
   });
   return parseCoachResponse(await parseResponse<unknown>(response));
+};
+
+export const synthesizeCoachSpeech = async (text: string): Promise<ArrayBuffer> => {
+  const response = await apiFetch('/v1/voice/synthesize', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(apiErrorMessage(body, response.status));
+  }
+  return response.arrayBuffer();
 };
 
 export const getMetadataAdvice = async (
