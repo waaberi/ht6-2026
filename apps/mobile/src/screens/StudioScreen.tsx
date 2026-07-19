@@ -41,6 +41,7 @@ import {
 import { appendLayer, collectiveAdjustmentValues, currentVersion, isTranslatableLayer, layerTranslation, mergeCollectiveAdjustments, removeLayer, reorderLayer, reusableStyleAdjustments, setCollectiveAdjustments, setLayerOpacity, setLayerTranslation, StalePhotoVersionError, toggleLayer, type TranslatableLayer } from '../domain/layers';
 import type {
   AdjustmentValues,
+  AnalysisResult,
   CanvasTransform,
   CoachAction,
   CoachResponse,
@@ -153,6 +154,8 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   const [previewImageSize, setPreviewImageSize] = useState<{ uri: string; width: number; height: number }>();
   const [message, setMessage] = useState<string>();
   const [coachResponse, setCoachResponse] = useState<CoachResponse>();
+  const [coachFeedback, setCoachFeedback] = useState<CoachFeedbackPlan>();
+  const [feedbackBusy, setFeedbackBusy] = useState(false);
   const [coachQuestion, setCoachQuestion] = useState('');
   const [coachBusy, setCoachBusy] = useState(false);
   const [metadataDraft, setMetadataDraft] = useState<EditablePhotoMetadata>(() => (
@@ -223,12 +226,6 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     [analysis?.issues, dismissedIssueIds],
   );
   const selectedIssue = visibleIssues.find((issue) => issue.id === selectedIssueId) ?? visibleIssues[0];
-  const coachFeedback = useMemo(
-    () => analysis && version
-      ? buildCoachFeedback(analysis, savedAdjustments, version.stack.canvasTransform)
-      : undefined,
-    [analysis, savedAdjustments, version],
-  );
   const explicitRecommendation = generativeRecommendationId
     ? visibleIssues.find((issue) => issue.id === generativeRecommendationId)
     : undefined;
@@ -326,10 +323,11 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   }, [version?.id]);
 
   useEffect(() => {
-    setMetadataDraft(editableMetadataFrom(selectedPhoto?.exif ?? {}, analysis));
+    setMetadataDraft(editableMetadataFrom(selectedPhoto?.exif ?? {}));
     setCoachResponse(undefined);
+    setCoachFeedback(undefined);
     setMetadataAdvice(undefined);
-  }, [analysis?.versionId, selectedPhoto?.id]);
+  }, [selectedPhoto?.id]);
 
   useEffect(() => {
     setSelectedLookId(appliedLookLayer?.styleProfileId);
@@ -434,6 +432,19 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     }
   };
 
+  const mergeMissingMetadataFromAnalysis = (result: AnalysisResult) => {
+    const detected = editableMetadataFrom(selectedPhoto.exif, result);
+    const merged = { ...metadataDraftRef.current };
+    for (const field of metadataFields) {
+      if (!merged[field.key].trim() && detected[field.key].trim()) {
+        merged[field.key] = detected[field.key];
+      }
+    }
+    metadataDraftRef.current = merged;
+    setMetadataDraft(merged);
+    return merged;
+  };
+
   const acceptRecommendation = async (issue?: Issue) => {
     if (!issue) return;
     const preferences = await recordRecommendationFeedback(issue.id, true);
@@ -516,15 +527,25 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   };
 
   const analyze = async () => {
+    if (analyzing || feedbackBusy || metadataAdviceBusy) return;
     setMessage(undefined);
+    setFeedbackBusy(true);
     try {
       const result = await runAnalysis();
+      mergeMissingMetadataFromAnalysis(result);
+      setCoachFeedback(buildCoachFeedback(
+        result,
+        collectiveAdjustmentValues(version.stack),
+        version.stack.canvasTransform,
+      ));
       const firstIssue = result.issues[0];
       setDismissedIssueIds([]);
       setSelectedIssueId(firstIssue?.id);
       if (firstIssue) setGenerativeTarget(firstIssue.location);
     } catch (error) {
       setMessage(error instanceof ApiUnavailableError ? error.message : error instanceof Error ? error.message : 'Analysis failed.');
+    } finally {
+      setFeedbackBusy(false);
     }
   };
 
@@ -542,13 +563,16 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   };
 
   const requestMetadataAdvice = async () => {
-    if (!analysis || metadataAdviceBusy || filledMetadataFieldCount(metadataDraftRef.current) <= 3) return;
+    if (analyzing || feedbackBusy || metadataAdviceBusy || filledMetadataFieldCount(metadataDraftRef.current) <= 3) return;
     setMessage(undefined);
     setMetadataAdviceBusy(true);
     try {
       await persistMetadataDraft();
-      const groundedAnalysis = analysisWithEditableMetadata(analysis, metadataDraftRef.current);
-      setMetadataAdvice(await getMetadataAdvice(groundedAnalysis, metadataDraftRef.current));
+      const result = await runAnalysis();
+      const metadata = mergeMissingMetadataFromAnalysis(result);
+      await updatePhotoExif(exifWithEditableMetadata(selectedPhoto.exif, metadata), selectedPhoto.id);
+      const groundedAnalysis = analysisWithEditableMetadata(result, metadata);
+      setMetadataAdvice(await getMetadataAdvice(groundedAnalysis, metadata));
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Hardware advice is unavailable.');
     } finally {
@@ -1220,9 +1244,9 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
               />
             ) : (
               <CoachPanel
-                analysis={analysis}
-                analyzing={analyzing}
+                analysisBusy={analyzing}
                 applying={applying}
+                feedbackBusy={feedbackBusy}
                 feedback={coachFeedback}
                 metadata={metadataDraft}
                 metadataAdvice={metadataAdvice}
@@ -1232,7 +1256,6 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
                 onMetadataAdvice={() => void requestMetadataAdvice()}
                 onMetadataChange={(key, value) => {
                   setMetadataDraft((current) => ({ ...current, [key]: value }));
-                  setMetadataAdvice(undefined);
                 }}
                 onMetadataCommit={() => void saveMetadataDraft()}
                 onOpenSection={(section) => {
@@ -1548,6 +1571,7 @@ const MetadataPanel = ({
   metadata,
   advice,
   busy,
+  disabled,
   onChange,
   onCommit,
   onAdvice,
@@ -1555,12 +1579,14 @@ const MetadataPanel = ({
   metadata: EditablePhotoMetadata;
   advice?: MetadataAdvice;
   busy: boolean;
+  disabled: boolean;
   onChange: (key: keyof EditablePhotoMetadata, value: string) => void;
   onCommit: () => void;
   onAdvice: () => void;
 }) => {
   const populatedFields = filledMetadataFieldCount(metadata);
   const hasEnoughMetadata = populatedFields > 3;
+  const adviceDisabled = busy || disabled || !hasEnoughMetadata;
   const sections = advice ? [
     { title: 'Camera profile', body: advice.cameraProfile },
     { title: 'Lens behavior', body: advice.lensBehavior },
@@ -1600,18 +1626,18 @@ const MetadataPanel = ({
 
     <Pressable
       accessibilityRole="button"
-      accessibilityState={{ disabled: busy || !hasEnoughMetadata }}
-      disabled={busy || !hasEnoughMetadata}
+      accessibilityState={{ disabled: adviceDisabled }}
+      disabled={adviceDisabled}
       onPress={onAdvice}
       style={({ pressed }) => [
         styles.metaAdviceButton,
         pressed && styles.primaryPressed,
-        (busy || !hasEnoughMetadata) && styles.disabled,
+        adviceDisabled && styles.disabled,
       ]}
     >
       {busy
         ? <ActivityIndicator color={colors.onPrimary} />
-        : <Text style={styles.metaAdviceButtonText}>{advice ? 'Refresh hardware review' : 'Review my hardware use'}</Text>}
+        : <Text style={styles.metaAdviceButtonText}>{advice ? 'Regenerate suggestions' : 'Generate suggestions'}</Text>}
     </Pressable>
 
     {advice ? (
@@ -1635,9 +1661,9 @@ const MetadataPanel = ({
 };
 
 const CoachPanel = ({
-  analysis,
-  analyzing,
+  analysisBusy,
   applying,
+  feedbackBusy,
   feedback,
   metadata,
   metadataAdvice,
@@ -1649,9 +1675,9 @@ const CoachPanel = ({
   onMetadataCommit,
   onOpenSection,
 }: {
-  analysis: ReturnType<typeof useExposure>['analysis'];
-  analyzing: boolean;
+  analysisBusy: boolean;
   applying: boolean;
+  feedbackBusy: boolean;
   feedback?: CoachFeedbackPlan;
   metadata: EditablePhotoMetadata;
   metadataAdvice?: MetadataAdvice;
@@ -1664,21 +1690,6 @@ const CoachPanel = ({
   onOpenSection: (section: CoachFeedbackSection) => void;
 }) => {
   const [section, setSection] = useState<CoachPanelSection>('feedback');
-  if (!analysis) {
-    return (
-      <View style={styles.centerAction}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityState={{ disabled: analyzing }}
-          disabled={analyzing}
-          onPress={onAnalyze}
-          style={({ pressed }) => [styles.primary, pressed && styles.primaryPressed, analyzing && styles.disabled]}
-        >
-          {analyzing ? <ActivityIndicator color={colors.onPrimary} /> : <Text style={styles.primaryText}>Analyse photo</Text>}
-        </Pressable>
-      </View>
-    );
-  }
   return (
     <>
       <View accessibilityRole="tablist" style={styles.segmented}>
@@ -1702,27 +1713,60 @@ const CoachPanel = ({
         })}
       </View>
 
-      {section === 'feedback' && feedback ? (
-        <>
-          <Text style={styles.summary}>Four fixes for this photo</Text>
-          <Text style={styles.body}>Review each area, then apply the complete adjustment set at once.</Text>
-          <View style={styles.coachFeedbackList}>
-            {feedback.items.map((item) => (
-              <CoachFeedbackCard key={item.section} item={item} onOpenSection={onOpenSection} />
-            ))}
+      {section === 'feedback' ? (
+        feedback ? (
+          <>
+            <Text style={styles.summary}>Four fixes for this photo</Text>
+            <Text style={styles.body}>Review each area, then apply the complete adjustment set at once.</Text>
+            <View style={styles.coachFeedbackList}>
+              {feedback.items.map((item) => (
+                <CoachFeedbackCard key={item.section} item={item} onOpenSection={onOpenSection} />
+              ))}
+            </View>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityState={{ disabled: applying || analysisBusy }}
+              disabled={applying || analysisBusy}
+              onPress={onAccept}
+              style={({ pressed }) => [
+                styles.coachAcceptAll,
+                pressed && styles.primaryPressed,
+                (applying || analysisBusy) && styles.disabled,
+              ]}
+            >
+              {applying
+                ? <ActivityIndicator color={colors.onPrimary} />
+                : <Text style={styles.coachAcceptAllText}>Accept all changes</Text>}
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityState={{ disabled: applying || analysisBusy }}
+              disabled={applying || analysisBusy}
+              onPress={onAnalyze}
+              style={({ pressed }) => [
+                styles.coachRegenerate,
+                pressed && styles.controlPressed,
+                (applying || analysisBusy) && styles.disabled,
+              ]}
+            >
+              {feedbackBusy
+                ? <ActivityIndicator color={colors.text} />
+                : <Text style={styles.coachRegenerateText}>Regenerate suggestions</Text>}
+            </Pressable>
+          </>
+        ) : (
+          <View style={styles.centerAction}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityState={{ disabled: analysisBusy }}
+              disabled={analysisBusy}
+              onPress={onAnalyze}
+              style={({ pressed }) => [styles.primary, pressed && styles.primaryPressed, analysisBusy && styles.disabled]}
+            >
+              {feedbackBusy ? <ActivityIndicator color={colors.onPrimary} /> : <Text style={styles.primaryText}>Analyse photo</Text>}
+            </Pressable>
           </View>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityState={{ disabled: applying }}
-            disabled={applying}
-            onPress={onAccept}
-            style={({ pressed }) => [styles.coachAcceptAll, pressed && styles.primaryPressed, applying && styles.disabled]}
-          >
-            {applying
-              ? <ActivityIndicator color={colors.onPrimary} />
-              : <Text style={styles.coachAcceptAllText}>Accept all changes</Text>}
-          </Pressable>
-        </>
+        )
       ) : null}
 
       {section === 'meta' ? (
@@ -1730,6 +1774,7 @@ const CoachPanel = ({
           metadata={metadata}
           advice={metadataAdvice}
           busy={metadataAdviceBusy}
+          disabled={analysisBusy && !metadataAdviceBusy}
           onChange={onMetadataChange}
           onCommit={onMetadataCommit}
           onAdvice={onMetadataAdvice}
@@ -2237,6 +2282,8 @@ const styles = StyleSheet.create({
   coachReviewText: { color: colors.actionText, fontSize: 12, fontWeight: '800' },
   coachAcceptAll: { minHeight: 52, alignItems: 'center', justifyContent: 'center', borderRadius: 8, backgroundColor: colors.primary, marginTop: 14 },
   coachAcceptAllText: { color: colors.onPrimary, fontSize: 14, fontWeight: '800' },
+  coachRegenerate: { minHeight: 52, alignItems: 'center', justifyContent: 'center', borderRadius: 8, borderWidth: 1, borderColor: colors.outlineStrong, backgroundColor: colors.surfaceStrong, marginTop: 10 },
+  coachRegenerateText: { color: colors.text, fontSize: 14, fontWeight: '800' },
   metaIntro: { color: colors.textSecondary, fontSize: 12, lineHeight: 18, marginBottom: 14 },
   metaFields: { gap: 12 },
   metaField: { gap: 6 },
