@@ -10,6 +10,7 @@ import {
   savePhotos,
   type IngestPhotoInput,
 } from '../data/photoRepository';
+import { listStyleProfileDeletionIds } from '../data/styleRepository';
 import { setActiveOwnerId } from '../data/ownerScope';
 import { appendLayer, assertCurrentVersion, commitVersion, currentVersion, mergeCollectiveAdjustments, restoreVersion } from '../domain/layers';
 import { GUEST_OWNER_ID, assertOwnerMatches, normalizeOwnerId, type OwnerId } from '../domain/ownership';
@@ -25,6 +26,7 @@ import {
   pullRemoteStyles,
   syncPhotoDeletions,
   syncQueuedPhotos,
+  syncStyleProfileDeletions,
 } from '../services/sync';
 import NetInfo from '@react-native-community/netinfo';
 
@@ -144,8 +146,14 @@ export const ExposureProvider = ({ children }: React.PropsWithChildren) => {
     setSyncing(true);
     setSyncError(undefined);
     try {
-      const pendingDeletions = await listPhotoDeletionIds(syncOwnerId);
-      await syncPhotoDeletions(syncOwnerId, pendingDeletions);
+      const [pendingDeletions, pendingStyleDeletions] = await Promise.all([
+        listPhotoDeletionIds(syncOwnerId),
+        listStyleProfileDeletionIds(syncOwnerId),
+      ]);
+      await Promise.all([
+        syncPhotoDeletions(syncOwnerId, pendingDeletions),
+        syncStyleProfileDeletions(syncOwnerId, pendingStyleDeletions),
+      ]);
       const uploaded = await syncQueuedPhotos(syncOwnerId, photosRef.current, (progress) => showSyncProgress(syncOwnerId, progress));
       const [hydrated, remoteAnalyses] = await Promise.all([
         pullRemotePhotos(syncOwnerId, uploaded, pendingDeletions),

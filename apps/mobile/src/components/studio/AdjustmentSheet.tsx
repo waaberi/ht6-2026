@@ -38,6 +38,9 @@ export const AdjustmentSheet = ({
   onCommit,
   onResetControl,
   onRestore,
+  onCreatePreset,
+  canCreatePreset,
+  presetBusy,
   busy,
   section,
   onSectionChange,
@@ -57,6 +60,9 @@ export const AdjustmentSheet = ({
   onCommit: (key: AdjustmentKey, value: number) => void;
   onResetControl: (key: AdjustmentKey) => void;
   onRestore: () => void;
+  onCreatePreset: () => void;
+  canCreatePreset: boolean;
+  presetBusy: boolean;
   busy: boolean;
   section: AdjustmentSection;
   onSectionChange: (section: AdjustmentSection) => void;
@@ -111,13 +117,24 @@ export const AdjustmentSheet = ({
       {section !== 'crop' ? <View style={styles.toolbar}>
         <Pressable
           accessibilityRole="button"
+          accessibilityLabel="Save current edits as a new preset"
+          accessibilityState={{ disabled: !canCreatePreset || busy || presetBusy, busy: presetBusy }}
+          disabled={!canCreatePreset || busy || presetBusy}
+          style={({ pressed }) => [styles.toolbarButton, styles.newPreset, pressed && styles.primaryPressed, (!canCreatePreset || busy || presetBusy) && styles.disabled]}
+          onPress={onCreatePreset}
+        >
+          <MaterialCommunityIcons name="bookmark-plus-outline" size={19} color={colors.onPrimary} />
+          <Text style={styles.newPresetText}>New preset</Text>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
           accessibilityLabel="Reset all adjustments"
           disabled={!hasChanges || busy}
-          style={({ pressed }) => [styles.restore, pressed && styles.controlPressed, (!hasChanges || busy) && styles.disabled]}
+          style={({ pressed }) => [styles.toolbarButton, styles.restore, pressed && styles.controlPressed, (!hasChanges || busy) && styles.disabled]}
           onPress={onRestore}
         >
           <MaterialCommunityIcons name="restore" size={19} color={hasChanges ? colors.text : colors.textSecondary} />
-          <Text style={[styles.restoreText, !hasChanges && styles.disabledText]}>Reset</Text>
+          <Text style={[styles.restoreText, !hasChanges && styles.disabledText]}>Reset edits</Text>
         </Pressable>
       </View> : null}
 
@@ -171,8 +188,11 @@ const styles = StyleSheet.create({
   controlPressed: { backgroundColor: colors.controlPressed },
   sectionText: { color: colors.textSecondary, fontSize: 12, fontWeight: '700' },
   sectionTextSelected: { color: colors.onPrimary },
-  toolbar: { minHeight: 48, flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', marginBottom: 2 },
-  restore: { minWidth: 96, minHeight: 48, borderRadius: 24, borderWidth: 1, borderColor: colors.outline, paddingHorizontal: 12, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center' },
+  toolbar: { minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 2 },
+  toolbarButton: { flex: 1, minHeight: 48, borderRadius: 24, borderWidth: 1, paddingHorizontal: 10, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center' },
+  newPreset: { backgroundColor: colors.primary, borderColor: colors.primary },
+  newPresetText: { color: colors.onPrimary, fontSize: 13, fontWeight: '800' },
+  restore: { borderColor: colors.outline },
   restoreText: { color: colors.text, fontSize: 13, fontWeight: '700' },
   control: { marginBottom: 8 },
   controlHeading: { minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingLeft: 4 },

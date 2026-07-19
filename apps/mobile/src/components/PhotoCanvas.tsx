@@ -13,52 +13,11 @@ import {
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { PanResponder, StyleSheet, View } from 'react-native';
 
+import { addPreviewAdjustments, adjustmentPreviewMatrix, globalPreviewAdjustments } from '../domain/adjustmentPreview';
 import { quarterTurnsForRotation, resolveCanvasExpansion } from '../domain/canvasTransforms';
 import type { AdjustmentValues, AnalysisResult, LayerStack, Region } from '../domain/types';
 import { colors } from './theme';
 import { CropOverlay } from './studio/CropOverlay';
-
-const addAdjustments = (target: AdjustmentValues, source: AdjustmentValues, weight = 1) => {
-  for (const [key, value] of Object.entries(source) as Array<[keyof AdjustmentValues, number]>) {
-    (target as Record<string, number>)[key] = (target[key] ?? 0) + value * weight;
-  }
-};
-
-const globalAdjustments = (stack: LayerStack) => {
-  const values: AdjustmentValues = { ...(stack.adjustments ?? {}) };
-  for (const layer of stack.layers) {
-    if (!layer.enabled || (layer.type !== 'adjustment' && layer.type !== 'style')) continue;
-    const weight = layer.opacity * (layer.type === 'style' ? layer.strength : 1);
-    addAdjustments(values, layer.adjustments, weight);
-  }
-  return values;
-};
-
-const adjustmentMatrix = (values: AdjustmentValues) => {
-  const exposure = values.exposure ?? 0;
-  const contrast = (values.contrast ?? 0) + (values.sharpening ?? 0) * 0.18;
-  const saturation = (values.saturation ?? 0) + (values.vibrance ?? 0) * 0.55;
-  const highlights = values.highlights ?? 0;
-  const shadows = values.shadows ?? 0;
-  const temperature = values.temperature ?? 0;
-  const tint = values.tint ?? 0;
-  const brightness = 2 ** exposure;
-  const c = Math.max(0, 1 + contrast);
-  const s = Math.max(0, 1 + saturation);
-  // A color matrix accurately previews exposure, contrast, saturation, temperature, and tint.
-  // Highlight/shadow offsets are intentionally conservative approximations; detail filters remain authoritative on export.
-  const toneScale = brightness * Math.max(0.2, 1 + highlights * 0.16);
-  const offset = (1 - c) * 0.5 + shadows * 0.12;
-  const rw = 0.2126 * (1 - s);
-  const gw = 0.7152 * (1 - s);
-  const bw = 0.0722 * (1 - s);
-  return [
-    toneScale * c * (rw + s), toneScale * c * gw, toneScale * c * bw, 0, offset + temperature * 0.08,
-    toneScale * c * rw, toneScale * c * (gw + s), toneScale * c * bw, 0, offset + tint * 0.06,
-    toneScale * c * rw, toneScale * c * gw, toneScale * c * (bw + s), 0, offset - temperature * 0.08,
-    0, 0, 0, 1, 0,
-  ];
-};
 
 export const PhotoCanvas = ({
   uri,
@@ -89,8 +48,8 @@ export const PhotoCanvas = ({
 }) => {
   const image = useImage(uri);
   const [size, setSize] = useState({ width: 1, height: 1 });
-  const adjustments = useMemo(() => globalAdjustments(stack), [stack]);
-  const matrix = useMemo(() => adjustmentMatrix(adjustments), [adjustments]);
+  const adjustments = useMemo(() => globalPreviewAdjustments(stack), [stack]);
+  const matrix = useMemo(() => adjustmentPreviewMatrix(adjustments), [adjustments]);
   const denoise = Math.max(0, adjustments.denoise ?? 0);
   const grain = Math.max(0, adjustments.grain ?? 0);
   const vignette = Math.max(-1, Math.min(1, adjustments.vignette ?? 0));
@@ -246,7 +205,7 @@ export const PhotoCanvas = ({
                 {stack.layers.map((layer) => {
                   if (!layer.enabled || layer.type !== 'masked-adjustment' || !layer.mask.region) return null;
                   const maskedValues: AdjustmentValues = {};
-                  addAdjustments(maskedValues, layer.adjustments, layer.opacity);
+                  addPreviewAdjustments(maskedValues, layer.adjustments, layer.opacity);
                   const region = layer.mask.region;
                   const clip = {
                     x: geometry.full.x + region.x * geometry.full.width,
@@ -257,7 +216,7 @@ export const PhotoCanvas = ({
                   return (
                     <Group key={layer.id} clip={clip}>
                       <SkiaImage image={image} {...geometry.full} fit="fill">
-                        <ColorMatrix matrix={adjustmentMatrix(maskedValues)} />
+                        <ColorMatrix matrix={adjustmentPreviewMatrix(maskedValues)} />
                       </SkiaImage>
                     </Group>
                   );
