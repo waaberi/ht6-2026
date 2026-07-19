@@ -133,7 +133,7 @@ export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => 
     setMessage(undefined);
     try {
       await sendMagicLink(normalizedEmail);
-      setMessage({ text: 'Magic link sent. Open your email to finish signing in.', tone: 'info' });
+      setMessage({ text: 'Sign-in link sent. Open your email to finish signing in.', tone: 'info' });
     } catch (caught) {
       setMessage({
         text: caught instanceof Error ? caught.message : 'Sign-in failed.',
@@ -158,16 +158,18 @@ export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => 
           <View style={styles.content}>
             <View style={styles.topBar}>
               <Text style={styles.wordmark}>Exposure</Text>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityHint="Open the Exposure camera without finishing setup"
-                hitSlop={12}
-                onPress={finish}
-                style={({ pressed }) => [styles.skipButton, pressed && styles.pressed]}
-                testID="onboarding-skip"
-              >
-                <Text style={styles.skipText}>Skip</Text>
-              </Pressable>
+              {step < 2 ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityHint="Open the Exposure camera without finishing setup"
+                  hitSlop={12}
+                  onPress={finish}
+                  style={({ pressed }) => [styles.skipButton, pressed && styles.controlPressed]}
+                  testID="onboarding-skip"
+                >
+                  <Text style={styles.skipText}>Skip</Text>
+                </Pressable>
+              ) : null}
             </View>
 
             <Animated.View
@@ -190,9 +192,6 @@ export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => 
                   </View>
                   <View style={styles.welcomeCopy}>
                     <Text accessibilityRole="header" style={styles.title}>A camera that teaches.</Text>
-                    <Text style={styles.body}>
-                      Familiar camera controls first. Evidence-backed coaching when you want it.
-                    </Text>
                   </View>
                   <View style={styles.footer}>
                     <ProgressIndicator current={step} />
@@ -214,17 +213,17 @@ export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => 
                     <FeatureRow
                       icon="scan-outline"
                       title="Coach"
-                      detail="Measured feedback for this photo—not a generic score."
+                      detail="Feedback grounded in this photo’s light, focus and composition."
                     />
                     <FeatureRow
-                      icon="options-outline"
-                      title="Adjust"
-                      detail="Crop, rotate, light, color and detail in one place."
+                      icon="sparkles-outline"
+                      title="Generate"
+                      detail="Remove distractions, add elements or expand the frame."
                     />
                     <FeatureRow
                       icon="color-palette-outline"
                       title="Looks"
-                      detail="Reusable visual styles with strength control. Your original stays untouched."
+                      detail="Reusable styles from 3–8 reference photos."
                     />
                   </View>
                   <View style={styles.footer}>
@@ -268,7 +267,7 @@ export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => 
                       placeholderTextColor={colors.textSecondary}
                       style={[styles.input, message?.tone === 'error' && styles.inputError]}
                       accessibilityLabel="Email address"
-                      accessibilityHint="A magic sign-in link will be sent to this address"
+                      accessibilityHint="A sign-in link will be sent to this address"
                       testID="onboarding-email"
                     />
                     <Pressable
@@ -276,8 +275,8 @@ export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => 
                       accessibilityState={{ disabled: busy, busy }}
                       style={({ pressed }) => [
                         styles.primary,
+                        pressed && styles.primaryPressed,
                         busy && styles.disabled,
-                        pressed && styles.pressed,
                       ]}
                       onPress={signIn}
                       disabled={busy}
@@ -286,7 +285,7 @@ export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => 
                       {busy ? (
                         <ActivityIndicator color={colors.onPrimary} />
                       ) : (
-                        <Text style={styles.primaryText}>Continue with email</Text>
+                        <Text style={styles.primaryText}>Send sign-in link</Text>
                       )}
                     </Pressable>
                     {message ? (
@@ -311,7 +310,7 @@ export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => 
                     <Pressable
                       accessibilityRole="button"
                       accessibilityHint="Use Exposure without cloud sync"
-                      style={({ pressed }) => [styles.offline, pressed && styles.pressed]}
+                      style={({ pressed }) => [styles.offline, pressed && styles.controlPressed]}
                       onPress={finish}
                       testID="onboarding-offline"
                     >
@@ -386,7 +385,7 @@ const styles = StyleSheet.create({
   },
   topBar: { minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   wordmark: { color: colors.text, fontFamily: typography.displayFamily, ...typography.title },
-  skipButton: { minHeight: 44, justifyContent: 'center', paddingHorizontal: spacing.xs },
+  skipButton: { minHeight: 48, borderRadius: radii.sm, justifyContent: 'center', paddingHorizontal: spacing.xs },
   skipText: { color: colors.textSecondary, fontSize: 14, fontWeight: '700' },
   step: { flex: 1 },
   videoFrame: {
@@ -446,6 +445,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   primaryText: { color: colors.onPrimary, fontSize: 15, fontWeight: '800' },
+  primaryPressed: { backgroundColor: colors.primaryPressed },
   message: { color: colors.info, ...typography.label, textAlign: 'center' },
   errorMessage: { color: colors.error },
   privacyNote: { flexDirection: 'row', alignItems: 'flex-start', gap: spacing.sm, marginTop: spacing.md },
@@ -459,12 +459,14 @@ const styles = StyleSheet.create({
     borderRadius: radii.md,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.surface,
+    backgroundColor: colors.controlSurface,
+    borderWidth: 1,
+    borderColor: colors.outline,
   },
   offlineText: { color: colors.text, fontSize: 15, fontWeight: '700' },
-  backButton: { minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xxs },
+  backButton: { minHeight: 48, borderRadius: radii.sm, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xxs },
   backText: { color: colors.textSecondary, fontSize: 14, fontWeight: '700' },
-  pressed: { opacity: 0.78 },
+  controlPressed: { backgroundColor: colors.controlPressed },
   disabled: { opacity: 0.42 },
 });
 
@@ -500,7 +502,7 @@ const PrimaryButton = ({ label, onPress, testID }: { label: string; onPress: () 
   <Pressable
     accessibilityRole="button"
     onPress={onPress}
-    style={({ pressed }) => [styles.primary, pressed && styles.pressed]}
+    style={({ pressed }) => [styles.primary, pressed && styles.primaryPressed]}
     testID={testID}
   >
     <Text style={styles.primaryText}>{label}</Text>
@@ -511,7 +513,7 @@ const BackButton = ({ onPress }: { onPress: () => void }) => (
   <Pressable
     accessibilityRole="button"
     onPress={onPress}
-    style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}
+    style={({ pressed }) => [styles.backButton, pressed && styles.controlPressed]}
     testID="onboarding-back"
   >
     <Ionicons accessibilityElementsHidden name="chevron-back" size={16} color={colors.textSecondary} />

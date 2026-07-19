@@ -520,7 +520,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     setDraftAdjustments({});
     setApplying(true);
     try {
-      const changed = await commit(setCollectiveAdjustments(version.stack, {}), 'Restore adjustments');
+      const changed = await commit(setCollectiveAdjustments(version.stack, {}), 'Reset adjustments');
       if (!changed) setDraftAdjustments(savedAdjustments);
     } finally {
       adjustmentCommitRef.current = false;
@@ -658,7 +658,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     lookCommitRef.current = true;
     setLookBusy(true);
     try {
-      const changed = await commit(removeStyleLayers(version.stack), 'Restore look');
+      const changed = await commit(removeStyleLayers(version.stack), 'Original look');
       if (changed) {
         setSelectedLookId(undefined);
         setLookStrength(0.75);
@@ -789,13 +789,13 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
       <View style={styles.header}>
         <Pressable accessibilityRole="button" accessibilityLabel="Close editor" style={styles.headerButton} onPress={onClose}>
-          <MaterialCommunityIcons name="arrow-left" size={26} color={colors.ink} />
+          <MaterialCommunityIcons name="arrow-left" size={26} color={colors.text} />
         </Pressable>
         <View style={styles.headerCenter}>
           <Text style={styles.headerTitle}>Edit</Text>
         </View>
         <Pressable accessibilityRole="button" style={styles.exportButton} onPress={exportPhoto} disabled={exporting}>
-          {exporting ? <ActivityIndicator size="small" color={colors.limeInk} /> : <Text style={styles.exportButtonText}>Export</Text>}
+          {exporting ? <ActivityIndicator size="small" color={colors.onPrimary} /> : <Text style={styles.exportButtonText}>Export</Text>}
         </Pressable>
       </View>
 
@@ -879,7 +879,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
               }}
               onRestoreTransform={() => {
                 setCropAspect(undefined);
-                void commitTransform(restoreManualTransform(draftTransform), 'Restore crop and rotation');
+                void commitTransform(restoreManualTransform(draftTransform), 'Reset crop and rotation');
               }}
             />
           ) : null}
@@ -931,6 +931,8 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
               onExpansionFractionChange={setExpansionFraction}
             />
           ) : null}
+
+          {tool === 'more' ? <MorePanel onSelect={setTool} /> : null}
 
           {tool === 'layers' ? (
             <LayersPanel
@@ -996,7 +998,11 @@ const CoachEditPreviewPanel = ({
             accessibilityState={{ selected, disabled: busy }}
             disabled={busy}
             onPress={() => onComparisonChange(option)}
-            style={({ pressed }) => [styles.segment, selected && styles.segmentActive, pressed && styles.pressed]}
+            style={({ pressed }) => [
+              styles.segment,
+              selected && styles.segmentActive,
+              pressed && (selected ? styles.primaryPressed : styles.controlPressed),
+            ]}
           >
             <Text style={[styles.segmentText, selected && styles.segmentTextActive]}>
               {option === 'before' ? 'Before' : 'After'}
@@ -1010,7 +1016,7 @@ const CoachEditPreviewPanel = ({
         accessibilityRole="button"
         accessibilityState={{ disabled: busy }}
         disabled={busy}
-        style={({ pressed }) => [styles.previewDiscard, busy && styles.disabled, pressed && styles.pressed]}
+        style={({ pressed }) => [styles.previewDiscard, pressed && styles.controlPressed, busy && styles.disabled]}
         onPress={onDiscard}
       >
         <Text style={styles.previewDiscardText}>Discard</Text>
@@ -1019,7 +1025,7 @@ const CoachEditPreviewPanel = ({
         accessibilityRole="button"
         accessibilityState={{ disabled: busy }}
         disabled={busy}
-        style={({ pressed }) => [styles.previewAccept, busy && styles.disabled, pressed && styles.pressed]}
+        style={({ pressed }) => [styles.previewAccept, pressed && styles.primaryPressed, busy && styles.disabled]}
         onPress={onAccept}
       >
         {busy ? <ActivityIndicator color={colors.onPrimary} /> : <Text style={styles.previewAcceptText}>Accept</Text>}
@@ -1065,7 +1071,7 @@ const CoachPanel = ({
     return (
       <View style={styles.centerAction}>
         <Pressable accessibilityRole="button" style={styles.primary} onPress={onAnalyze} disabled={analyzing}>
-          {analyzing ? <ActivityIndicator color={colors.limeInk} /> : <Text style={styles.primaryText}>Analyze photo</Text>}
+          {analyzing ? <ActivityIndicator color={colors.onPrimary} /> : <Text style={styles.primaryText}>Analyze photo</Text>}
         </Pressable>
       </View>
     );
@@ -1099,7 +1105,7 @@ const CoachPanel = ({
           <View style={styles.findingActions}>
             {fixable ? (
               <Pressable accessibilityRole="button" style={styles.inlineAction} onPress={() => onApplyIssue(selectedIssue)} disabled={applying}>
-                <Text style={styles.inlineActionText}>{selectedIssue.fix?.kind === 'retake' ? 'Retake' : 'Review'}</Text>
+                <Text style={styles.inlineActionText}>{selectedIssue.fix?.kind === 'retake' ? 'Retake' : 'Preview'}</Text>
               </Pressable>
             ) : null}
             <Pressable accessibilityRole="button" style={styles.inlineAction} onPress={() => onDismissIssue(selectedIssue)} disabled={applying}>
@@ -1129,7 +1135,7 @@ const CoachPanel = ({
         <View key={action.id} style={styles.actionRow}>
           <View style={styles.actionCopy}><Text numberOfLines={1} style={styles.findingTitle}>{action.label}</Text><Text numberOfLines={2} style={styles.caption}>{action.reason}</Text></View>
           <Pressable accessibilityRole="button" style={styles.smallPrimary} onPress={() => onApplyAction(action)}>
-            <Text style={styles.smallPrimaryText}>{action.tool === 'retake' ? 'Retake' : 'Review'}</Text>
+            <Text style={styles.smallPrimaryText}>{action.tool === 'retake' ? 'Retake' : 'Preview'}</Text>
           </Pressable>
         </View>
       ))}
@@ -1141,11 +1147,11 @@ const CoachPanel = ({
           onChangeText={onQuestionChange}
           onSubmitEditing={onAsk}
           placeholder="Ask about this photo"
-          placeholderTextColor={colors.muted}
+          placeholderTextColor={colors.textSecondary}
           style={styles.askInput}
         />
         <Pressable accessibilityRole="button" style={styles.askButton} onPress={onAsk} disabled={coachBusy || !question.trim()}>
-          {coachBusy ? <ActivityIndicator color={colors.limeInk} /> : <Text style={styles.askButtonText}>Ask</Text>}
+          {coachBusy ? <ActivityIndicator color={colors.onPrimary} /> : <Text style={styles.askButtonText}>Ask</Text>}
         </Pressable>
       </View>
     </>
@@ -1246,7 +1252,7 @@ const AiPanel = ({
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
           {issues.slice(0, 3).map((issue) => (
             <Pressable key={issue.id} accessibilityRole="button" style={[styles.chip, selected(issue.location) && styles.chipActive]} onPress={() => onTargetChange(issue.location, issue.id)}>
-              <Text style={[styles.chipText, selected(issue.location) && styles.chipTextActive]}>{issue.title}</Text>
+              <Text numberOfLines={1} style={[styles.chipText, selected(issue.location) && styles.chipTextActive]}>{issue.title}</Text>
             </Pressable>
           ))}
           {[
@@ -1267,15 +1273,38 @@ const AiPanel = ({
         onChangeText={onPromptChange}
         multiline
         placeholder={operation === 'remove' ? 'What should be removed?' : operation === 'expand' ? 'How should the scene continue?' : 'What should be added?'}
-        placeholderTextColor={colors.muted}
+        placeholderTextColor={colors.textSecondary}
         style={styles.promptInput}
       />
       <Pressable accessibilityRole="button" style={[styles.primary, (busy || !prompt.trim()) && styles.disabled]} onPress={onGenerate} disabled={busy || !prompt.trim()}>
-        {busy ? <ActivityIndicator color={colors.limeInk} /> : <Text style={styles.primaryText}>{operation === 'remove' ? 'Generate removal' : operation === 'expand' ? 'Expand canvas' : 'Generate addition'}</Text>}
+        {busy ? <ActivityIndicator color={colors.onPrimary} /> : <Text style={styles.primaryText}>{operation === 'remove' ? 'Preview removal' : operation === 'expand' ? 'Preview expansion' : 'Preview addition'}</Text>}
       </Pressable>
     </>
   );
 };
+
+const MorePanel = ({ onSelect }: { onSelect: (tool: StudioTool) => void }) => (
+  <View style={styles.moreGrid}>
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel="Open layers"
+      style={({ pressed }) => [styles.moreButton, pressed && styles.controlPressed]}
+      onPress={() => onSelect('layers')}
+    >
+      <MaterialCommunityIcons name="layers-outline" size={24} color={colors.text} />
+      <Text style={styles.moreButtonText}>Layers</Text>
+    </Pressable>
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel="Open edit history"
+      style={({ pressed }) => [styles.moreButton, pressed && styles.controlPressed]}
+      onPress={() => onSelect('history')}
+    >
+      <MaterialCommunityIcons name="history" size={24} color={colors.text} />
+      <Text style={styles.moreButtonText}>History</Text>
+    </Pressable>
+  </View>
+);
 
 const LayersPanel = ({
   stack,
@@ -1302,11 +1331,11 @@ const LayersPanel = ({
         <View key={layer.id} style={styles.layerBlock}>
           <View style={[styles.layerRow, !layer.enabled && styles.layerDisabled]}>
             <Pressable accessibilityRole="switch" accessibilityState={{ checked: layer.enabled }} accessibilityLabel={`${layer.enabled ? 'Hide' : 'Show'} ${layer.name}`} style={styles.layerControl} disabled={busy} onPress={() => onCommit(toggleLayer(stack, layer.id), `${layer.enabled ? 'Hide' : 'Show'} ${layer.name}`)}>
-              <MaterialCommunityIcons name={layer.enabled ? 'eye' : 'eye-off-outline'} size={20} color={colors.lime} />
+              <MaterialCommunityIcons name={layer.enabled ? 'eye' : 'eye-off-outline'} size={20} color={colors.primary} />
             </Pressable>
             <View style={styles.layerInfo}><Text numberOfLines={1} style={styles.layerName}>{layer.name}</Text></View>
-            <Pressable accessibilityRole="button" accessibilityLabel={`Move ${layer.name} up`} style={styles.layerControl} onPress={() => onCommit(reorderLayer(stack, layer.id, 1), `Move ${layer.name}`)} disabled={index === stack.layers.length - 1 || busy}><MaterialCommunityIcons name="arrow-up" size={20} color={colors.ink} /></Pressable>
-            <Pressable accessibilityRole="button" accessibilityLabel={`Move ${layer.name} down`} style={styles.layerControl} onPress={() => onCommit(reorderLayer(stack, layer.id, -1), `Move ${layer.name}`)} disabled={index === 0 || busy}><MaterialCommunityIcons name="arrow-down" size={20} color={colors.ink} /></Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel={`Move ${layer.name} up`} style={styles.layerControl} onPress={() => onCommit(reorderLayer(stack, layer.id, 1), `Move ${layer.name}`)} disabled={index === stack.layers.length - 1 || busy}><MaterialCommunityIcons name="arrow-up" size={20} color={colors.text} /></Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel={`Move ${layer.name} down`} style={styles.layerControl} onPress={() => onCommit(reorderLayer(stack, layer.id, -1), `Move ${layer.name}`)} disabled={index === 0 || busy}><MaterialCommunityIcons name="arrow-down" size={20} color={colors.text} /></Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${layer.name}`} style={styles.layerControl} onPress={() => onCommit(removeLayer(stack, layer.id), `Remove ${layer.name}`)} disabled={busy}><MaterialCommunityIcons name="close" size={22} color={colors.danger} /></Pressable>
           </View>
           <View style={styles.opacityRow}>
@@ -1322,9 +1351,9 @@ const LayersPanel = ({
               disabled={busy}
               onValueChange={(value) => onOpacityChange(layer.id, value)}
               onSlidingComplete={(value) => onOpacityCommit(layer.id, value)}
-              minimumTrackTintColor={colors.lime}
-              maximumTrackTintColor={colors.line}
-              thumbTintColor={colors.ink}
+              minimumTrackTintColor={colors.primary}
+              maximumTrackTintColor={colors.outline}
+              thumbTintColor={colors.text}
             />
           </View>
         </View>
@@ -1351,83 +1380,87 @@ const HistoryPanel = ({ photo, onRestore }: { photo: NonNullable<ReturnType<type
 );
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: colors.canvas },
-  header: { minHeight: 58, paddingHorizontal: 8, flexDirection: 'row', alignItems: 'center', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line, backgroundColor: colors.panel },
+  screen: { flex: 1, backgroundColor: colors.background },
+  header: { minHeight: 58, paddingHorizontal: 8, flexDirection: 'row', alignItems: 'center', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.separator, backgroundColor: colors.surface },
   headerButton: { width: 88, height: 48, alignItems: 'flex-start', justifyContent: 'center', paddingLeft: 12 },
   headerCenter: { flex: 1, alignItems: 'center' },
-  headerTitle: { color: colors.ink, fontWeight: '800', fontSize: 16 },
-  exportButton: { width: 88, minHeight: 48, borderRadius: 8, backgroundColor: colors.lime, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12 },
-  exportButtonText: { color: colors.limeInk, fontSize: 12, fontWeight: '800' },
+  headerTitle: { color: colors.text, fontWeight: '800', fontSize: 16 },
+  exportButton: { width: 88, minHeight: 48, borderRadius: 8, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12 },
+  exportButtonText: { color: colors.onPrimary, fontSize: 12, fontWeight: '800' },
   canvas: { flex: 1, minHeight: 190 },
-  panel: { maxHeight: '50%', minHeight: 214, backgroundColor: colors.panel },
-  panelContent: { padding: 16, paddingBottom: 20 },
-  message: { color: colors.ink, backgroundColor: colors.panelRaised, fontSize: 12, lineHeight: 17, paddingHorizontal: 16, paddingVertical: 10 },
-  centerAction: { minHeight: 100, justifyContent: 'center' },
-  primary: { backgroundColor: colors.lime, minHeight: 48, alignItems: 'center', justifyContent: 'center', borderRadius: 8, paddingHorizontal: 16 },
-  primaryText: { color: colors.limeInk, fontWeight: '800', fontSize: 13 },
+  panel: { maxHeight: '50%', minHeight: 214, backgroundColor: colors.surface },
+  panelContent: { flexGrow: 1, padding: 16, paddingBottom: 20 },
+  message: { color: colors.text, backgroundColor: colors.surfaceStrong, fontSize: 12, lineHeight: 17, paddingHorizontal: 16, paddingVertical: 10 },
+  centerAction: { flex: 1, minHeight: 100, justifyContent: 'center' },
+  primary: { backgroundColor: colors.primary, minHeight: 48, alignItems: 'center', justifyContent: 'center', borderRadius: 8, paddingHorizontal: 16 },
+  primaryText: { color: colors.onPrimary, fontWeight: '800', fontSize: 13 },
   previewTitle: { color: colors.text, fontSize: 15, lineHeight: 20, fontWeight: '800', marginBottom: 12 },
   previewActions: { flexDirection: 'row', gap: 12, minHeight: 52 },
   previewDiscard: { flex: 1, minHeight: 52, borderRadius: 8, backgroundColor: colors.surfaceStrong, borderWidth: 1, borderColor: colors.outlineStrong, alignItems: 'center', justifyContent: 'center' },
   previewDiscardText: { color: colors.text, fontSize: 14, fontWeight: '800' },
   previewAccept: { flex: 1, minHeight: 52, borderRadius: 8, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' },
   previewAcceptText: { color: colors.onPrimary, fontSize: 14, fontWeight: '800' },
-  summary: { color: colors.ink, fontSize: 18, fontWeight: '800', lineHeight: 23 },
-  body: { color: colors.muted, fontSize: 13, lineHeight: 19, marginTop: 4 },
-  caption: { color: colors.muted, fontSize: 12, lineHeight: 17 },
+  summary: { color: colors.text, fontSize: 18, fontWeight: '800', lineHeight: 23 },
+  body: { color: colors.textSecondary, fontSize: 13, lineHeight: 19, marginTop: 4 },
+  caption: { color: colors.textSecondary, fontSize: 12, lineHeight: 17 },
   chips: { gap: 8, paddingVertical: 12 },
-  chip: { minHeight: 48, maxWidth: 240, borderRadius: 24, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.line },
-  chipActive: { backgroundColor: colors.lime, borderColor: colors.lime },
-  chipText: { color: colors.muted, fontSize: 12, fontWeight: '700' },
-  chipTextActive: { color: colors.limeInk },
+  chip: { minHeight: 48, maxWidth: 240, borderRadius: 24, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.outline, backgroundColor: colors.controlSurface },
+  chipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  chipText: { color: colors.onControlSurface, fontSize: 12, fontWeight: '700' },
+  chipTextActive: { color: colors.onPrimary },
   directionGrid: { flexDirection: 'row', gap: 8, marginBottom: 12 },
-  directionButton: { flex: 1, minHeight: 48, borderRadius: 8, borderWidth: 1, borderColor: colors.line, alignItems: 'center', justifyContent: 'center' },
+  directionButton: { flex: 1, minHeight: 48, borderRadius: 8, borderWidth: 1, borderColor: colors.outline, backgroundColor: colors.controlSurface, alignItems: 'center', justifyContent: 'center' },
   expansionAmountRow: { minHeight: 48, flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
-  focusedFinding: { paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
-  findingTitle: { flex: 1, color: colors.ink, fontSize: 13, fontWeight: '800' },
+  focusedFinding: { paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.separator },
+  findingTitle: { flex: 1, color: colors.text, fontSize: 13, fontWeight: '800' },
   findingActions: { flexDirection: 'row', gap: 18 },
-  inlineAction: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', marginTop: 4 },
-  inlineActionText: { color: colors.lime, fontSize: 12, fontWeight: '800' },
+  inlineAction: { alignSelf: 'flex-start', minHeight: 48, justifyContent: 'center', marginTop: 4 },
+  inlineActionText: { color: colors.actionText, fontSize: 12, fontWeight: '800' },
   dismissActionText: { color: colors.textSecondary, fontSize: 12, fontWeight: '700' },
   section: { marginTop: 16 },
-  sectionTitle: { color: colors.ink, fontSize: 13, fontWeight: '800', marginBottom: 8 },
-  adviceRow: { minHeight: 54, flexDirection: 'row', alignItems: 'flex-start', paddingVertical: 7, borderBottomColor: colors.line, borderBottomWidth: StyleSheet.hairlineWidth },
-  adviceSetting: { width: 88, color: colors.muted, fontSize: 12, fontWeight: '700' },
+  sectionTitle: { color: colors.text, fontSize: 13, fontWeight: '800', marginBottom: 8 },
+  adviceRow: { minHeight: 54, flexDirection: 'row', alignItems: 'flex-start', paddingVertical: 7, borderBottomColor: colors.separator, borderBottomWidth: StyleSheet.hairlineWidth },
+  adviceSetting: { width: 88, color: colors.textSecondary, fontSize: 12, fontWeight: '700' },
   adviceBody: { flex: 1 },
-  adviceValue: { color: colors.ink, fontSize: 13, fontWeight: '700', marginBottom: 2 },
-  actionRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
+  adviceValue: { color: colors.text, fontSize: 13, fontWeight: '700', marginBottom: 2 },
+  actionRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.separator },
   actionCopy: { flex: 1 },
-  smallPrimary: { minWidth: 68, minHeight: 44, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.lime, borderRadius: 8 },
-  smallPrimaryText: { color: colors.limeInk, fontSize: 12, fontWeight: '800' },
+  smallPrimary: { minWidth: 68, minHeight: 48, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primary, borderRadius: 8 },
+  smallPrimaryText: { color: colors.onPrimary, fontSize: 12, fontWeight: '800' },
   askRow: { flexDirection: 'row', gap: 8, marginTop: 16 },
-  askInput: { flex: 1, minHeight: 48, color: colors.ink, backgroundColor: colors.canvas, borderWidth: 1, borderColor: colors.line, borderRadius: 8, paddingHorizontal: 12, fontSize: 13 },
-  askButton: { minWidth: 64, minHeight: 48, borderRadius: 8, backgroundColor: colors.lime, alignItems: 'center', justifyContent: 'center' },
-  askButtonText: { color: colors.limeInk, fontSize: 12, fontWeight: '800' },
-  segmented: { flexDirection: 'row', minHeight: 48, borderRadius: 9, padding: 3, backgroundColor: colors.canvas, marginBottom: 16 },
-  segment: { flex: 1, minHeight: 48, borderRadius: 7, alignItems: 'center', justifyContent: 'center' },
-  segmentActive: { backgroundColor: colors.panelRaised },
-  segmentText: { color: colors.muted, fontSize: 13, fontWeight: '700' },
-  segmentTextActive: { color: colors.ink },
-  promptInput: { minHeight: 76, color: colors.ink, backgroundColor: colors.canvas, borderWidth: 1, borderColor: colors.line, borderRadius: 8, padding: 12, textAlignVertical: 'top', marginBottom: 12, fontSize: 13 },
-  pressed: { opacity: 0.72 },
+  askInput: { flex: 1, minHeight: 48, color: colors.text, backgroundColor: colors.background, borderWidth: 1, borderColor: colors.outline, borderRadius: 8, paddingHorizontal: 12, fontSize: 13 },
+  askButton: { minWidth: 64, minHeight: 48, borderRadius: 8, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' },
+  askButtonText: { color: colors.onPrimary, fontSize: 12, fontWeight: '800' },
+  segmented: { flexDirection: 'row', minHeight: 56, borderRadius: 10, padding: 4, backgroundColor: colors.background, marginBottom: 16 },
+  segment: { flex: 1, minHeight: 48, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  segmentActive: { backgroundColor: colors.primary },
+  primaryPressed: { backgroundColor: colors.primaryPressed },
+  controlPressed: { backgroundColor: colors.controlPressed },
+  segmentText: { color: colors.textSecondary, fontSize: 13, fontWeight: '700' },
+  segmentTextActive: { color: colors.onPrimary },
+  promptInput: { minHeight: 76, color: colors.text, backgroundColor: colors.background, borderWidth: 1, borderColor: colors.outline, borderRadius: 8, padding: 12, textAlignVertical: 'top', marginBottom: 12, fontSize: 13 },
   disabled: { opacity: 0.45 },
-  placeholder: { color: colors.muted, fontSize: 13, textAlign: 'center', paddingVertical: 24 },
-  layerBlock: { paddingBottom: 8, borderBottomColor: colors.line, borderBottomWidth: StyleSheet.hairlineWidth },
+  placeholder: { color: colors.textSecondary, fontSize: 13, textAlign: 'center', paddingVertical: 24 },
+  moreGrid: { flexDirection: 'row', gap: 12 },
+  moreButton: { flex: 1, minHeight: 72, borderRadius: 10, borderWidth: 1, borderColor: colors.outline, backgroundColor: colors.controlSurface, alignItems: 'center', justifyContent: 'center', gap: 6 },
+  moreButtonText: { color: colors.onControlSurface, fontSize: 13, fontWeight: '700' },
+  layerBlock: { paddingBottom: 8, borderBottomColor: colors.separator, borderBottomWidth: StyleSheet.hairlineWidth },
   layerRow: { minHeight: 54, flexDirection: 'row', gap: 2, alignItems: 'center' },
   layerDisabled: { opacity: 0.48 },
   layerControl: { width: 48, height: 48, alignItems: 'center', justifyContent: 'center' },
   layerInfo: { flex: 1 },
-  layerName: { color: colors.ink, fontSize: 13, fontWeight: '700' },
+  layerName: { color: colors.text, fontSize: 13, fontWeight: '700' },
   opacityRow: { minHeight: 48, flexDirection: 'row', alignItems: 'center', paddingLeft: 48, paddingRight: 4 },
-  opacityValue: { width: 42, color: colors.muted, fontSize: 11, fontVariant: ['tabular-nums'] },
+  opacityValue: { width: 42, color: colors.textSecondary, fontSize: 11, fontVariant: ['tabular-nums'] },
   opacitySlider: { flex: 1, height: 48 },
-  historyRow: { minHeight: 62, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomColor: colors.line, borderBottomWidth: StyleSheet.hairlineWidth },
-  timelineDot: { width: 10, height: 10, borderRadius: 5, borderWidth: 2, borderColor: colors.muted },
-  timelineDotActive: { borderColor: colors.lime, backgroundColor: colors.lime },
+  historyRow: { minHeight: 62, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomColor: colors.separator, borderBottomWidth: StyleSheet.hairlineWidth },
+  timelineDot: { width: 10, height: 10, borderRadius: 5, borderWidth: 2, borderColor: colors.textSecondary },
+  timelineDotActive: { borderColor: colors.primary, backgroundColor: colors.primary },
   restoreButton: { minWidth: 64, minHeight: 48, justifyContent: 'center', alignItems: 'center' },
-  restore: { color: colors.lime, fontSize: 11, fontWeight: '800' },
-  current: { color: colors.muted, fontSize: 10, fontWeight: '800', paddingHorizontal: 8 },
-  empty: { flex: 1, backgroundColor: colors.canvas, alignItems: 'center', justifyContent: 'center' },
-  emptyTitle: { color: colors.ink, fontSize: 18, fontWeight: '800' },
+  restore: { color: colors.actionText, fontSize: 11, fontWeight: '800' },
+  current: { color: colors.textSecondary, fontSize: 12, lineHeight: 16, fontWeight: '800', paddingHorizontal: 8 },
+  empty: { flex: 1, backgroundColor: colors.background, alignItems: 'center', justifyContent: 'center' },
+  emptyTitle: { color: colors.text, fontSize: 18, fontWeight: '800' },
   emptyButton: { minHeight: 48, justifyContent: 'center' },
-  link: { color: colors.lime, fontSize: 13, fontWeight: '700' },
+  link: { color: colors.actionText, fontSize: 13, fontWeight: '700' },
 });

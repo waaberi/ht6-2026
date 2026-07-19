@@ -58,21 +58,21 @@ export const TransformSheet = ({
           accessibilityRole="button"
           accessibilityLabel="Rotate 90 degrees clockwise"
           disabled={busy}
-          style={({ pressed }) => [styles.toolbarButton, busy && styles.disabled, pressed && styles.pressed]}
+          style={({ pressed }) => [styles.toolbarButton, pressed && styles.controlPressed, busy && styles.disabled]}
           onPress={onRotate}
         >
-          <MaterialCommunityIcons name="rotate-right" size={20} color={colors.ink} />
+          <MaterialCommunityIcons name="rotate-right" size={20} color={colors.text} />
           <Text style={styles.toolbarText}>Rotate</Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Restore crop and rotation"
+          accessibilityLabel="Reset crop and rotation"
           disabled={!changed || busy}
-          style={({ pressed }) => [styles.toolbarButton, (!changed || busy) && styles.disabled, pressed && styles.pressed]}
+          style={({ pressed }) => [styles.toolbarButton, pressed && styles.controlPressed, (!changed || busy) && styles.disabled]}
           onPress={onRestore}
         >
-          <MaterialCommunityIcons name="restore" size={20} color={changed ? colors.ink : colors.muted} />
-          <Text style={[styles.toolbarText, !changed && styles.muted]}>Restore</Text>
+          <MaterialCommunityIcons name="restore" size={20} color={changed ? colors.text : colors.textSecondary} />
+          <Text style={[styles.toolbarText, !changed && styles.muted]}>Reset</Text>
         </Pressable>
       </View>
 
@@ -90,7 +90,11 @@ export const TransformSheet = ({
               accessibilityRole="button"
               accessibilityState={{ selected }}
               disabled={busy}
-              style={({ pressed }) => [styles.aspect, selected && styles.aspectSelected, pressed && styles.pressed]}
+              style={({ pressed }) => [
+                styles.aspect,
+                selected && styles.aspectSelected,
+                pressed && (selected ? styles.primaryPressed : styles.controlPressed),
+              ]}
               onPress={() => option.id === 'free' ? onFreeform() : onCrop(option.aspect)}
             >
               <Text style={[styles.aspectText, selected && styles.aspectTextSelected]}>{option.label}</Text>
@@ -113,9 +117,9 @@ export const TransformSheet = ({
         disabled={busy}
         onValueChange={onStraightenChange}
         onSlidingComplete={onStraightenCommit}
-        minimumTrackTintColor={colors.lime}
-        maximumTrackTintColor={colors.line}
-        thumbTintColor={colors.ink}
+        minimumTrackTintColor={colors.primary}
+        maximumTrackTintColor={colors.outline}
+        thumbTintColor={colors.text}
       />
     </View>
   );
@@ -124,16 +128,17 @@ export const TransformSheet = ({
 const styles = StyleSheet.create({
   toolbar: { minHeight: 52, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   toolbarButton: { minWidth: 104, minHeight: 48, borderRadius: 24, paddingHorizontal: 14, flexDirection: 'row', gap: 8, alignItems: 'center', justifyContent: 'center' },
-  toolbarText: { color: colors.ink, fontSize: 13, fontWeight: '700' },
-  sectionTitle: { color: colors.ink, fontSize: 13, fontWeight: '800', marginBottom: 8 },
+  toolbarText: { color: colors.text, fontSize: 13, fontWeight: '700' },
+  sectionTitle: { color: colors.text, fontSize: 13, fontWeight: '800', marginBottom: 8 },
   aspects: { gap: 8, paddingBottom: 18 },
-  aspect: { minWidth: 76, minHeight: 48, borderRadius: 24, paddingHorizontal: 14, borderWidth: 1, borderColor: colors.line, alignItems: 'center', justifyContent: 'center' },
-  aspectSelected: { backgroundColor: colors.lime, borderColor: colors.lime },
-  aspectText: { color: colors.muted, fontSize: 12, fontWeight: '700' },
-  aspectTextSelected: { color: colors.limeInk },
+  aspect: { minWidth: 76, minHeight: 48, borderRadius: 24, paddingHorizontal: 14, borderWidth: 1, borderColor: colors.outline, backgroundColor: colors.controlSurface, alignItems: 'center', justifyContent: 'center' },
+  aspectSelected: { backgroundColor: colors.primary, borderColor: colors.primary },
+  primaryPressed: { backgroundColor: colors.primaryPressed, borderColor: colors.primaryPressed },
+  controlPressed: { backgroundColor: colors.controlPressed, borderColor: colors.outlineStrong },
+  aspectText: { color: colors.onControlSurface, fontSize: 12, fontWeight: '700' },
+  aspectTextSelected: { color: colors.onPrimary },
   sliderHeading: { minHeight: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  value: { color: colors.muted, fontSize: 12, fontVariant: ['tabular-nums'] },
-  muted: { color: colors.muted },
+  value: { color: colors.textSecondary, fontSize: 12, fontVariant: ['tabular-nums'] },
+  muted: { color: colors.textSecondary },
   disabled: { opacity: 0.42 },
-  pressed: { opacity: 0.68 },
 });

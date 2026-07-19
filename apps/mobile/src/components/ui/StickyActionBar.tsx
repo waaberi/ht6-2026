@@ -22,7 +22,7 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.base,
     backgroundColor: colors.background,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.outline,
+    borderTopColor: colors.separator,
     zIndex: 10,
   },
   content: {

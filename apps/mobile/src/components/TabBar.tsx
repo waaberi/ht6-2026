@@ -52,8 +52,8 @@ const styles = StyleSheet.create({
     minHeight: 64,
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(34, 26, 27, 0.98)',
-    borderTopColor: colors.outline,
+    backgroundColor: colors.background,
+    borderTopColor: colors.separator,
     borderTopWidth: StyleSheet.hairlineWidth,
   },
   item: {

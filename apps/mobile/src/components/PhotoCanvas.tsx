@@ -324,7 +324,7 @@ export const PhotoCanvas = ({
               <Rect x={geometry.display.x} y={targetRect.y + targetRect.height} width={geometry.display.width} height={Math.max(0, geometry.display.y + geometry.display.height - targetRect.y - targetRect.height)} color="rgba(34,26,27,0.44)" />
               <Rect x={geometry.display.x} y={targetRect.y} width={Math.max(0, targetRect.x - geometry.display.x)} height={targetRect.height} color="rgba(34,26,27,0.44)" />
               <Rect x={targetRect.x + targetRect.width} y={targetRect.y} width={Math.max(0, geometry.display.x + geometry.display.width - targetRect.x - targetRect.width)} height={targetRect.height} color="rgba(34,26,27,0.44)" />
-              <Rect {...targetRect} color={colors.lime} style="stroke" strokeWidth={3} />
+              <Rect {...targetRect} color={colors.primary} style="stroke" strokeWidth={3} />
             </Group>
           ) : null}
         </Group>

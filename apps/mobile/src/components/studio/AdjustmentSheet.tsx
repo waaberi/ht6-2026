@@ -80,7 +80,11 @@ export const AdjustmentSheet = ({
             key={item.id}
             accessibilityRole="tab"
             accessibilityState={{ selected: item.id === section }}
-            style={({ pressed }) => [styles.section, item.id === section && styles.sectionSelected, pressed && styles.pressed]}
+            style={({ pressed }) => [
+              styles.section,
+              item.id === section && styles.sectionSelected,
+              pressed && (item.id === section ? styles.primaryPressed : styles.controlPressed),
+            ]}
             onPress={() => onSectionChange(item.id)}
           >
             <Text style={[styles.sectionText, item.id === section && styles.sectionTextSelected]}>{item.label}</Text>
@@ -107,13 +111,13 @@ export const AdjustmentSheet = ({
       {section !== 'crop' ? <View style={styles.toolbar}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Restore all adjustments"
+          accessibilityLabel="Reset all adjustments"
           disabled={!hasChanges || busy}
-          style={({ pressed }) => [styles.restore, (!hasChanges || busy) && styles.disabled, pressed && styles.pressed]}
+          style={({ pressed }) => [styles.restore, pressed && styles.controlPressed, (!hasChanges || busy) && styles.disabled]}
           onPress={onRestore}
         >
           <MaterialCommunityIcons name="restore" size={19} color={hasChanges ? colors.text : colors.textSecondary} />
-          <Text style={[styles.restoreText, !hasChanges && styles.disabledText]}>Restore</Text>
+          <Text style={[styles.restoreText, !hasChanges && styles.disabledText]}>Reset</Text>
         </Pressable>
       </View> : null}
 
@@ -131,7 +135,7 @@ export const AdjustmentSheet = ({
                   accessibilityLabel={`Reset ${control.label}`}
                   accessibilityState={{ disabled: !changed || busy }}
                   disabled={!changed || busy}
-                  style={({ pressed }) => [styles.resetControl, !changed && styles.resetControlIdle, pressed && styles.pressed]}
+                  style={({ pressed }) => [styles.resetControl, pressed && styles.controlPressed, !changed && styles.resetControlIdle]}
                   onPress={() => onResetControl(control.key)}
                 >
                   <MaterialCommunityIcons name="restore" size={17} color={changed ? colors.text : colors.textSecondary} />
@@ -160,11 +164,13 @@ export const AdjustmentSheet = ({
 };
 
 const styles = StyleSheet.create({
-  sections: { flexDirection: 'row', gap: 6, marginBottom: 10 },
-  section: { flex: 1, minHeight: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
-  sectionSelected: { backgroundColor: colors.surfaceRaised },
+  sections: { flexDirection: 'row', gap: 4, padding: 4, borderRadius: 10, backgroundColor: colors.background, marginBottom: 10 },
+  section: { flex: 1, minHeight: 48, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  sectionSelected: { backgroundColor: colors.primary },
+  primaryPressed: { backgroundColor: colors.primaryPressed },
+  controlPressed: { backgroundColor: colors.controlPressed },
   sectionText: { color: colors.textSecondary, fontSize: 12, fontWeight: '700' },
-  sectionTextSelected: { color: colors.primary },
+  sectionTextSelected: { color: colors.onPrimary },
   toolbar: { minHeight: 48, flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', marginBottom: 2 },
   restore: { minWidth: 96, minHeight: 48, borderRadius: 24, borderWidth: 1, borderColor: colors.outline, paddingHorizontal: 12, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center' },
   restoreText: { color: colors.text, fontSize: 13, fontWeight: '700' },
@@ -177,5 +183,4 @@ const styles = StyleSheet.create({
   resetControlIdle: { opacity: 0.28 },
   disabled: { opacity: 0.42 },
   disabledText: { color: colors.textSecondary },
-  pressed: { opacity: 0.68 },
 });

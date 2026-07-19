@@ -52,6 +52,13 @@ export const LibraryScreen = ({ onOpenStudio, onOpenCamera }: LibraryScreenProps
   const [notice, setNotice] = useState<string>();
   const columnCount = width >= 900 ? 6 : width >= 600 ? 4 : 3;
   const photoById = useMemo(() => new Map(photos.map((photo) => [photo.id, photo])), [photos]);
+  const photoRows = useMemo(() => {
+    const rows: PhotoRecord[][] = [];
+    for (let index = 0; index < photos.length; index += columnCount) {
+      rows.push(photos.slice(index, index + columnCount));
+    }
+    return rows;
+  }, [columnCount, photos]);
 
   const open = (photo: PhotoRecord) => {
     selectPhoto(photo.id);
@@ -200,16 +207,26 @@ export const LibraryScreen = ({ onOpenStudio, onOpenCamera }: LibraryScreenProps
 
   const headerDetail = view === 'select'
     ? String(selection.length)
-    : syncing ? 'Syncing…' : syncError ? 'Sync issue' : undefined;
+    : view === 'browse'
+      ? syncing ? 'Syncing…' : syncError ? 'Sync issue' : undefined
+      : undefined;
 
   return (
     <View style={styles.screen}>
       <ScreenHeader
-        title={view === 'select' ? 'Select' : 'Library'}
+        title={view === 'select'
+          ? 'Select'
+          : view === 'portfolio-result'
+            ? 'Curate'
+            : view === 'look-result'
+              ? 'New Look'
+              : 'Library'}
         detail={headerDetail}
         actions={photos.length ? view === 'select' ? [
           ...(selection.length ? [{ label: 'Clear selection', icon: 'remove-circle-outline' as const, onPress: () => setSelection([]) }] : []),
           { label: 'Cancel selection', icon: 'close', onPress: leaveSelection },
+        ] : view === 'portfolio-result' || view === 'look-result' ? [
+          { label: 'Close result', icon: 'close', onPress: leaveSelection },
         ] : [
           { label: 'Select photos', icon: 'checkmark-circle-outline', onPress: enterSelection },
         ] : undefined}
@@ -252,20 +269,30 @@ export const LibraryScreen = ({ onOpenStudio, onOpenCamera }: LibraryScreenProps
           {error ? <Text accessibilityRole="alert" numberOfLines={3} style={styles.error}>{error}</Text> : null}
           <FlashList
             key={`library-${view}-${columnCount}`}
-            data={photos}
+            data={photoRows}
             extraData={selection}
-            numColumns={columnCount}
             contentContainerStyle={[styles.grid, view === 'select' && styles.selectionGrid, view === 'browse' && styles.browseGrid]}
-            keyExtractor={(item) => item.id}
-            renderItem={({ item }) => (
-              <PhotoTile
-                photo={item}
-                selected={selection.includes(item.id)}
-                order={view === 'select' ? selection.indexOf(item.id) + 1 : undefined}
-                selectionMode={view === 'select'}
-                onPress={() => view === 'select' ? toggleSelection(item.id) : open(item)}
-              />
-            )}
+            keyExtractor={(row) => row.map((photo) => photo.id).join(':')}
+            renderItem={({ item: row }) => {
+              const spacerWeight = (columnCount - row.length) / 2;
+              return (
+                <View style={styles.gridRow}>
+                  {spacerWeight > 0 ? <View style={{ flex: spacerWeight }} /> : null}
+                  {row.map((item) => (
+                    <View key={item.id} style={styles.gridCell}>
+                      <PhotoTile
+                        photo={item}
+                        selected={selection.includes(item.id)}
+                        order={view === 'select' ? selection.indexOf(item.id) + 1 : undefined}
+                        selectionMode={view === 'select'}
+                        onPress={() => view === 'select' ? toggleSelection(item.id) : open(item)}
+                      />
+                    </View>
+                  ))}
+                  {spacerWeight > 0 ? <View style={{ flex: spacerWeight }} /> : null}
+                </View>
+              );
+            }}
           />
         </View>
       )}
@@ -277,7 +304,7 @@ export const LibraryScreen = ({ onOpenStudio, onOpenCamera }: LibraryScreenProps
           accessibilityState={{ disabled: importing, busy: importing }}
           disabled={importing}
           onPress={showImportMenu}
-          style={({ pressed }) => [styles.importFab, pressed && styles.pressed, importing && styles.disabled]}
+          style={({ pressed }) => [styles.importFab, pressed && styles.primaryPressed, importing && styles.disabled]}
         >
           {importing ? <ActivityIndicator color={colors.onPrimary} /> : <Ionicons name="add" size={28} color={colors.onPrimary} />}
         </Pressable>
@@ -292,12 +319,12 @@ export const LibraryScreen = ({ onOpenStudio, onOpenCamera }: LibraryScreenProps
               accessibilityState={{ disabled: selection.length === 0 || Boolean(busy), busy: busy === 'delete' }}
               disabled={selection.length === 0 || Boolean(busy)}
               onPress={confirmDelete}
-              style={({ pressed }) => [styles.deleteAction, pressed && styles.pressed, (selection.length === 0 || busy) && styles.disabled]}
+              style={({ pressed }) => [styles.deleteAction, pressed && styles.controlPressed, (selection.length === 0 || busy) && styles.disabled]}
             >
               <Ionicons name="trash-outline" size={22} color={colors.danger} />
             </Pressable>
-            <ActionButton label="Review 2+" accessibilityHint="Select at least two photos" icon="albums-outline" style={styles.taskAction} onPress={() => void runPortfolioReview()} disabled={selection.length < 2 || Boolean(busy)} loading={busy === 'portfolio'} />
-            <ActionButton label="Look 3–8" accessibilityHint="Select three to eight photos" icon="color-palette-outline" variant="tonal" style={styles.taskAction} onPress={() => void createLook()} disabled={selection.length < 3 || selection.length > 8 || Boolean(busy)} loading={busy === 'look'} />
+            <ActionButton label="Curate set" accessibilityHint="Select at least two photos" style={styles.taskAction} onPress={() => void runPortfolioReview()} disabled={selection.length < 2 || Boolean(busy)} loading={busy === 'portfolio'} />
+            <ActionButton label="New Look" accessibilityHint="Select three to eight photos" variant="tonal" style={styles.taskAction} onPress={() => void createLook()} disabled={selection.length < 3 || selection.length > 8 || Boolean(busy)} loading={busy === 'look'} />
           </View>
         </StickyActionBar>
       ) : null}
@@ -358,7 +385,7 @@ const PortfolioResult = ({ review, photoById, onReset }: {
         );
       })}
     </View>
-    <ActionButton label="Review another set" variant="outlined" onPress={onReset} />
+    <ActionButton label="Curate another set" variant="outlined" onPress={onReset} />
   </ScrollView>
 );
 
@@ -380,8 +407,8 @@ const LookResult = ({
       ))}
     </View>
     <View style={styles.resultActions}>
-      <ActionButton label="Choose a photo" onPress={onUse} />
-      <ActionButton label="Choose other photos" variant="outlined" onPress={onReset} />
+      <ActionButton label="Apply to a photo" onPress={onUse} />
+      <ActionButton label="Change references" variant="outlined" onPress={onReset} />
     </View>
   </ScrollView>
 );
@@ -401,21 +428,23 @@ const styles = StyleSheet.create({
     marginBottom: spacing.sm,
   },
   grid: { paddingHorizontal: spacing.xxs, paddingBottom: spacing.md },
+  gridRow: { flexDirection: 'row' },
+  gridCell: { flex: 1, padding: 2 },
   browseGrid: { paddingBottom: layout.stickyActionHeight + spacing.md },
   selectionGrid: { paddingBottom: layout.stickyActionHeight + spacing.md },
   tile: {
-    flex: 1,
+    width: '100%',
     aspectRatio: 0.9,
-    margin: 2,
     borderWidth: 2,
     borderColor: 'transparent',
     backgroundColor: colors.surface,
     borderRadius: radii.sm,
     overflow: 'hidden',
   },
-  selectedTile: { borderColor: colors.text },
-  tilePressed: { opacity: 0.78 },
-  pressed: { opacity: 0.72 },
+  selectedTile: { borderColor: colors.primary },
+  tilePressed: { borderColor: colors.outlineStrong },
+  primaryPressed: { backgroundColor: colors.primaryPressed },
+  controlPressed: { backgroundColor: colors.controlPressed },
   image: { width: '100%', height: '100%' },
   syncBadge: {
     position: 'absolute',
@@ -441,7 +470,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  selectionBadgeSelected: { backgroundColor: colors.text, borderColor: colors.text },
+  selectionBadgeSelected: { backgroundColor: colors.primary, borderColor: colors.primary },
   order: { color: colors.onPrimary, ...typography.label, fontWeight: '800' },
   resultContent: {
     paddingHorizontal: layout.screenPadding,
@@ -458,7 +487,7 @@ const styles = StyleSheet.create({
     gap: spacing.base,
     paddingVertical: spacing.sm,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.outline,
+    borderBottomColor: colors.separator,
   },
   rankNumber: { width: 24, color: colors.text, ...typography.section, fontWeight: '800', textAlign: 'center' },
   rankImage: { width: 52, height: 52, borderRadius: radii.sm, backgroundColor: colors.surface },
