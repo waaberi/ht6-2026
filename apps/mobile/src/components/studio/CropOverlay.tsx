@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import {
   type AccessibilityActionEvent,
   type LayoutChangeEvent,
@@ -8,6 +8,11 @@ import {
   View,
   type ViewStyle,
 } from 'react-native';
+import Animated, {
+  type SharedValue,
+  useAnimatedStyle,
+  useSharedValue,
+} from 'react-native-reanimated';
 
 import {
   type CropCorner,
@@ -41,6 +46,8 @@ export type CropOverlayProps = {
 };
 
 const ACCESSIBILITY_STEP = 0.025;
+const FRAME_WIDTH = 3;
+const FRAME_HIGHLIGHT_WIDTH = 1;
 
 const clamp = (value: number, minimum: number, maximum: number) =>
   Math.min(maximum, Math.max(minimum, value));
@@ -66,6 +73,185 @@ const cornerLabels: Record<CropCorner, string> = {
   'bottom-right': 'Bottom right crop handle',
 };
 
+type CropAnimationValues = {
+  region: SharedValue<Region>;
+  viewport: SharedValue<CropViewportSize>;
+};
+
+type CropSide = 'top' | 'right' | 'bottom' | 'left';
+
+const transformMatrix = (
+  scaleX: number,
+  scaleY: number,
+  translateX: number,
+  translateY: number,
+) => {
+  'worklet';
+  return [
+    scaleX, 0, 0, 0,
+    0, scaleY, 0, 0,
+    0, 0, 1, 0,
+    translateX, translateY, 0, 1,
+  ];
+};
+
+/** A full-viewport rectangle transformed into one side of the crop scrim. */
+const CropScrim = ({ side, region, viewport }: CropAnimationValues & { side: CropSide }) => {
+  const animatedStyle = useAnimatedStyle(() => {
+    const crop = region.value;
+    const size = viewport.value;
+
+    if (side === 'top') {
+      return { transform: [{ matrix: transformMatrix(1, crop.y, 0, 0) }] };
+    }
+    if (side === 'bottom') {
+      return {
+        transform: [{
+          matrix: transformMatrix(
+            1,
+            Math.max(0, 1 - crop.y - crop.height),
+            0,
+            (crop.y + crop.height) * size.height,
+          ),
+        }],
+      };
+    }
+    if (side === 'left') {
+      return {
+        transform: [{ matrix: transformMatrix(crop.x, crop.height, 0, crop.y * size.height) }],
+      };
+    }
+    return {
+      transform: [{
+        matrix: transformMatrix(
+          Math.max(0, 1 - crop.x - crop.width),
+          crop.height,
+          (crop.x + crop.width) * size.width,
+          crop.y * size.height,
+        ),
+      }],
+    };
+  });
+
+  return <Animated.View pointerEvents="none" style={[styles.scrim, animatedStyle]} />;
+};
+
+/** Crop boundary line whose thickness stays constant while its length changes. */
+const CropBoundary = ({
+  side,
+  region,
+  viewport,
+  highlight = false,
+}: CropAnimationValues & { side: CropSide; highlight?: boolean }) => {
+  const thickness = highlight ? FRAME_HIGHLIGHT_WIDTH : FRAME_WIDTH;
+  const horizontal = side === 'top' || side === 'bottom';
+  const animatedStyle = useAnimatedStyle(() => {
+    const crop = region.value;
+    const size = viewport.value;
+    const cropRight = (crop.x + crop.width) * size.width;
+    const cropBottom = (crop.y + crop.height) * size.height;
+    const translateX = side === 'right' ? cropRight - thickness : crop.x * size.width;
+    const translateY = side === 'bottom' ? cropBottom - thickness : crop.y * size.height;
+
+    return {
+      transform: [{
+        matrix: transformMatrix(
+          horizontal ? crop.width : 1,
+          horizontal ? 1 : crop.height,
+          translateX,
+          translateY,
+        ),
+      }],
+    };
+  });
+
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={[
+        horizontal ? styles.horizontalBoundary : styles.verticalBoundary,
+        highlight ? styles.frameHighlight : styles.frameBoundary,
+        { width: horizontal ? undefined : thickness, height: horizontal ? thickness : undefined },
+        animatedStyle,
+      ]}
+    />
+  );
+};
+
+const CropGuide = ({
+  orientation,
+  fraction,
+  region,
+  viewport,
+}: CropAnimationValues & { orientation: 'horizontal' | 'vertical'; fraction: number }) => {
+  const horizontal = orientation === 'horizontal';
+  const animatedStyle = useAnimatedStyle(() => {
+    const crop = region.value;
+    const size = viewport.value;
+    const translateX = (crop.x + (horizontal ? 0 : crop.width * fraction)) * size.width;
+    const translateY = (crop.y + (horizontal ? crop.height * fraction : 0)) * size.height;
+    return {
+      transform: [{
+        matrix: transformMatrix(
+          horizontal ? crop.width : 1,
+          horizontal ? 1 : crop.height,
+          translateX,
+          translateY,
+        ),
+      }],
+    };
+  });
+
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={[horizontal ? styles.horizontalGuide : styles.verticalGuide, animatedStyle]}
+    />
+  );
+};
+
+const CropHandle = ({
+  corner,
+  region,
+  viewport,
+  disabled,
+  responder,
+  onAccessibilityAction,
+}: CropAnimationValues & {
+  corner: CropCorner;
+  disabled: boolean;
+  responder: ReturnType<typeof PanResponder.create>;
+  onAccessibilityAction: (event: AccessibilityActionEvent) => void;
+}) => {
+  const animatedStyle = useAnimatedStyle(() => {
+    const crop = region.value;
+    const size = viewport.value;
+    const movesLeft = corner.endsWith('left');
+    const movesTop = corner.startsWith('top');
+    const translateX = (crop.x + (movesLeft ? 0 : crop.width)) * size.width
+      - (movesLeft ? 0 : appLayout.minTouchTarget);
+    const translateY = (crop.y + (movesTop ? 0 : crop.height)) * size.height
+      - (movesTop ? 0 : appLayout.minTouchTarget);
+    return { transform: [{ translateX }, { translateY }] };
+  });
+
+  return (
+    <Animated.View
+      accessibilityRole="adjustable"
+      accessibilityLabel={cornerLabels[corner]}
+      accessibilityHint="Drag to resize the crop. Swipe up or down with a screen reader to resize."
+      accessibilityState={{ disabled }}
+      accessibilityActions={[{ name: 'increment', label: 'Expand crop' }, { name: 'decrement', label: 'Reduce crop' }]}
+      style={[styles.handle, animatedStyle]}
+      onAccessibilityAction={onAccessibilityAction}
+      {...responder.panHandlers}
+    >
+      <View pointerEvents="none" style={[styles.handleMarkerShadow, handleMarkerShadowStyles[corner]]} />
+      <View pointerEvents="none" style={[styles.handleMarker, handleMarkerStyles[corner]]} />
+    </Animated.View>
+  );
+};
+
 export const CropOverlay = ({
   region,
   onChange,
@@ -85,7 +271,8 @@ export const CropOverlay = ({
   const animationFrameRef = useRef<number | null>(null);
   const onChangeRef = useRef(onChange);
   const onCommitRef = useRef(onCommit);
-  const [displayRegion, setDisplayRegion] = useState(regionRef.current);
+  const animatedRegion = useSharedValue(regionRef.current);
+  const animatedViewport = useSharedValue<CropViewportSize>({ width: 1, height: 1 });
 
   const normalizedRegion = normalizeCropRegion(region, minimumSize);
   onChangeRef.current = onChange;
@@ -95,14 +282,7 @@ export const CropOverlay = ({
     if (gestureActiveRef.current) return;
     regionRef.current = normalizedRegion;
     gestureRegionRef.current = normalizedRegion;
-    setDisplayRegion((current) => (
-      current.x === normalizedRegion.x
-      && current.y === normalizedRegion.y
-      && current.width === normalizedRegion.width
-      && current.height === normalizedRegion.height
-        ? current
-        : normalizedRegion
-    ));
+    animatedRegion.value = normalizedRegion;
   }, [normalizedRegion.height, normalizedRegion.width, normalizedRegion.x, normalizedRegion.y]);
 
   useEffect(() => () => {
@@ -123,7 +303,7 @@ export const CropOverlay = ({
     if (animationFrameRef.current !== null) return;
     animationFrameRef.current = requestAnimationFrame(() => {
       animationFrameRef.current = null;
-      setDisplayRegion(gestureRegionRef.current);
+      animatedRegion.value = gestureRegionRef.current;
     });
   };
 
@@ -135,7 +315,7 @@ export const CropOverlay = ({
     }
     const next = gestureRegionRef.current;
     regionRef.current = next;
-    setDisplayRegion(next);
+    animatedRegion.value = next;
     onChangeRef.current(next);
     onCommitRef.current(next);
   };
@@ -195,6 +375,7 @@ export const CropOverlay = ({
       width: event.nativeEvent.layout.width,
       height: event.nativeEvent.layout.height,
     };
+    animatedViewport.value = viewportRef.current;
   };
 
   const adjustCornerWithAccessibility = (corner: CropCorner, event: AccessibilityActionEvent) => {
@@ -209,7 +390,7 @@ export const CropOverlay = ({
       dy: direction * ACCESSIBILITY_STEP * viewport.height * (movesTop ? -1 : 1),
     };
     const next = resizeCropRegion(
-      displayRegion,
+      regionRef.current,
       corner,
       gesture,
       viewport,
@@ -231,29 +412,28 @@ export const CropOverlay = ({
     const offset = offsets[event.nativeEvent.actionName];
     if (!offset) return;
     const next = {
-      ...displayRegion,
-      x: clamp(displayRegion.x + offset.dx, 0, 1 - displayRegion.width),
-      y: clamp(displayRegion.y + offset.dy, 0, 1 - displayRegion.height),
+      ...regionRef.current,
+      x: clamp(regionRef.current.x + offset.dx, 0, 1 - regionRef.current.width),
+      y: clamp(regionRef.current.y + offset.dy, 0, 1 - regionRef.current.height),
     };
     gestureRegionRef.current = next;
     finishGesture();
   };
 
-  const frameStyle: ViewStyle = {
-    left: `${displayRegion.x * 100}%`,
-    top: `${displayRegion.y * 100}%`,
-    width: `${displayRegion.width * 100}%`,
-    height: `${displayRegion.height * 100}%`,
-  };
-
-  const handlePosition = (corner: CropCorner): ViewStyle => {
-    const right = 1 - displayRegion.x - displayRegion.width;
-    const bottom = 1 - displayRegion.y - displayRegion.height;
-    if (corner === 'top-left') return { left: `${displayRegion.x * 100}%`, top: `${displayRegion.y * 100}%` };
-    if (corner === 'top-right') return { right: `${right * 100}%`, top: `${displayRegion.y * 100}%` };
-    if (corner === 'bottom-left') return { left: `${displayRegion.x * 100}%`, bottom: `${bottom * 100}%` };
-    return { right: `${right * 100}%`, bottom: `${bottom * 100}%` };
-  };
+  const frameHitboxStyle = useAnimatedStyle(() => {
+    const crop = animatedRegion.value;
+    const size = animatedViewport.value;
+    return {
+      transform: [{
+        matrix: transformMatrix(
+          crop.width,
+          crop.height,
+          crop.x * size.width,
+          crop.y * size.height,
+        ),
+      }],
+    };
+  });
 
   return (
     <View
@@ -262,12 +442,31 @@ export const CropOverlay = ({
       style={[StyleSheet.absoluteFill, style]}
       onLayout={handleLayout}
     >
-      <View pointerEvents="none" style={[styles.scrim, { left: 0, right: 0, top: 0, height: `${displayRegion.y * 100}%` }]} />
-      <View pointerEvents="none" style={[styles.scrim, { left: 0, top: `${displayRegion.y * 100}%`, width: `${displayRegion.x * 100}%`, height: `${displayRegion.height * 100}%` }]} />
-      <View pointerEvents="none" style={[styles.scrim, { right: 0, top: `${displayRegion.y * 100}%`, width: `${(1 - displayRegion.x - displayRegion.width) * 100}%`, height: `${displayRegion.height * 100}%` }]} />
-      <View pointerEvents="none" style={[styles.scrim, { left: 0, right: 0, bottom: 0, height: `${(1 - displayRegion.y - displayRegion.height) * 100}%` }]} />
+      <CropScrim side="top" region={animatedRegion} viewport={animatedViewport} />
+      <CropScrim side="left" region={animatedRegion} viewport={animatedViewport} />
+      <CropScrim side="right" region={animatedRegion} viewport={animatedViewport} />
+      <CropScrim side="bottom" region={animatedRegion} viewport={animatedViewport} />
 
-      <View
+      <CropBoundary side="top" region={animatedRegion} viewport={animatedViewport} />
+      <CropBoundary side="right" region={animatedRegion} viewport={animatedViewport} />
+      <CropBoundary side="bottom" region={animatedRegion} viewport={animatedViewport} />
+      <CropBoundary side="left" region={animatedRegion} viewport={animatedViewport} />
+      <CropBoundary highlight side="top" region={animatedRegion} viewport={animatedViewport} />
+      <CropBoundary highlight side="right" region={animatedRegion} viewport={animatedViewport} />
+      <CropBoundary highlight side="bottom" region={animatedRegion} viewport={animatedViewport} />
+      <CropBoundary highlight side="left" region={animatedRegion} viewport={animatedViewport} />
+
+      {showGrid ? (
+        <>
+          <CropGuide orientation="vertical" fraction={1 / 3} region={animatedRegion} viewport={animatedViewport} />
+          <CropGuide orientation="vertical" fraction={2 / 3} region={animatedRegion} viewport={animatedViewport} />
+          <CropGuide orientation="horizontal" fraction={1 / 3} region={animatedRegion} viewport={animatedViewport} />
+          <CropGuide orientation="horizontal" fraction={2 / 3} region={animatedRegion} viewport={animatedViewport} />
+        </>
+      ) : null}
+
+      <Animated.View
+        collapsable={false}
         accessibilityRole="adjustable"
         accessibilityLabel="Crop frame"
         accessibilityHint="Drag to reposition the crop, or use the available screen reader actions"
@@ -278,37 +477,21 @@ export const CropOverlay = ({
           { name: 'move-up', label: 'Move crop up' },
           { name: 'move-down', label: 'Move crop down' },
         ]}
-        style={[styles.frame, frameStyle]}
+        style={[styles.frameHitbox, frameHitboxStyle]}
         onAccessibilityAction={moveFrameWithAccessibility}
         {...moveResponder.panHandlers}
-      >
-        <View pointerEvents="none" style={styles.frameHighlight} />
-        {showGrid ? (
-          <View pointerEvents="none" style={StyleSheet.absoluteFill}>
-            <View style={[styles.verticalGuide, { left: '33.333%' }]} />
-            <View style={[styles.verticalGuide, { left: '66.666%' }]} />
-            <View style={[styles.horizontalGuide, { top: '33.333%' }]} />
-            <View style={[styles.horizontalGuide, { top: '66.666%' }]} />
-          </View>
-        ) : null}
-
-      </View>
+      />
 
       {(Object.keys(cornerResponders) as CropCorner[]).map((corner) => (
-        <View
+        <CropHandle
           key={corner}
-          accessibilityRole="adjustable"
-          accessibilityLabel={cornerLabels[corner]}
-          accessibilityHint="Drag to resize the crop. Swipe up or down with a screen reader to resize."
-          accessibilityState={{ disabled }}
-          accessibilityActions={[{ name: 'increment', label: 'Expand crop' }, { name: 'decrement', label: 'Reduce crop' }]}
-          style={[styles.handle, handlePosition(corner)]}
+          corner={corner}
+          region={animatedRegion}
+          viewport={animatedViewport}
+          disabled={disabled}
+          responder={cornerResponders[corner]}
           onAccessibilityAction={(event) => adjustCornerWithAccessibility(corner, event)}
-          {...cornerResponders[corner].panHandlers}
-        >
-          <View pointerEvents="none" style={[styles.handleMarkerShadow, handleMarkerShadowStyles[corner]]} />
-          <View pointerEvents="none" style={[styles.handleMarker, handleMarkerStyles[corner]]} />
-        </View>
+        />
       ))}
     </View>
   );
@@ -316,38 +499,58 @@ export const CropOverlay = ({
 
 const styles = StyleSheet.create({
   scrim: {
-    position: 'absolute',
+    ...StyleSheet.absoluteFillObject,
     backgroundColor: colors.overlay,
+    transformOrigin: [0, 0, 0],
   },
-  frame: {
+  frameHitbox: {
+    ...StyleSheet.absoluteFillObject,
+    transformOrigin: [0, 0, 0],
+  },
+  horizontalBoundary: {
     position: 'absolute',
-    borderWidth: 3,
-    borderColor: 'rgba(34,26,27,0.82)',
+    left: 0,
+    right: 0,
+    top: 0,
+    transformOrigin: [0, 0, 0],
+  },
+  verticalBoundary: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    transformOrigin: [0, 0, 0],
+  },
+  frameBoundary: {
+    backgroundColor: 'rgba(34,26,27,0.82)',
   },
   frameHighlight: {
-    ...StyleSheet.absoluteFillObject,
-    margin: -2,
-    borderWidth: 1,
-    borderColor: colors.text,
+    backgroundColor: colors.text,
   },
   verticalGuide: {
     position: 'absolute',
+    left: 0,
     top: 0,
     bottom: 0,
     width: StyleSheet.hairlineWidth,
     backgroundColor: colors.text,
     opacity: 0.72,
+    transformOrigin: [0, 0, 0],
   },
   horizontalGuide: {
     position: 'absolute',
     left: 0,
     right: 0,
+    top: 0,
     height: StyleSheet.hairlineWidth,
     backgroundColor: colors.text,
     opacity: 0.72,
+    transformOrigin: [0, 0, 0],
   },
   handle: {
     position: 'absolute',
+    left: 0,
+    top: 0,
     width: appLayout.minTouchTarget,
     height: appLayout.minTouchTarget,
     zIndex: 2,
