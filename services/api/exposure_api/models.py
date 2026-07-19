@@ -378,6 +378,44 @@ class MetadataAdviceResponse(ApiModel):
         return self
 
 
+class LibraryChatMessage(ApiModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=3000)
+    attached_photo_ids: list[str] = Field(default_factory=list, max_length=4)
+
+
+class LibraryPhotoContext(ApiModel):
+    id: str = Field(min_length=1, max_length=120)
+    name: str = Field(min_length=1, max_length=240)
+    created_at: str = Field(default="", max_length=80)
+    capture_source: str = Field(default="", max_length=40)
+    width: int | None = Field(default=None, ge=1)
+    height: int | None = Field(default=None, ge=1)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    analysis: dict[str, Any] | None = None
+
+
+class LibraryChatRequest(ApiModel):
+    question: str = Field(min_length=1, max_length=500)
+    history: list[LibraryChatMessage] = Field(default_factory=list, max_length=20)
+    library: list[LibraryPhotoContext] = Field(default_factory=list, max_length=100)
+    attached_photo_ids: list[str] = Field(default_factory=list, max_length=4)
+
+    @model_validator(mode="after")
+    def validate_photo_references(self) -> "LibraryChatRequest":
+        if len(self.attached_photo_ids) != len(set(self.attached_photo_ids)):
+            raise ValueError("attached photo ids must be unique")
+        library_ids = {photo.id for photo in self.library}
+        if any(photo_id not in library_ids for photo_id in self.attached_photo_ids):
+            raise ValueError("attached photos must belong to the supplied library")
+        return self
+
+
+class LibraryChatResponse(ApiModel):
+    answer: str = Field(min_length=1, max_length=3000)
+    model: str = ""
+
+
 class PortfolioReview(ApiModel):
     ordered_photo_ids: list[str]
     excluded_photo_ids: list[str]

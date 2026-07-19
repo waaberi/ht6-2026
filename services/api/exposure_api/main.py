@@ -32,6 +32,8 @@ from .models import (
     GenerativeLayerPlan,
     GenerativeLayerResult,
     LayerStack,
+    LibraryChatRequest,
+    LibraryChatResponse,
     MetadataAdviceRequest,
     MetadataAdviceResponse,
     PortfolioReview,
@@ -156,6 +158,48 @@ def _safe_coaching(serialized: str) -> dict[str, str]:
         raise HTTPException(422, "coaching_json must be an object")
     allowed = {"detail", "skillLevel", "desiredMood"}
     return {str(key): str(value)[:120] for key, value in parsed.items() if key in allowed and value is not None}
+
+
+def _without_private_metadata(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            str(key): _without_private_metadata(item)
+            for key, item in value.items()
+            if not GPS_KEY.search(str(key))
+        }
+    if isinstance(value, list):
+        return [_without_private_metadata(item) for item in value[:100]]
+    return value
+
+
+def _library_chat_request(
+    question: str,
+    history_json: str,
+    library_json: str,
+    attached_photo_ids_json: str,
+) -> LibraryChatRequest:
+    if len(history_json) > 60_000 or len(library_json) > 500_000 or len(attached_photo_ids_json) > 4_000:
+        raise HTTPException(413, "Chat context exceeds the request limit")
+    try:
+        history = json.loads(history_json)
+        library = json.loads(library_json)
+        attached_photo_ids = json.loads(attached_photo_ids_json)
+    except json.JSONDecodeError as error:
+        raise HTTPException(422, "Chat context must be valid JSON") from error
+    try:
+        request = LibraryChatRequest.model_validate({
+            "question": question,
+            "history": history,
+            "library": library,
+            "attachedPhotoIds": attached_photo_ids,
+        })
+    except ValidationError as error:
+        raise HTTPException(422, "Chat context is invalid") from error
+    safe_library = [
+        photo.model_copy(update={"metadata": _without_private_metadata(photo.metadata)})
+        for photo in request.library
+    ]
+    return request.model_copy(update={"library": safe_library})
 
 
 @app.get("/health")
@@ -560,3 +604,49 @@ async def metadata_advice(request: MetadataAdviceRequest) -> MetadataAdviceRespo
         strength="The supplied settings give the review a useful, concrete starting point.",
         model="exposure-fallback-metadata-1",
     )
+
+
+@app.post(
+    "/v1/chat",
+    response_model=LibraryChatResponse,
+    dependencies=[Depends(require_authenticated_user)],
+)
+async def library_chat(
+    response: Response,
+    question: Annotated[str, Form(min_length=1, max_length=500)],
+    history_json: Annotated[str, Form()] = "[]",
+    library_json: Annotated[str, Form()] = "[]",
+    attached_photo_ids_json: Annotated[str, Form()] = "[]",
+    images: Annotated[list[UploadFile], File(max_length=4)] = [],
+) -> LibraryChatResponse:
+    request = _library_chat_request(question, history_json, library_json, attached_photo_ids_json)
+    if len(images) != len(request.attached_photo_ids):
+        raise HTTPException(422, "Supply one image per attached photo id")
+    if not provider.configured:
+        raise HTTPException(503, "Gemini chat is not configured")
+    image_bytes = await asyncio.gather(*(_read_image(image) for image in images))
+    library_by_id = {photo.id: photo for photo in request.library}
+    attached_images = [
+        (
+            photo_id,
+            library_by_id[photo_id].name,
+            data,
+            upload.content_type or "image/jpeg",
+        )
+        for photo_id, data, upload in zip(request.attached_photo_ids, image_bytes, images, strict=True)
+    ]
+    try:
+        result = await asyncio.wait_for(
+            provider.library_chat(request, attached_images, request_timeout_seconds=COACH_TIMEOUT_SECONDS),
+            timeout=COACH_TIMEOUT_SECONDS,
+        )
+    except TimeoutError as error:
+        logger.warning("Gemini library chat exceeded %.1f seconds", COACH_TIMEOUT_SECONDS)
+        raise HTTPException(504, "Gemini chat timed out") from error
+    except Exception as error:
+        logger.exception("Gemini library chat failed")
+        raise HTTPException(502, "Gemini chat is temporarily unavailable") from error
+    if result is None:
+        raise HTTPException(503, "Gemini chat is not configured")
+    response.headers["Cache-Control"] = "private, no-store"
+    return result

@@ -8,6 +8,7 @@ import { apiErrorMessage, resolveApiUrl } from '../domain/apiConfiguration';
 import { layerAssetsForStack } from '../domain/assets';
 import { parseCoachResponse } from '../domain/coachResponse';
 import { currentVersion } from '../domain/layers';
+import type { LibraryChatMessage, LibraryChatResponse } from '../domain/libraryChat';
 import type { EditablePhotoMetadata } from '../domain/photoMetadata';
 import { getAuth0AccessToken } from './auth';
 import type {
@@ -41,7 +42,7 @@ const apiFetch = async (path: string, init: Parameters<typeof fetch>[1]) => {
   const controller = new AbortController();
   const timeout = setTimeout(
     () => controller.abort(),
-    path === '/v1/layers/generative' ? 180_000 : path === '/v1/render' ? 120_000 : 45_000,
+    path === '/v1/layers/generative' ? 180_000 : path === '/v1/render' ? 120_000 : path === '/v1/chat' ? 75_000 : 45_000,
   );
   try {
     const headers = new Headers(init?.headers);
@@ -129,6 +130,87 @@ export const getMetadataAdvice = async (
     body: JSON.stringify({ analysis, metadata }),
   });
   return parseResponse<MetadataAdvice>(response);
+};
+
+const CHAT_METRIC_KEYS = [
+  'meanLuminance',
+  'contrastStd',
+  'meanSaturation',
+  'sharpnessLaplacianVariance',
+  'estimatedNoise',
+  'exifCamera',
+  'exifLens',
+  'exifIso',
+  'exifAperture',
+  'exifExposureTimeSeconds',
+  'exifFocalLengthMm',
+] as const;
+
+const libraryMetadataContext = (exif: Record<string, unknown>) => {
+  const entries = Object.entries(exifForRemoteAnalysis(exif))
+    .filter(([, value]) => ['string', 'number', 'boolean'].includes(typeof value))
+    .sort(([left], [right]) => {
+      const important = /camera|make|model|lens|iso|exposure|aperture|fnumber|focal|date/i;
+      return Number(important.test(right)) - Number(important.test(left));
+    })
+    .slice(0, 32)
+    .map(([key, value]) => [key, typeof value === 'string' ? value.slice(0, 160) : value]);
+  return Object.fromEntries(entries);
+};
+
+const libraryAnalysisContext = (analysis: AnalysisResult | undefined) => analysis ? {
+  summary: analysis.summary,
+  metrics: Object.fromEntries(CHAT_METRIC_KEYS
+    .filter((key) => analysis.metrics[key] !== undefined)
+    .map((key) => [key, analysis.metrics[key]])),
+  lighting: analysis.lighting,
+  issues: analysis.issues.map((issue) => ({
+    category: issue.category,
+    title: issue.title,
+  })).slice(0, 4),
+} : undefined;
+
+export const sendLibraryChat = async ({
+  question,
+  history,
+  photos,
+  analyses,
+  attachedPhotoIds,
+}: {
+  question: string;
+  history: LibraryChatMessage[];
+  photos: PhotoRecord[];
+  analyses: Record<string, AnalysisResult>;
+  attachedPhotoIds: string[];
+}): Promise<LibraryChatResponse> => {
+  const attached = attachedPhotoIds
+    .map((id) => photos.find((photo) => photo.id === id))
+    .filter((photo): photo is PhotoRecord => Boolean(photo))
+    .slice(0, 4);
+  const form = new FormData();
+  form.append('question', question.trim());
+  form.append('history_json', JSON.stringify(history.slice(-20).map((message) => ({
+    role: message.role,
+    content: message.content,
+    attachedPhotoIds: message.attachedPhotoIds,
+  }))));
+  form.append('library_json', JSON.stringify(photos.slice(0, 100).map((photo) => ({
+    id: photo.id,
+    name: photo.originalName,
+    createdAt: photo.createdAt,
+    captureSource: photo.captureSource,
+    width: photo.width,
+    height: photo.height,
+    metadata: libraryMetadataContext(photo.exif),
+    analysis: libraryAnalysisContext(analyses[photo.currentVersionId]),
+  }))));
+  form.append('attached_photo_ids_json', JSON.stringify(attached.map((photo) => photo.id)));
+  for (const photo of attached) {
+    const file = new File(photo.analysisProxyUri);
+    form.append('images', file as unknown as Blob, file.name || `${photo.id}.jpg`);
+  }
+  const response = await apiFetch('/v1/chat', { method: 'POST', body: form });
+  return parseResponse<LibraryChatResponse>(response);
 };
 
 export const requestRender = async (
