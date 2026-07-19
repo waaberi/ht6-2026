@@ -8,14 +8,17 @@ import { apiErrorMessage, resolveApiUrl } from '../domain/apiConfiguration';
 import { layerAssetsForStack } from '../domain/assets';
 import { parseCoachResponse } from '../domain/coachResponse';
 import { currentVersion } from '../domain/layers';
+import type { EditablePhotoMetadata } from '../domain/photoMetadata';
 import { getAuth0AccessToken } from './auth';
 import type {
   AdjustmentValues,
   AnalysisResult,
   CanvasExpansion,
   CoachResponse,
+  CoachTool,
   GenerativeOperation,
   LayerStack,
+  MetadataAdvice,
   PhotoRecord,
   Region,
 } from '../domain/types';
@@ -92,7 +95,7 @@ export const analyzePhoto = async (photo: PhotoRecord): Promise<AnalysisResult> 
 export const askCoach = async (
   analysis: AnalysisResult,
   question: string,
-  context: { stack?: LayerStack; selectedIssueId?: string } = {},
+  context: { stack?: LayerStack; selectedIssueId?: string; availableTools?: CoachTool[] } = {},
 ): Promise<CoachResponse> => {
   const preferences = await loadPreferences();
   const response = await apiFetch('/v1/coach', {
@@ -109,10 +112,23 @@ export const askCoach = async (
       },
       layerStack: context.stack,
       selectedIssueId: context.selectedIssueId,
-      availableTools: ['adjust_global', 'adjust_masked', 'crop', 'straighten', 'amplify', 'expand', 'retake'],
+      availableTools: context.availableTools
+        ?? ['adjust_global', 'adjust_masked', 'crop', 'straighten', 'amplify', 'expand', 'retake'],
     }),
   });
   return parseCoachResponse(await parseResponse<unknown>(response));
+};
+
+export const getMetadataAdvice = async (
+  analysis: AnalysisResult,
+  metadata: EditablePhotoMetadata,
+): Promise<MetadataAdvice> => {
+  const response = await apiFetch('/v1/metadata-advice', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ analysis, metadata }),
+  });
+  return parseResponse<MetadataAdvice>(response);
 };
 
 export const requestRender = async (

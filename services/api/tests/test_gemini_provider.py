@@ -11,6 +11,7 @@ from exposure_api.models import (
     AnalysisSignal,
     CoachRequest,
     CoachResponse,
+    MetadataAdviceRequest,
     GenerativeLayerPlan,
     Region,
     SemanticAnalysis,
@@ -498,6 +499,65 @@ def test_coach_reports_the_fallback_model_that_succeeded(monkeypatch: pytest.Mon
     assert result is not None
     assert result.model == "fallback-model"
     assert calls == ["primary-model", "fallback-model"]
+
+
+def test_metadata_advice_reviews_camera_lens_settings_and_hardware_use() -> None:
+    captured: dict[str, object] = {}
+
+    class Interactions:
+        def create(self, **kwargs: object) -> SimpleNamespace:
+            captured.update(kwargs)
+            return SimpleNamespace(output_text=json.dumps({
+                "cameraProfile": "This compact body is known for portable handling and restrained color rendering, making it useful when a lighter kit keeps the photographer mobile.",
+                "lensBehavior": "The prime lens favors a natural field of view and a wide aperture, with shallow depth of field becoming more pronounced near its maximum opening.",
+                "settingsAssessment": "ISO 800 supports the dim exposure but adds noise. At f/2, depth of field is limited; 1/60 risks subject motion, while 35 mm keeps perspective natural.",
+                "hardwareUse": "The capture uses the fast lens appropriately, though a steadier 1/30 exposure at lower ISO would use its light-gathering strength better for a static subject.",
+                "strength": "The focal length suits the measured subject framing without forcing perspective.",
+            }))
+
+    analysis = AnalysisResult(
+        version_id="version",
+        checksum="checksum",
+        metrics={"meanLuminance": 0.3, "estimatedNoise": 0.04},
+        lighting={
+            "exposure": -0.2,
+            "contrast": 0.2,
+            "clippedShadows": 0.1,
+            "clippedHighlights": 0,
+            "colorCast": {"red": 0, "green": 0, "blue": 0},
+        },
+        issues=[],
+        camera_recommendations=[],
+        summary="Underexposed.",
+    )
+    request = MetadataAdviceRequest(
+        analysis=analysis,
+        metadata={
+            "camera": "Camera X",
+            "lens": "35mm F2",
+            "iso": "800",
+            "aperture": "f/2",
+            "shutterSpeed": "1/60 s",
+            "focalLength": "35 mm",
+        },
+    )
+    provider = GeminiProvider()
+    provider._client = SimpleNamespace(interactions=Interactions())  # type: ignore[assignment]
+
+    result = asyncio.run(provider.metadata_advice(request))
+
+    assert result is not None
+    assert result.camera_profile
+    assert result.lens_behavior
+    assert result.settings_assessment
+    assert result.hardware_use
+    prompt = str(captured["input"])
+    assert "portability, color rendering, low-light ability" in prompt
+    assert "explicitly assessing ISO, f-stop, shutter speed, and focal length" in prompt
+    assert "Never flatter the photographer" in prompt
+    assert "Never invent a feature" in prompt
+    schema = captured["response_format"]["schema"]  # type: ignore[index]
+    assert {"cameraProfile", "lensBehavior", "settingsAssessment", "hardwareUse"}.issubset(schema["required"])
 
 
 def test_coach_request_defaults_to_full_tool_contract_but_respects_explicit_empty_list() -> None:

@@ -327,6 +327,57 @@ class CoachResponse(ApiModel):
         return self
 
 
+class PhotoMetadataInput(ApiModel):
+    camera: str = Field(default="", max_length=160)
+    lens: str = Field(default="", max_length=160)
+    iso: str = Field(default="", max_length=80)
+    aperture: str = Field(default="", max_length=80)
+    shutter_speed: str = Field(default="", max_length=80)
+    focal_length: str = Field(default="", max_length=80)
+
+    @model_validator(mode="after")
+    def require_enough_context(self) -> "PhotoMetadataInput":
+        populated = sum(bool(value.strip()) for value in (
+            self.camera,
+            self.lens,
+            self.iso,
+            self.aperture,
+            self.shutter_speed,
+            self.focal_length,
+        ))
+        if populated <= 3:
+            raise ValueError("at least four metadata fields are required for hardware advice")
+        return self
+
+
+class MetadataAdviceRequest(ApiModel):
+    analysis: AnalysisResult
+    metadata: PhotoMetadataInput
+
+
+class MetadataAdviceResponse(ApiModel):
+    camera_profile: str = Field(min_length=1, max_length=600)
+    lens_behavior: str = Field(min_length=1, max_length=600)
+    settings_assessment: str = Field(min_length=1, max_length=700)
+    hardware_use: str = Field(min_length=1, max_length=600)
+    strength: str = Field(default="", max_length=280)
+    model: str = ""
+
+    @model_validator(mode="after")
+    def keep_hardware_review_focused(self) -> "MetadataAdviceResponse":
+        limits = {
+            "cameraProfile": (self.camera_profile, 60),
+            "lensBehavior": (self.lens_behavior, 60),
+            "settingsAssessment": (self.settings_assessment, 75),
+            "hardwareUse": (self.hardware_use, 60),
+            "strength": (self.strength, 24),
+        }
+        for field, (value, limit) in limits.items():
+            if len(value.split()) > limit:
+                raise ValueError(f"{field} must be at most {limit} words")
+        return self
+
+
 class PortfolioReview(ApiModel):
     ordered_photo_ids: list[str]
     excluded_photo_ids: list[str]

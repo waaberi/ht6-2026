@@ -261,6 +261,15 @@ export type CoachResponse = {
   model: string;
 };
 
+export type MetadataAdvice = {
+  cameraProfile: string;
+  lensBehavior: string;
+  settingsAssessment: string;
+  hardwareUse: string;
+  strength: string;
+  model: string;
+};
+
 export type GenerativeOperation = 'amplify' | 'expand';
 
 export type AnalysisResult = {
