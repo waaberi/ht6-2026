@@ -92,14 +92,21 @@ export const horizonRollForOrientation = (
   orientation: number,
 ) => {
   if (!rotation) return 0;
+  let screenRoll: number;
   switch (orientation) {
     case 90:
-      return rotation.beta;
+      screenRoll = rotation.beta;
+      break;
     case -90:
-      return -rotation.beta;
+      screenRoll = -rotation.beta;
+      break;
     case 180:
-      return -rotation.gamma;
+      screenRoll = -rotation.gamma;
+      break;
     default:
-      return rotation.gamma;
+      screenRoll = rotation.gamma;
   }
+  // The sensor reports how the screen rotated relative to gravity. The guide
+  // must rotate the opposite way to remain parallel to the visible horizon.
+  return -screenRoll;
 };

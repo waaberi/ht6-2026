@@ -3,12 +3,13 @@
     "name": "Exposure",
     "slug": "exposure",
     "version": "1.0.0",
-    "orientation": "default",
+    "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "scheme": "exposure",
     "ios": {
       "supportsTablet": true,
+      "requireFullScreen": true,
       "bundleIdentifier": "com.ht62026.exposure"
     },
     "android": {

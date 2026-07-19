@@ -49,12 +49,12 @@ test('pinch zoom is monotonic and clamped to the camera range', () => {
   assert.equal(clampZoom(Number.POSITIVE_INFINITY), 1);
 });
 
-test('horizon roll follows the active device orientation', () => {
+test('horizon guide counter-rotates against device tilt in every orientation', () => {
   const rotation = { beta: 0.2, gamma: -0.35 };
-  assert.equal(horizonRollForOrientation(rotation, 0), -0.35);
-  assert.equal(horizonRollForOrientation(rotation, 90), 0.2);
-  assert.equal(horizonRollForOrientation(rotation, -90), -0.2);
-  assert.equal(horizonRollForOrientation(rotation, 180), 0.35);
+  assert.equal(horizonRollForOrientation(rotation, 0), 0.35);
+  assert.equal(horizonRollForOrientation(rotation, 90), -0.2);
+  assert.equal(horizonRollForOrientation(rotation, -90), 0.2);
+  assert.equal(horizonRollForOrientation(rotation, 180), -0.35);
   assert.equal(horizonRollForOrientation(null, 0), 0);
 });
 
