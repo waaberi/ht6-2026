@@ -45,6 +45,7 @@ type ExposureState = {
   addAdjustment: (adjustments: AdjustmentValues, name?: string, expectedVersionId?: string) => Promise<void>;
   addLayer: (layer: Layer, label: string, expectedVersionId?: string) => Promise<void>;
   commitStack: (stack: LayerStack, label: string, expectedVersionId?: string) => Promise<void>;
+  updatePhotoExif: (exif: Record<string, unknown>, expectedPhotoId?: string) => Promise<void>;
   restore: (versionId: string) => Promise<void>;
   runAnalysis: () => Promise<AnalysisResult>;
   synchronize: () => Promise<void>;
@@ -259,6 +260,13 @@ export const ExposureProvider = ({ children }: React.PropsWithChildren) => {
     [liveSelectedPhoto, persistPhoto, synchronize],
   );
 
+  const updatePhotoExif = useCallback(async (exif: Record<string, unknown>, expectedPhotoId?: string) => {
+    const photo = liveSelectedPhoto();
+    if (expectedPhotoId && photo.id !== expectedPhotoId) throw new Error('The selected photo changed before metadata could be saved.');
+    await persistPhoto({ ...photo, exif: { ...exif }, syncState: 'queued' });
+    void synchronize();
+  }, [liveSelectedPhoto, persistPhoto, synchronize]);
+
   const restore = useCallback(
     async (versionId: string) => {
       const photo = liveSelectedPhoto();
@@ -305,11 +313,12 @@ export const ExposureProvider = ({ children }: React.PropsWithChildren) => {
       addAdjustment,
       addLayer,
       commitStack,
+      updatePhotoExif,
       restore,
       runAnalysis,
       synchronize,
     }),
-    [ownerId, photos, selectedPhoto, analyses, loading, analyzing, syncing, syncError, lastSyncedAt, ingest, deletePhotos, addAdjustment, addLayer, commitStack, restore, runAnalysis, synchronize],
+    [ownerId, photos, selectedPhoto, analyses, loading, analyzing, syncing, syncError, lastSyncedAt, ingest, deletePhotos, addAdjustment, addLayer, commitStack, updatePhotoExif, restore, runAnalysis, synchronize],
   );
 
   return <ExposureContext.Provider value={value}>{children}</ExposureContext.Provider>;

@@ -14,6 +14,7 @@ import type {
   AnalysisResult,
   CanvasExpansion,
   CoachResponse,
+  CoachTool,
   GenerativeOperation,
   LayerStack,
   PhotoRecord,
@@ -92,7 +93,7 @@ export const analyzePhoto = async (photo: PhotoRecord): Promise<AnalysisResult> 
 export const askCoach = async (
   analysis: AnalysisResult,
   question: string,
-  context: { stack?: LayerStack; selectedIssueId?: string } = {},
+  context: { stack?: LayerStack; selectedIssueId?: string; availableTools?: CoachTool[] } = {},
 ): Promise<CoachResponse> => {
   const preferences = await loadPreferences();
   const response = await apiFetch('/v1/coach', {
@@ -109,7 +110,8 @@ export const askCoach = async (
       },
       layerStack: context.stack,
       selectedIssueId: context.selectedIssueId,
-      availableTools: ['adjust_global', 'adjust_masked', 'crop', 'straighten', 'remove', 'add', 'expand', 'retake'],
+      availableTools: context.availableTools
+        ?? ['adjust_global', 'adjust_masked', 'crop', 'straighten', 'remove', 'add', 'expand', 'retake'],
     }),
   });
   return parseCoachResponse(await parseResponse<unknown>(response));
