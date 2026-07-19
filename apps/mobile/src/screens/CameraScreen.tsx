@@ -23,12 +23,14 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { colors, typography } from '../components/theme';
 import {
+  type CapturePlatform,
   captureControlsForSession,
   clampZoom,
   highestQualityCaptureOptions,
   highestQualityPictureSize,
   horizonRollForOrientation,
   normalizeFlashMode,
+  preservesCameraReadinessOnSwitch,
   zoomFromPinch,
 } from '../domain/cameraControls';
 import {
@@ -51,6 +53,7 @@ type IconName = React.ComponentProps<typeof MaterialCommunityIcons>['name'];
 
 const timerOptions = [0, 3, 10] as const;
 const ratioOptions: CameraPreferences['photoRatio'][] = ['4:3', '16:9'];
+const capturePlatform: CapturePlatform = Platform.OS === 'ios' ? 'ios' : 'android';
 const distanceBetweenTouches = (touches: ReadonlyArray<{ pageX: number; pageY: number }>) => {
   if (touches.length < 2) return 0;
   return Math.hypot(touches[0].pageX - touches[1].pageX, touches[0].pageY - touches[1].pageY);
@@ -96,7 +99,7 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
     () => highestQualityPictureSize(
       availablePictureSizes,
       cameraPreferences.photoRatio,
-      Platform.OS === 'ios' ? 'ios' : 'android',
+      capturePlatform,
     ),
     [availablePictureSizes, cameraPreferences.photoRatio],
   );
@@ -270,11 +273,16 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
   };
 
   const switchCamera = () => {
-    setReady(false);
     setCaptureConfigurationReady(false);
-    setAvailablePictureSizes([]);
-    setPictureSizesLoaded(false);
-    pictureSizesRequestedRef.current = false;
+    // iOS swaps the input on the existing capture session without emitting
+    // onCameraReady again. Its picture-size list is camera-independent, so
+    // preserve both pieces of state and let the facing effect settle capture.
+    if (!preservesCameraReadinessOnSwitch(capturePlatform)) {
+      setReady(false);
+      setAvailablePictureSizes([]);
+      setPictureSizesLoaded(false);
+      pictureSizesRequestedRef.current = false;
+    }
     setFacing((current) => (current === 'back' ? 'front' : 'back'));
   };
 

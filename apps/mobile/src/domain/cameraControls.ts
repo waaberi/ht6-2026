@@ -61,6 +61,8 @@ export const highestQualityPictureSize = (
 export const normalizeFlashMode = (value: unknown): CaptureFlashMode =>
   value === 'on' || value === 'auto' ? value : 'off';
 
+export const preservesCameraReadinessOnSwitch = (platform: CapturePlatform) => platform === 'ios';
+
 export const clampZoom = (zoom: number) => Math.max(0, Math.min(1, zoom));
 
 export const captureControlsForSession = (
