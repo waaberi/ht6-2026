@@ -2,10 +2,10 @@
   "name": "exposure-workspace",
   "version": "1.0.0",
   "private": true,
-  "packageManager": "pnpm@10.19.0",
+  "packageManager": "pnpm@11.9.0",
   "engines": {
     "node": ">=22.13.0",
-    "pnpm": ">=10.19.0"
+    "pnpm": ">=11.9.0"
   },
   "scripts": {
     "bootstrap": "node scripts/setup.mjs",

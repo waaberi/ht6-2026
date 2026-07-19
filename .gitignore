@@ -13,6 +13,7 @@ overnight.env
 .opencode/
 # Dependencies and generated builds
 node_modules/
+.pnpm-store/
 .expo/
 dist/
 build/

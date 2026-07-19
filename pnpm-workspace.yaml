@@ -1,7 +1,10 @@
 packages:
   - apps/*
 
-onlyBuiltDependencies:
-  - "@shopify/react-native-skia"
-  - esbuild
-  - supabase
+nodeLinker: hoisted
+enableGlobalVirtualStore: false
+
+allowBuilds:
+  "@shopify/react-native-skia": true
+  esbuild: true
+  supabase: true
