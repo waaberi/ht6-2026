@@ -1,5 +1,14 @@
 import { Ionicons } from "@expo/vector-icons";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  forwardRef,
+  memo,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -35,6 +44,9 @@ const STARTERS = [
   "What camera do I use most?",
   "What patterns do you see in my settings?",
 ];
+type ChatComposerHandle = {
+  setDraft: (value: string) => void;
+};
 
 export const ChatScreen = ({
   messages,
@@ -48,18 +60,20 @@ export const ChatScreen = ({
   onSend: (question: string, attachedPhotoIds: string[]) => Promise<boolean>;
 }) => {
   const { photos } = useExposure();
-  const [draft, setDraft] = useState("");
   const [attachedPhotoIds, setAttachedPhotoIds] = useState<string[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
+  const composerRef = useRef<ChatComposerHandle>(null);
   const photoById = useMemo(
     () => new Map(photos.map((photo) => [photo.id, photo])),
     [photos],
   );
-  const attachedPhotos = attachedPhotoIds
+  const attachedPhotos = useMemo(() => attachedPhotoIds
     .map((id) => photoById.get(id))
-    .filter((photo): photo is PhotoRecord => Boolean(photo));
-  const canSend = draft.trim().length > 0 && !busy;
+    .filter((photo): photo is PhotoRecord => Boolean(photo)), [attachedPhotoIds, photoById]);
+  const openPicker = useCallback(() => setPickerOpen(true), []);
+  const closePicker = useCallback(() => setPickerOpen(false), []);
+  const clearAttachments = useCallback(() => setAttachedPhotoIds([]), []);
 
   useEffect(() => {
     const valid = new Set(photos.map((photo) => photo.id));
@@ -71,19 +85,6 @@ export const ChatScreen = ({
       scrollRef.current?.scrollToEnd({ animated: messages.length > 0 }),
     );
   }, [busy, messages]);
-
-  const send = async () => {
-    const question = draft.trim();
-    if (!question || busy) return;
-    const attachmentSnapshot = [...attachedPhotoIds];
-    setDraft("");
-    const sent = await onSend(question, attachmentSnapshot);
-    if (sent) {
-      setAttachedPhotoIds([]);
-    } else {
-      setDraft(question);
-    }
-  };
 
   return (
     <KeyboardAvoidingView
@@ -119,7 +120,7 @@ export const ChatScreen = ({
                 <Pressable
                   key={starter}
                   accessibilityRole="button"
-                  onPress={() => setDraft(starter)}
+                  onPress={() => composerRef.current?.setDraft(starter)}
                   style={({ pressed }) => [
                     styles.starter,
                     pressed && styles.controlPressed,
@@ -187,53 +188,14 @@ export const ChatScreen = ({
             ))}
           </ScrollView>
         ) : null}
-        <View style={styles.composer}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Attach photos from Library"
-            disabled={busy}
-            onPress={() => setPickerOpen(true)}
-            style={({ pressed }) => [
-              styles.attachButton,
-              pressed && styles.controlPressed,
-              busy && styles.disabled,
-            ]}
-          >
-            <Ionicons name="images-outline" size={23} color={colors.text} />
-            {attachedPhotoIds.length ? (
-              <Text style={styles.attachCount}>{attachedPhotoIds.length}</Text>
-            ) : null}
-          </Pressable>
-          <TextInput
-            accessibilityLabel="Message Gemini"
-            editable={!busy}
-            maxLength={500}
-            multiline
-            onChangeText={setDraft}
-            placeholder="Ask about your photos or gear"
-            placeholderTextColor={colors.textSecondary}
-            style={styles.input}
-            value={draft}
-          />
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Send message"
-            accessibilityState={{ disabled: !canSend, busy }}
-            disabled={!canSend}
-            onPress={() => void send()}
-            style={({ pressed }) => [
-              styles.sendButton,
-              pressed && styles.primaryPressed,
-              !canSend && styles.disabled,
-            ]}
-          >
-            {busy ? (
-              <ActivityIndicator size="small" color={colors.onPrimary} />
-            ) : (
-              <Ionicons name="arrow-up" size={22} color={colors.onPrimary} />
-            )}
-          </Pressable>
-        </View>
+        <ChatComposer
+          ref={composerRef}
+          attachedPhotoIds={attachedPhotoIds}
+          busy={busy}
+          onAttach={openPicker}
+          onSend={onSend}
+          onSent={clearAttachments}
+        />
         <Text style={styles.sessionNote}>
           Session only - this chat is not saved to your files or account.
         </Text>
@@ -244,13 +206,104 @@ export const ChatScreen = ({
         selectedIds={attachedPhotoIds}
         visible={pickerOpen}
         onChange={setAttachedPhotoIds}
-        onClose={() => setPickerOpen(false)}
+        onClose={closePicker}
       />
     </KeyboardAvoidingView>
   );
 };
 
-const ChatBubble = ({
+const ChatComposer = memo(forwardRef<ChatComposerHandle, {
+  attachedPhotoIds: string[];
+  busy: boolean;
+  onAttach: () => void;
+  onSend: (question: string, attachedPhotoIds: string[]) => Promise<boolean>;
+  onSent: () => void;
+}>(({
+  attachedPhotoIds,
+  busy,
+  onAttach,
+  onSend,
+  onSent,
+}, ref) => {
+  const [draft, setDraft] = useState("");
+  const inputRef = useRef<TextInput>(null);
+  const canSend = draft.trim().length > 0 && !busy;
+
+  useImperativeHandle(ref, () => ({
+    setDraft: (value: string) => {
+      setDraft(value);
+      requestAnimationFrame(() => inputRef.current?.focus());
+    },
+  }), []);
+
+  const send = useCallback(async () => {
+    const question = draft.trim();
+    if (!question || busy) return;
+    const attachmentSnapshot = [...attachedPhotoIds];
+    setDraft("");
+    const sent = await onSend(question, attachmentSnapshot);
+    if (sent) {
+      onSent();
+    } else {
+      setDraft(question);
+      requestAnimationFrame(() => inputRef.current?.focus());
+    }
+  }, [attachedPhotoIds, busy, draft, onSend, onSent]);
+
+  return (
+    <View style={styles.composer}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Attach photos from Library"
+        disabled={busy}
+        onPress={onAttach}
+        style={({ pressed }) => [
+          styles.attachButton,
+          pressed && styles.controlPressed,
+          busy && styles.disabled,
+        ]}
+      >
+        <Ionicons name="images-outline" size={23} color={colors.text} />
+        {attachedPhotoIds.length ? (
+          <Text style={styles.attachCount}>{attachedPhotoIds.length}</Text>
+        ) : null}
+      </Pressable>
+      <TextInput
+        ref={inputRef}
+        accessibilityLabel="Message Gemini"
+        editable={!busy}
+        maxLength={500}
+        multiline
+        onChangeText={setDraft}
+        placeholder="Ask about your photos or gear"
+        placeholderTextColor={colors.textSecondary}
+        style={styles.input}
+        value={draft}
+      />
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Send message"
+        accessibilityState={{ disabled: !canSend, busy }}
+        disabled={!canSend}
+        onPress={() => void send()}
+        style={({ pressed }) => [
+          styles.sendButton,
+          pressed && styles.primaryPressed,
+          !canSend && styles.disabled,
+        ]}
+      >
+        {busy ? (
+          <ActivityIndicator size="small" color={colors.onPrimary} />
+        ) : (
+          <Ionicons name="arrow-up" size={22} color={colors.onPrimary} />
+        )}
+      </Pressable>
+    </View>
+  );
+}));
+ChatComposer.displayName = "ChatComposer";
+
+const ChatBubble = memo(({
   message,
   photoById,
 }: {
@@ -282,9 +335,10 @@ const ChatBubble = ({
       </Text>
     </View>
   );
-};
+});
+ChatBubble.displayName = "ChatBubble";
 
-const PhotoAttachmentPicker = ({
+const PhotoAttachmentPicker = memo(({
   photos,
   selectedIds,
   visible,
@@ -399,7 +453,8 @@ const PhotoAttachmentPicker = ({
       </SafeAreaView>
     </Modal>
   );
-};
+});
+PhotoAttachmentPicker.displayName = "PhotoAttachmentPicker";
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.background },
