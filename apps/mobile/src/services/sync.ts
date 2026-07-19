@@ -4,9 +4,31 @@ import { layerAssetsForStacks } from '../domain/assets';
 import { mergeStyleProfiles, type SavedStyleProfile } from '../data/styleRepository';
 import { clearPhotoDeletionId } from '../data/photoRepository';
 import { loadPreferences, savePreferences, type ExposurePreferences } from '../data/preferences';
+import { getActiveOwnerId } from '../data/ownerScope';
+import {
+  GUEST_OWNER_ID,
+  assertAuthenticatedOwner,
+  assertOwnerMatches,
+  ownerDirectorySegment,
+  type OwnerId,
+} from '../domain/ownership';
+import {
+  chunkValues,
+  collectPages,
+  fulfilledValues,
+  groupValuesBy,
+  mapSettledWithConcurrency,
+  retryBestEffort,
+} from '../domain/syncReliability';
 import type { AnalysisResult, Layer, PhotoRecord, PhotoVersion } from '../domain/types';
 import type { PortfolioReview, StyleProfileResult } from './api';
 import { supabase } from './supabase';
+
+const requireSessionOwner = async (ownerId: OwnerId) => {
+  if (!supabase) throw new Error('Cloud sync is not configured.');
+  const { data } = await supabase.auth.getSession();
+  return assertAuthenticatedOwner(ownerId, data.session?.user.id);
+};
 
 const uploadOnce = async (bucket: string, path: string, uri: string, contentType: string) => {
   if (!supabase) return;
@@ -15,14 +37,24 @@ const uploadOnce = async (bucket: string, path: string, uri: string, contentType
   if (error && !/already exists|duplicate/i.test(error.message)) throw error;
 };
 
-export const syncPhotoDeletions = async (photoIds: string[]): Promise<string[]> => {
+const STORAGE_REMOVE_ATTEMPTS = 2;
+
+const removePrivateObjectsBestEffort = async (bucket: string, paths: string[]) => {
+  const client = supabase;
+  if (!client || paths.length === 0) return;
+  await retryBestEffort(STORAGE_REMOVE_ATTEMPTS, async () => {
+    const { error } = await client.storage.from(bucket).remove(paths);
+    return !error;
+  });
+};
+
+export const syncPhotoDeletions = async (ownerId: OwnerId, photoIds: string[]): Promise<string[]> => {
   if (!supabase || photoIds.length === 0) return [];
-  const { data: sessionData } = await supabase.auth.getSession();
-  const userId = sessionData.session?.user.id;
-  if (!userId) return [];
+  const userId = await requireSessionOwner(ownerId);
 
   const completed: string[] = [];
   for (const photoId of photoIds) {
+    await requireSessionOwner(ownerId);
     const [{ data: photo, error: photoError }, { data: assets, error: assetsError }] = await Promise.all([
       supabase.from('photos').select('original_path').eq('id', photoId).eq('owner_id', userId).maybeSingle(),
       supabase.from('layer_assets').select('storage_path').eq('photo_id', photoId).eq('owner_id', userId),
@@ -32,36 +64,57 @@ export const syncPhotoDeletions = async (photoIds: string[]): Promise<string[]> 
 
     const originalPath = photo?.original_path as string | undefined;
     if (originalPath) {
-      const base = originalPath.replace(/\/original\.[^/]+$/, '');
-      const { error } = await supabase.storage.from('originals').remove([originalPath]);
-      if (error) throw error;
-      const { error: derivedError } = await supabase.storage.from('derived').remove([
-        `${base}/analysis-proxy.jpg`,
-        `${base}/thumbnail.jpg`,
-      ]);
-      if (derivedError) throw derivedError;
+      if (!originalPath.startsWith(`${ownerId}/`)) {
+        throw new Error('The remote original belongs to a different account.');
+      }
     }
     const assetPaths = (assets ?? []).map((asset) => asset.storage_path as string);
-    if (assetPaths.length) {
-      const { error } = await supabase.storage.from('layer-assets').remove(assetPaths);
-      if (error) throw error;
+    if (assetPaths.some((path) => !path.startsWith(`${ownerId}/`))) {
+      throw new Error('A remote layer asset belongs to a different account.');
     }
-    const { error: deleteError } = await supabase.from('photos').delete().eq('id', photoId).eq('owner_id', userId);
+
+    await requireSessionOwner(ownerId);
+    const { data: deletedPhoto, error: deleteError } = await supabase
+      .from('photos')
+      .delete()
+      .eq('id', photoId)
+      .eq('owner_id', userId)
+      .select('id')
+      .maybeSingle();
     if (deleteError) throw deleteError;
-    await clearPhotoDeletionId(photoId);
+    if (!deletedPhoto) {
+      const { data: remainingPhoto, error: verificationError } = await supabase
+        .from('photos')
+        .select('id')
+        .eq('id', photoId)
+        .eq('owner_id', userId)
+        .maybeSingle();
+      if (verificationError) throw verificationError;
+      if (remainingPhoto) throw new Error('The owned cloud photo could not be deleted.');
+    }
+
+    await Promise.all([
+      removePrivateObjectsBestEffort('originals', originalPath ? [originalPath] : []),
+      removePrivateObjectsBestEffort('derived', originalPath ? [
+        `${originalPath.replace(/\/original\.[^/]+$/, '')}/analysis-proxy.jpg`,
+        `${originalPath.replace(/\/original\.[^/]+$/, '')}/thumbnail.jpg`,
+      ] : []),
+      removePrivateObjectsBestEffort('layer-assets', assetPaths),
+    ]);
+    await clearPhotoDeletionId(photoId, ownerId);
     completed.push(photoId);
   }
   return completed;
 };
 
 export const syncQueuedPhotos = async (
+  ownerId: OwnerId,
   photos: PhotoRecord[],
   onProgress?: (photos: PhotoRecord[]) => void,
 ): Promise<PhotoRecord[]> => {
   if (!supabase) return photos;
-  const { data } = await supabase.auth.getSession();
-  const userId = data.session?.user.id;
-  if (!userId) return photos;
+  const userId = await requireSessionOwner(ownerId);
+  photos.forEach((photo) => assertOwnerMatches(photo.ownerId, ownerId));
 
   const synced = [...photos];
   for (let index = 0; index < synced.length; index += 1) {
@@ -69,11 +122,15 @@ export const syncQueuedPhotos = async (
     if (photo.syncState === 'synced') continue;
     const base = `${userId}/${photo.id}`;
     try {
+      await requireSessionOwner(ownerId);
       synced[index] = { ...photo, syncState: 'syncing' };
       onProgress?.([...synced]);
       const localOriginal = new File(photo.originalUri);
       const originalPath = photo.remoteOriginalPath
         ?? `${base}/original.${localOriginal.extension.replace('.', '') || 'jpg'}`;
+      if (!originalPath.startsWith(`${ownerId}/`)) {
+        throw new Error('The remote original belongs to a different account.');
+      }
       if (localOriginal.exists) {
         await uploadOnce('originals', originalPath, photo.originalUri, photo.originalMimeType);
       } else if (!photo.remoteOriginalPath) {
@@ -180,17 +237,26 @@ type RemoteLayerAssetRow = {
 };
 
 const exposureDirectory = new Directory(Paths.document, 'exposure');
-const originalsDirectory = new Directory(exposureDirectory, 'originals');
-const proxiesDirectory = new Directory(exposureDirectory, 'proxies');
-const thumbnailsDirectory = new Directory(exposureDirectory, 'thumbnails');
-const layerAssetsDirectory = new Directory(exposureDirectory, 'layer-assets');
+const syncDirectoriesForOwner = (ownerId: OwnerId) => {
+  const ownerDirectory = new Directory(exposureDirectory, 'owners', ownerDirectorySegment(ownerId));
+  return {
+    ownerDirectory,
+    originalsDirectory: new Directory(ownerDirectory, 'originals'),
+    proxiesDirectory: new Directory(ownerDirectory, 'proxies'),
+    thumbnailsDirectory: new Directory(ownerDirectory, 'thumbnails'),
+    layerAssetsDirectory: new Directory(ownerDirectory, 'layer-assets'),
+  };
+};
 
-const ensureSyncDirectories = () => {
+const ensureSyncDirectories = (ownerId: OwnerId) => {
+  const directories = syncDirectoriesForOwner(ownerId);
   exposureDirectory.create({ intermediates: true, idempotent: true });
-  originalsDirectory.create({ intermediates: true, idempotent: true });
-  proxiesDirectory.create({ intermediates: true, idempotent: true });
-  thumbnailsDirectory.create({ intermediates: true, idempotent: true });
-  layerAssetsDirectory.create({ intermediates: true, idempotent: true });
+  directories.ownerDirectory.create({ intermediates: true, idempotent: true });
+  directories.originalsDirectory.create({ intermediates: true, idempotent: true });
+  directories.proxiesDirectory.create({ intermediates: true, idempotent: true });
+  directories.thumbnailsDirectory.create({ intermediates: true, idempotent: true });
+  directories.layerAssetsDirectory.create({ intermediates: true, idempotent: true });
+  return directories;
 };
 
 const extensionForPath = (path: string, fallback = 'jpg') => path.match(/\.([a-z0-9]+)$/i)?.[1] ?? fallback;
@@ -216,6 +282,38 @@ const mapWithConcurrency = async <T, R>(items: T[], limit: number, work: (item: 
   return results;
 };
 
+const SUPABASE_PAGE_SIZE = 500;
+const PHOTO_ID_BATCH_SIZE = 100;
+
+type SupabasePage<T> = {
+  data: T[] | null;
+  error: unknown;
+};
+
+const readAllPages = async <T>(
+  readPage: (from: number, to: number) => PromiseLike<SupabasePage<T>>,
+): Promise<T[]> => collectPages(SUPABASE_PAGE_SIZE, async (from, to) => {
+    const { data, error } = await readPage(from, to);
+    if (error) throw error;
+    return data ?? [];
+  });
+
+const readRowsForPhotoIds = async <T>(
+  table: 'photo_versions' | 'layer_assets',
+  photoIds: string[],
+): Promise<T[]> => {
+  const client = supabase;
+  if (!client) return [];
+  const pages = await mapWithConcurrency(chunkValues(photoIds, PHOTO_ID_BATCH_SIZE), 3, (photoIdBatch) =>
+    readAllPages<T>((from, to) => client
+      .from(table)
+      .select('*')
+      .in('photo_id', photoIdBatch)
+      .order('id', { ascending: true })
+      .range(from, to)));
+  return pages.flat();
+};
+
 const withLocalAssetUris = (layer: Layer, assetUris: Map<string, string>): Layer => {
   if (layer.type === 'image') {
     return { ...layer, uri: assetUris.get(layer.assetId) ?? layer.uri };
@@ -234,11 +332,12 @@ const withLocalAssetUris = (layer: Layer, assetUris: Map<string, string>): Layer
 };
 
 const hydrateRemotePhoto = async (
+  ownerId: OwnerId,
   photo: RemotePhotoRow,
   versions: RemoteVersionRow[],
   assets: RemoteLayerAssetRow[],
 ): Promise<PhotoRecord> => {
-  ensureSyncDirectories();
+  const { originalsDirectory, proxiesDirectory, thumbnailsDirectory, layerAssetsDirectory } = ensureSyncDirectories(ownerId);
   const original = new File(originalsDirectory, `${photo.id}.${extensionForPath(photo.original_path)}`);
   const proxy = new File(proxiesDirectory, `${photo.id}.jpg`);
   const thumbnail = new File(thumbnailsDirectory, `${photo.id}.jpg`);
@@ -279,6 +378,7 @@ const hydrateRemotePhoto = async (
 
   return {
     id: photo.id,
+    ownerId,
     createdAt: photo.created_at,
     captureSource: photo.capture_source,
     originalUri: original.uri,
@@ -302,35 +402,41 @@ const hydrateRemotePhoto = async (
  * Pulls the private cloud library after sign-in so another device can rebuild
  * the same originals, version stacks, and generated/imported layer assets.
  */
-export const pullRemotePhotos = async (localPhotos: PhotoRecord[], excludedPhotoIds: string[] = []): Promise<PhotoRecord[]> => {
-  if (!supabase) return localPhotos;
-  const { data: sessionData } = await supabase.auth.getSession();
-  const userId = sessionData.session?.user.id;
-  if (!userId) return localPhotos;
+export const pullRemotePhotos = async (
+  ownerId: OwnerId,
+  localPhotos: PhotoRecord[],
+  excludedPhotoIds: string[] = [],
+): Promise<PhotoRecord[]> => {
+  const client = supabase;
+  if (!client) return localPhotos;
+  localPhotos.forEach((photo) => assertOwnerMatches(photo.ownerId, ownerId));
+  const userId = await requireSessionOwner(ownerId);
 
-  const { data: photoRows, error: photoError } = await supabase
+  const photoRows = await readAllPages<RemotePhotoRow>((from, to) => client
     .from('photos')
     .select('*')
     .eq('owner_id', userId)
-    .order('created_at', { ascending: false });
-  if (photoError) throw photoError;
+    .order('created_at', { ascending: false })
+    .order('id', { ascending: true })
+    .range(from, to));
   const excluded = new Set(excludedPhotoIds);
-  const visibleRows = (photoRows ?? []).filter((row) => !excluded.has(row.id as string));
+  const visibleRows = photoRows.filter((row) => !excluded.has(row.id));
   if (!visibleRows.length) return localPhotos;
 
-  const photoIds = visibleRows.map((row) => row.id as string);
-  const [{ data: versionRows, error: versionError }, { data: assetRows, error: assetError }] = await Promise.all([
-    supabase.from('photo_versions').select('*').in('photo_id', photoIds),
-    supabase.from('layer_assets').select('*').in('photo_id', photoIds),
+  const photoIds = visibleRows.map((row) => row.id);
+  const [versionRows, assetRows] = await Promise.all([
+    readRowsForPhotoIds<RemoteVersionRow>('photo_versions', photoIds),
+    readRowsForPhotoIds<RemoteLayerAssetRow>('layer_assets', photoIds),
   ]);
-  if (versionError) throw versionError;
-  if (assetError) throw assetError;
-
-  const remote = await mapWithConcurrency(visibleRows as RemotePhotoRow[], 3, (photo) => hydrateRemotePhoto(
+  const versionsByPhoto = groupValuesBy(versionRows, (version) => version.photo_id);
+  const assetsByPhoto = groupValuesBy(assetRows, (asset) => asset.photo_id);
+  const hydrationResults = await mapSettledWithConcurrency(visibleRows, 3, (photo) => hydrateRemotePhoto(
+    ownerId,
     photo,
-    (versionRows as RemoteVersionRow[]).filter((version) => version.photo_id === photo.id),
-    (assetRows as RemoteLayerAssetRow[]).filter((asset) => asset.photo_id === photo.id),
+    versionsByPhoto.get(photo.id) ?? [],
+    assetsByPhoto.get(photo.id) ?? [],
   ));
+  const remote = fulfilledValues(hydrationResults);
 
   const merged = new Map(localPhotos.map((photo) => [photo.id, photo]));
   for (const photo of remote) {
@@ -341,20 +447,20 @@ export const pullRemotePhotos = async (localPhotos: PhotoRecord[], excludedPhoto
   return [...merged.values()].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
 };
 
-export const pullRemoteAnalyses = async (): Promise<Record<string, AnalysisResult>> => {
-  if (!supabase) return {};
-  const { data: sessionData } = await supabase.auth.getSession();
-  const userId = sessionData.session?.user.id;
-  if (!userId) return {};
-  const { data, error } = await supabase
+export const pullRemoteAnalyses = async (ownerId: OwnerId): Promise<Record<string, AnalysisResult>> => {
+  const client = supabase;
+  if (!client) return {};
+  const userId = await requireSessionOwner(ownerId);
+  const data = await readAllPages<Record<string, unknown>>((from, to) => client
     .from('analyses')
     .select('*')
     .eq('owner_id', userId)
-    .order('created_at', { ascending: false });
-  if (error) throw error;
+    .order('created_at', { ascending: false })
+    .order('id', { ascending: true })
+    .range(from, to));
 
   const analyses: Record<string, AnalysisResult> = {};
-  for (const row of data ?? []) {
+  for (const row of data) {
     if (row.schema_version !== 'analysis-2') continue;
     const versionId = row.version_id as string;
     if (analyses[versionId]) continue;
@@ -375,37 +481,36 @@ export const pullRemoteAnalyses = async (): Promise<Record<string, AnalysisResul
   return analyses;
 };
 
-export const pullRemoteStyles = async () => {
-  if (!supabase) return;
-  const { data: sessionData } = await supabase.auth.getSession();
-  const userId = sessionData.session?.user.id;
-  if (!userId) return;
-  const { data, error } = await supabase
+export const pullRemoteStyles = async (ownerId: OwnerId) => {
+  const client = supabase;
+  if (!client) return;
+  const userId = await requireSessionOwner(ownerId);
+  const data = await readAllPages<Record<string, unknown>>((from, to) => client
     .from('style_profiles')
     .select('*')
     .eq('owner_id', userId)
-    .order('created_at', { ascending: false });
-  if (error) throw error;
-  await mergeStyleProfiles((data ?? []).map((row) => ({
+    .order('created_at', { ascending: false })
+    .order('id', { ascending: true })
+    .range(from, to));
+  await mergeStyleProfiles(data.map((row) => ({
     id: row.id as string,
+    ownerId,
     name: row.name as string,
     referencePhotoIds: (row.reference_photo_ids ?? []) as string[],
     palette: (row.palette ?? []) as string[],
     adjustments: (row.adjustments ?? {}) as SavedStyleProfile['adjustments'],
     mood: row.mood as string,
     createdAt: row.created_at as string,
-  })));
+  })), ownerId);
 };
 
-export const pullRemotePreferences = async () => {
+export const pullRemotePreferences = async (ownerId: OwnerId) => {
   if (!supabase) return;
-  const { data: sessionData } = await supabase.auth.getSession();
-  const userId = sessionData.session?.user.id;
-  if (!userId) return;
+  const userId = await requireSessionOwner(ownerId);
   const { data, error } = await supabase.from('profiles').select('*').eq('id', userId).maybeSingle();
   if (error) throw error;
   if (!data) return;
-  const local = await loadPreferences();
+  const local = await loadPreferences(ownerId);
   await savePreferences({
     ...local,
     skillLevel: data.skill_level ?? local.skillLevel,
@@ -415,14 +520,14 @@ export const pullRemotePreferences = async () => {
     exportGps: data.export_gps ?? local.exportGps,
     recommendationFeedback: data.recommendation_feedback ?? local.recommendationFeedback,
     camera: { ...local.camera, ...(data.camera_preferences ?? {}) },
-  });
+  }, ownerId);
 };
 
 export const persistAnalysis = async (photo: PhotoRecord, analysis: AnalysisResult) => {
   if (!supabase) return;
-  const { data } = await supabase.auth.getSession();
-  const ownerId = data.session?.user.id;
-  if (!ownerId) return;
+  if (photo.ownerId === GUEST_OWNER_ID) return;
+  const ownerId = await requireSessionOwner(photo.ownerId);
+  assertOwnerMatches(photo.ownerId, ownerId);
   const { error } = await supabase.from('analyses').upsert({
     owner_id: ownerId,
     photo_id: photo.id,
@@ -443,9 +548,9 @@ export const persistAnalysis = async (photo: PhotoRecord, analysis: AnalysisResu
 
 export const persistStyleProfile = async (style: StyleProfileResult, referencePhotoIds: string[]) => {
   if (!supabase) return;
-  const { data } = await supabase.auth.getSession();
-  const ownerId = data.session?.user.id;
-  if (!ownerId) return;
+  const activeOwnerId = getActiveOwnerId();
+  if (activeOwnerId === GUEST_OWNER_ID) return;
+  const ownerId = await requireSessionOwner(activeOwnerId);
   const { error } = await supabase.from('style_profiles').upsert({
     id: style.id,
     owner_id: ownerId,
@@ -461,9 +566,9 @@ export const persistStyleProfile = async (style: StyleProfileResult, referencePh
 
 export const persistPortfolioReview = async (review: PortfolioReview, selectedPhotoIds: string[]) => {
   if (!supabase) return;
-  const { data } = await supabase.auth.getSession();
-  const ownerId = data.session?.user.id;
-  if (!ownerId) return;
+  const activeOwnerId = getActiveOwnerId();
+  if (activeOwnerId === GUEST_OWNER_ID) return;
+  const ownerId = await requireSessionOwner(activeOwnerId);
   const { error } = await supabase.from('portfolio_reviews').insert({
     owner_id: ownerId,
     selected_photo_ids: selectedPhotoIds,
@@ -476,11 +581,13 @@ export const persistPortfolioReview = async (review: PortfolioReview, selectedPh
   if (error) throw error;
 };
 
-export const persistPreferences = async (preferences: ExposurePreferences) => {
+export const persistPreferences = async (
+  preferences: ExposurePreferences,
+  expectedOwnerId: OwnerId = getActiveOwnerId(),
+) => {
   if (!supabase) return;
-  const { data } = await supabase.auth.getSession();
-  const userId = data.session?.user.id;
-  if (!userId) return;
+  if (expectedOwnerId === GUEST_OWNER_ID) return;
+  const userId = await requireSessionOwner(expectedOwnerId);
   const { error } = await supabase.from('profiles').upsert({
     id: userId,
     skill_level: preferences.skillLevel,

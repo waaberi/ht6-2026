@@ -34,7 +34,11 @@ export const ScreenHeader = ({ title, detail, action, actions }: {
             accessibilityLabel={item.label}
             accessibilityState={{ disabled: item.busy, busy: item.busy }}
             disabled={item.busy}
-            style={({ pressed }) => [styles.action, item.tone === 'primary' && styles.primaryAction, pressed && styles.pressed]}
+            style={({ pressed }) => [
+              styles.action,
+              item.tone === 'primary' && styles.primaryAction,
+              pressed && (item.tone === 'primary' ? styles.primaryPressed : styles.actionPressed),
+            ]}
             onPress={item.onPress}
           >
             {item.busy ? (
@@ -75,7 +79,8 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   trailing: { minHeight: 48, flexShrink: 0, flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
-  action: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface, overflow: 'hidden' },
-  primaryAction: { backgroundColor: colors.primary },
-  pressed: { backgroundColor: colors.pressed },
+  action: { width: 48, height: 48, borderRadius: 24, borderWidth: 1, borderColor: colors.outline, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.controlSurface, overflow: 'hidden' },
+  primaryAction: { backgroundColor: colors.primary, borderColor: colors.primary },
+  actionPressed: { backgroundColor: colors.controlPressed, borderColor: colors.outlineStrong },
+  primaryPressed: { backgroundColor: colors.primaryPressed, borderColor: colors.primaryPressed },
 });

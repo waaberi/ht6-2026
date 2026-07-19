@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
@@ -16,6 +17,16 @@ const spawnTool = (command, args, options) => {
   }
   return spawn(isWindows ? `${command}.exe` : command, args, options);
 };
+
+const geminiKeyIsConfigured = (() => {
+  try {
+    return /^GEMINI_API_KEY\s*=\s*\S+/m.test(
+      readFileSync(new URL('../services/api/.env.local', import.meta.url), 'utf8'),
+    );
+  } catch {
+    return false;
+  }
+})();
 
 const stopGroup = (child, signal) => {
   if (!child?.pid) return;
@@ -44,20 +55,21 @@ const stop = (code = 0, signal = 'SIGTERM') => {
   }))).then(() => process.exit(code));
 };
 
-const apiIsReady = async () => {
+const readApiHealth = async () => {
   try {
     const response = await fetch('http://127.0.0.1:8000/health', { signal: AbortSignal.timeout(1000) });
     const body = await response.json();
-    return response.ok && body.service === 'Exposure';
+    return response.ok && body.service === 'Exposure' ? body : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 };
 
 process.on('SIGINT', () => stop(0, 'SIGINT'));
 process.on('SIGTERM', () => stop(0, 'SIGTERM'));
 
-if (!await apiIsReady()) {
+let apiHealth = await readApiHealth();
+if (!apiHealth) {
   const api = spawnTool('uv', [
     '--directory', 'services/api', 'run', 'uvicorn', 'exposure_api.main:app',
     '--reload', '--env-file', '.env.local', '--host', '127.0.0.1', '--port', '8000',
@@ -67,8 +79,11 @@ if (!await apiIsReady()) {
     console.error(`Exposure API failed to start: ${error.message}`);
     stop(1);
   });
-  for (let attempt = 0; attempt < 120 && !await apiIsReady(); attempt += 1) await delay(250);
-  if (!await apiIsReady()) {
+  for (let attempt = 0; attempt < 120 && !apiHealth; attempt += 1) {
+    await delay(250);
+    apiHealth = await readApiHealth();
+  }
+  if (!apiHealth) {
     console.error('Exposure API did not become ready on http://127.0.0.1:8000.');
     stop(1);
     await new Promise(() => {});
@@ -76,6 +91,12 @@ if (!await apiIsReady()) {
   console.log('Exposure API ready.');
 } else {
   console.log('Using the Exposure API already running on port 8000.');
+}
+
+if (geminiKeyIsConfigured && !apiHealth.geminiConfigured) {
+  console.error('Exposure API is running without the Gemini key from services/api/.env.local. Stop the existing API and restart pnpm dev.');
+  stop(1);
+  await new Promise(() => {});
 }
 
 const mobile = spawnTool('pnpm', ['--filter', 'exposure', 'run', 'dev:android'], {

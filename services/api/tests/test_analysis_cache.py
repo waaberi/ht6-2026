@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 
 import pytest
 
@@ -29,9 +30,9 @@ def _result(version_id: str) -> AnalysisResult:
 def test_analysis_cache_is_bounded_and_refreshes_recent_entries(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main, "ANALYSIS_CACHE_MAX_ENTRIES", 2)
     main.analysis_cache.clear()
-    first = ("first", "schema", "model", "coaching")
-    second = ("second", "schema", "model", "coaching")
-    third = ("third", "schema", "model", "coaching")
+    first = ("first", "schema", "model", "coaching", "exif", "user")
+    second = ("second", "schema", "model", "coaching", "exif", "user")
+    third = ("third", "schema", "model", "coaching", "exif", "user")
 
     main._store_analysis(first, _result("first"))
     main._store_analysis(second, _result("second"))
@@ -41,6 +42,15 @@ def test_analysis_cache_is_bounded_and_refreshes_recent_entries(monkeypatch: pyt
 
     assert list(main.analysis_cache) == [first, third]
     main.analysis_cache.clear()
+
+
+def test_analysis_cache_scope_hashes_authenticated_identity() -> None:
+    first = main._analysis_cache_scope({"id": "user-one"})
+    second = main._analysis_cache_scope({"id": "user-two"})
+
+    assert first == f"user:{hashlib.sha256(b'user-one').hexdigest()}"
+    assert first != second
+    assert main._analysis_cache_scope(None) == "anonymous"
 
 
 def test_deterministic_coach_honors_the_selected_issue(monkeypatch: pytest.MonkeyPatch) -> None:

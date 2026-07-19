@@ -40,7 +40,14 @@ from .providers import (
     GeminiProvider,
     SemanticProviderResult,
 )
-from .renderer import canvas_content_size, encode_image, export_exif, render_layer_stack, resolve_canvas_expansion
+from .renderer import (
+    canvas_content_size,
+    encode_image,
+    export_exif,
+    render_generation_source,
+    render_layer_stack,
+    resolve_canvas_expansion,
+)
 
 MAX_UPLOAD_BYTES = int(os.getenv("EXPOSURE_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 SEMANTIC_TIMEOUT_SECONDS = max(5.0, min(40.0, float(os.getenv("EXPOSURE_SEMANTIC_TIMEOUT_SECONDS", "25"))))
@@ -60,7 +67,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 provider = GeminiProvider()
-AnalysisCacheKey = tuple[str, str, str, str]
+AnalysisCacheKey = tuple[str, str, str, str, str, str]
 analysis_cache: OrderedDict[AnalysisCacheKey, AnalysisResult] = OrderedDict()
 
 
@@ -81,6 +88,20 @@ def _store_analysis(key: AnalysisCacheKey, result: AnalysisResult) -> None:
 def _semantic_cache_identity() -> str:
     models = getattr(provider, "semantic_models", (provider.semantic_model,))
     return "|".join(models)
+
+
+def _canonical_fingerprint(value: object) -> str:
+    serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _analysis_cache_scope(authenticated_user: dict[str, object] | None) -> str:
+    if not authenticated_user:
+        return "anonymous"
+    user_id = authenticated_user.get("id")
+    if not isinstance(user_id, str) or not user_id:
+        return "anonymous"
+    return f"user:{hashlib.sha256(user_id.encode('utf-8')).hexdigest()}"
 
 
 async def _read_image(upload: UploadFile) -> bytes:
@@ -143,10 +164,11 @@ async def health() -> dict[str, object]:
     }
 
 
-@app.post("/v1/analyze", response_model=AnalysisResult, dependencies=[Depends(require_authenticated_user)])
+@app.post("/v1/analyze", response_model=AnalysisResult)
 async def analyze(
     image: Annotated[UploadFile, File()],
     version_id: Annotated[str, Form(min_length=1)],
+    authenticated_user: Annotated[dict[str, object] | None, Depends(require_authenticated_user)],
     checksum: Annotated[str, Form()] = "",
     exif_json: Annotated[str, Form()] = "{}",
     coaching_json: Annotated[str, Form()] = "{}",
@@ -172,8 +194,14 @@ async def analyze(
         checksum = hashlib.sha256(image_bytes).hexdigest()
     else:
         checksum = checksum or hashlib.sha256(image_bytes).hexdigest()
-    coaching_fingerprint = hashlib.sha256(json.dumps(coaching, sort_keys=True).encode()).hexdigest()[:12]
-    cache_key = (checksum, SCHEMA_VERSION, _semantic_cache_identity() if provider.configured else "local", coaching_fingerprint)
+    cache_key = (
+        checksum,
+        SCHEMA_VERSION,
+        _semantic_cache_identity() if provider.configured else "local",
+        _canonical_fingerprint(coaching),
+        _canonical_fingerprint(safe_exif),
+        _analysis_cache_scope(authenticated_user),
+    )
     cached = _cached_analysis(cache_key)
     if cached:
         return cached.model_copy(update={"version_id": version_id})
@@ -263,7 +291,7 @@ async def generative_layer(
     except ValidationError as error:
         raise HTTPException(422, "target_json and layer_stack_json must use Exposure contracts") from error
     asset_bytes = await _read_assets(assets, asset_ids_json)
-    rendered = await asyncio.to_thread(render_layer_stack, image_bytes, stack, asset_bytes)
+    rendered = await asyncio.to_thread(render_generation_source, image_bytes, stack, asset_bytes)
     cumulative_expansion: CanvasExpansion | None = None
     if operation == "expand":
         try:

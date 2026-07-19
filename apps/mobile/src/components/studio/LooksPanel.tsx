@@ -47,7 +47,7 @@ export const LooksPanel = ({
         {looks.length > 0 || canRestore ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Restore original look"
+            accessibilityLabel="Use original look"
             accessibilityState={{ selected: !selectedLookId, disabled: busy || !canRestore }}
             disabled={busy || !canRestore}
             onPress={onRestore}
@@ -55,7 +55,7 @@ export const LooksPanel = ({
               styles.look,
               !selectedLookId && styles.lookSelected,
               !canRestore && styles.lookDisabled,
-              pressed && styles.pressed,
+              pressed && styles.lookPressed,
             ]}
           >
             <View style={styles.originalPreview}>
@@ -75,7 +75,7 @@ export const LooksPanel = ({
               accessibilityState={{ selected, disabled: busy }}
               disabled={busy}
               onPress={() => onSelect(look)}
-              style={({ pressed }) => [styles.look, selected && styles.lookSelected, pressed && styles.pressed]}
+              style={({ pressed }) => [styles.look, selected && styles.lookSelected, pressed && styles.lookPressed]}
             >
               <View style={styles.palette} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
                 {look.palette.slice(0, 4).map((color, index) => (
@@ -135,9 +135,9 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: colors.outline,
     borderRadius: 10,
-    backgroundColor: colors.surface,
+    backgroundColor: colors.controlSurface,
   },
-  lookSelected: { borderColor: colors.primary },
+  lookSelected: { borderColor: colors.primary, backgroundColor: colors.surfaceRaised },
   lookDisabled: { opacity: 0.46 },
   palette: { height: 36, flexDirection: 'row', overflow: 'hidden', borderRadius: 6 },
   swatch: { flex: 1 },
@@ -148,14 +148,14 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     backgroundColor: colors.background,
   },
-  lookName: { color: colors.textSecondary, fontSize: 12, fontWeight: '700', marginTop: 7 },
+  lookName: { color: colors.onControlSurface, fontSize: 12, fontWeight: '700', marginTop: 7 },
   lookNameSelected: { color: colors.text },
   empty: { color: colors.textSecondary, fontSize: 13, textAlign: 'center', paddingVertical: 24 },
-  controls: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.outline, paddingTop: 14 },
+  controls: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.separator, paddingTop: 14 },
   strengthHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   strengthStatus: { minWidth: 60, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 6 },
   strengthLabel: { color: colors.text, fontSize: 13, fontWeight: '700' },
   strengthValue: { color: colors.textSecondary, fontSize: 12, fontVariant: ['tabular-nums'] },
   slider: { width: '100%', height: 48 },
-  pressed: { opacity: 0.72 },
+  lookPressed: { backgroundColor: colors.controlPressed, borderColor: colors.outlineStrong },
 });

@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
 
 from exposure_api import main
+from exposure_api import auth
 from exposure_api.models import SemanticAnalysis
 from exposure_api.providers import SemanticProviderResult
 
@@ -42,6 +43,91 @@ def test_analysis_cache_rebinds_the_requested_version(client: TestClient, image_
     second = client.post("/v1/analyze", files={"image": ("two.png", image_bytes, "image/png")}, data={"version_id": "two", "checksum": checksum})
     assert first.status_code == second.status_code == 200
     assert second.json()["versionId"] == "two"
+
+
+def test_analysis_cache_does_not_cross_authenticated_users(
+    client: TestClient,
+    image_bytes: bytes,
+    monkeypatch,
+) -> None:
+    class LocalProvider:
+        configured = False
+        semantic_model = "local-fixture"
+
+    async def validate(access_token: str) -> dict[str, str]:
+        return {"id": f"user-{access_token}"}
+
+    original_analyze = main.analyze_deterministic
+    calls: list[str] = []
+
+    def counted_analyze(*args, **kwargs):
+        calls.append(kwargs["version_id"])
+        return original_analyze(*args, **kwargs)
+
+    main.analysis_cache.clear()
+    monkeypatch.setattr(main, "provider", LocalProvider())
+    monkeypatch.setattr(main, "analyze_deterministic", counted_analyze)
+    monkeypatch.setattr(auth, "AUTH_REQUIRED", True)
+    monkeypatch.setattr(auth, "validate_supabase_access_token", validate)
+    checksum = hashlib.sha256(image_bytes).hexdigest()
+
+    def request(version_id: str, token: str):
+        return client.post(
+            "/v1/analyze",
+            headers={"Authorization": f"Bearer {token}"},
+            files={"image": ("photo.png", image_bytes, "image/png")},
+            data={"version_id": version_id, "checksum": checksum},
+        )
+
+    first = request("user-one-first", "one")
+    second = request("user-two-first", "two")
+    first_again = request("user-one-second", "one")
+
+    assert first.status_code == second.status_code == first_again.status_code == 200
+    assert calls == ["user-one-first", "user-two-first"]
+    assert first_again.json()["versionId"] == "user-one-second"
+    main.analysis_cache.clear()
+
+
+def test_analysis_cache_uses_canonical_safe_exif_fingerprint(
+    client: TestClient,
+    image_bytes: bytes,
+    monkeypatch,
+) -> None:
+    class LocalProvider:
+        configured = False
+        semantic_model = "local-fixture"
+
+    original_analyze = main.analyze_deterministic
+    calls: list[str] = []
+
+    def counted_analyze(*args, **kwargs):
+        calls.append(kwargs["version_id"])
+        return original_analyze(*args, **kwargs)
+
+    main.analysis_cache.clear()
+    monkeypatch.setattr(main, "provider", LocalProvider())
+    monkeypatch.setattr(main, "analyze_deterministic", counted_analyze)
+    monkeypatch.setattr(auth, "AUTH_REQUIRED", False)
+    checksum = hashlib.sha256(image_bytes).hexdigest()
+
+    def request(version_id: str, exif: str):
+        return client.post(
+            "/v1/analyze",
+            files={"image": ("photo.png", image_bytes, "image/png")},
+            data={"version_id": version_id, "checksum": checksum, "exif_json": exif},
+        )
+
+    first = request("exif-first", '{"ISO":100,"Camera":"Fixture","GPSLatitude":45.4}')
+    reordered = request("exif-reordered", '{"GPSLatitude":12.3,"Camera":"Fixture","ISO":100}')
+    changed = request("exif-changed", '{"Camera":"Fixture","ISO":400}')
+
+    assert first.status_code == reordered.status_code == changed.status_code == 200
+    assert calls == ["exif-first", "exif-changed"]
+    assert reordered.json()["versionId"] == "exif-reordered"
+    assert first.json()["metrics"]["exifIso"] == 100
+    assert changed.json()["metrics"]["exifIso"] == 400
+    main.analysis_cache.clear()
 
 
 def test_analysis_handles_odd_width_images(client: TestClient) -> None:

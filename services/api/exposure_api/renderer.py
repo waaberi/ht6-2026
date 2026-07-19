@@ -315,6 +315,21 @@ def render_layer_stack(image_bytes: bytes, stack: LayerStack, assets: dict[str, 
     return rendered
 
 
+def render_generation_source(
+    image_bytes: bytes,
+    stack: LayerStack,
+    assets: dict[str, bytes] | None = None,
+) -> Image.Image:
+    """Render the state that an appended generative patch will be composited into.
+
+    Collective adjustments are a final composition stage. Excluding them from
+    the generation source lets the accepted stack apply them once to both the
+    original content and the newly generated pixels.
+    """
+    generation_stack = stack.model_copy(update={"adjustments": {}})
+    return render_layer_stack(image_bytes, generation_stack, assets)
+
+
 def export_exif(image_bytes: bytes, include_gps: bool = False) -> bytes | None:
     with Image.open(io.BytesIO(image_bytes)) as source:
         exif = source.getexif()

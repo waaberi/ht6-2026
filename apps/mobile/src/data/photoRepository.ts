@@ -5,12 +5,28 @@ import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
 
 import { layerAssetsForStacks } from '../domain/assets';
 import { emptyLayerStack } from '../domain/layers';
+import {
+  GUEST_OWNER_ID,
+  assertOwnerMatches,
+  ownerDirectorySegment,
+  ownerStorageSegment,
+  type OwnerId,
+} from '../domain/ownership';
 import type { PhotoRecord } from '../domain/types';
+import { getActiveOwnerId } from './ownerScope';
 
 const PHOTO_INDEX_KEY = 'exposure.photos.index.v2';
 const PHOTO_DELETIONS_KEY = 'exposure.photos.deletions.v1';
 const LEGACY_PHOTOS_KEY = 'exposure.photos.v1';
-const photoKey = (id: string) => `exposure.photo.v2.${id}`;
+const legacyPhotoKey = (id: string) => `exposure.photo.v2.${id}`;
+const ownerKeys = (ownerId: OwnerId) => {
+  const owner = ownerStorageSegment(ownerId);
+  return {
+    index: `exposure.owner.${owner}.photos.index.v3`,
+    deletions: `exposure.owner.${owner}.photos.deletions.v2`,
+    photo: (id: string) => `exposure.owner.${owner}.photo.v3.${id}`,
+  };
+};
 let persistenceQueue = Promise.resolve();
 
 const serializeWrite = <T,>(work: () => Promise<T>) => {
@@ -19,10 +35,16 @@ const serializeWrite = <T,>(work: () => Promise<T>) => {
   return pending;
 };
 const exposureDirectory = new Directory(Paths.document, 'exposure');
-const originalsDirectory = new Directory(exposureDirectory, 'originals');
-const proxiesDirectory = new Directory(exposureDirectory, 'proxies');
-const thumbnailsDirectory = new Directory(exposureDirectory, 'thumbnails');
-const layerAssetsDirectory = new Directory(exposureDirectory, 'layer-assets');
+const directoriesForOwner = (ownerId: OwnerId) => {
+  const ownerDirectory = new Directory(exposureDirectory, 'owners', ownerDirectorySegment(ownerId));
+  return {
+    ownerDirectory,
+    originalsDirectory: new Directory(ownerDirectory, 'originals'),
+    proxiesDirectory: new Directory(ownerDirectory, 'proxies'),
+    thumbnailsDirectory: new Directory(ownerDirectory, 'thumbnails'),
+    layerAssetsDirectory: new Directory(ownerDirectory, 'layer-assets'),
+  };
+};
 
 const readExif = async (bytes: ArrayBuffer) => {
   // React Native exposes `navigator` without a userAgent. exifr inspects that
@@ -41,12 +63,15 @@ const readExif = async (bytes: ArrayBuffer) => {
   });
 };
 
-const ensureDirectories = () => {
+const ensureDirectories = (ownerId: OwnerId) => {
+  const directories = directoriesForOwner(ownerId);
   exposureDirectory.create({ intermediates: true, idempotent: true });
-  originalsDirectory.create({ intermediates: true, idempotent: true });
-  proxiesDirectory.create({ intermediates: true, idempotent: true });
-  thumbnailsDirectory.create({ intermediates: true, idempotent: true });
-  layerAssetsDirectory.create({ intermediates: true, idempotent: true });
+  directories.ownerDirectory.create({ intermediates: true, idempotent: true });
+  directories.originalsDirectory.create({ intermediates: true, idempotent: true });
+  directories.proxiesDirectory.create({ intermediates: true, idempotent: true });
+  directories.thumbnailsDirectory.create({ intermediates: true, idempotent: true });
+  directories.layerAssetsDirectory.create({ intermediates: true, idempotent: true });
+  return directories;
 };
 
 const extensionFor = (name: string, mimeType: string) => {
@@ -84,26 +109,37 @@ export type IngestPhotoInput = {
   exif?: Record<string, unknown> | null;
 };
 
-export const listPhotos = async (): Promise<PhotoRecord[]> => {
-  let serialized = await AsyncStorage.getItem(PHOTO_INDEX_KEY);
-  if (!serialized) {
-    const legacy = await AsyncStorage.getItem(LEGACY_PHOTOS_KEY);
-    if (!legacy) return [];
+export const listPhotos = async (ownerId: OwnerId = getActiveOwnerId()): Promise<PhotoRecord[]> => {
+  const keys = ownerKeys(ownerId);
+  let serialized = await AsyncStorage.getItem(keys.index);
+  if (!serialized && ownerId === GUEST_OWNER_ID) {
+    const legacyIndex = await AsyncStorage.getItem(PHOTO_INDEX_KEY);
     try {
-      const photos = JSON.parse(legacy) as PhotoRecord[];
-      await savePhotos(photos);
-      return photos;
+      const photos = legacyIndex
+        ? (await AsyncStorage.multiGet((JSON.parse(legacyIndex) as string[]).map(legacyPhotoKey)))
+          .flatMap(([, value]) => value ? [JSON.parse(value) as PhotoRecord] : [])
+        : JSON.parse((await AsyncStorage.getItem(LEGACY_PHOTOS_KEY)) ?? '[]') as PhotoRecord[];
+      const migrated = photos.map((photo) => ({ ...photo, ownerId: GUEST_OWNER_ID }));
+      await savePhotos(migrated, ownerId);
+      serialized = JSON.stringify(migrated.map((photo) => photo.id));
+      if (migrated.length === 0) await AsyncStorage.setItem(keys.index, '[]');
     } catch {
+      await AsyncStorage.setItem(keys.index, '[]');
       return [];
     }
   }
+  if (!serialized) {
+    await AsyncStorage.setItem(keys.index, '[]');
+    return [];
+  }
   try {
     const ids = JSON.parse(serialized) as string[];
-    const rows = await AsyncStorage.multiGet(ids.map(photoKey));
+    const rows = await AsyncStorage.multiGet(ids.map(keys.photo));
     return rows.flatMap(([, value]) => {
       if (!value) return [];
       try {
-        return [JSON.parse(value) as PhotoRecord];
+        const photo = JSON.parse(value) as PhotoRecord;
+        return photo.ownerId === ownerId ? [photo] : [];
       } catch {
         return [];
       }
@@ -113,18 +149,34 @@ export const listPhotos = async (): Promise<PhotoRecord[]> => {
   }
 };
 
-export const savePhotos = (photos: PhotoRecord[]) => serializeWrite(async () => {
+export const savePhotos = (photos: PhotoRecord[], ownerId: OwnerId = getActiveOwnerId()) => serializeWrite(async () => {
+  photos.forEach((photo) => assertOwnerMatches(photo.ownerId, ownerId));
+  const keys = ownerKeys(ownerId);
   await AsyncStorage.multiSet([
-    [PHOTO_INDEX_KEY, JSON.stringify(photos.map((photo) => photo.id))],
-    ...photos.map((photo) => [photoKey(photo.id), JSON.stringify(photo)] as [string, string]),
+    [keys.index, JSON.stringify(photos.map((photo) => photo.id))],
+    ...photos.map((photo) => [keys.photo(photo.id), JSON.stringify(photo)] as [string, string]),
   ]);
 });
 
-export const savePhoto = (photo: PhotoRecord) => serializeWrite(() =>
-  AsyncStorage.setItem(photoKey(photo.id), JSON.stringify(photo)));
+export const savePhoto = (photo: PhotoRecord, ownerId: OwnerId = photo.ownerId) => serializeWrite(async () => {
+  assertOwnerMatches(photo.ownerId, ownerId);
+  await AsyncStorage.setItem(ownerKeys(ownerId).photo(photo.id), JSON.stringify(photo));
+});
 
-export const listPhotoDeletionIds = async (): Promise<string[]> => {
-  const serialized = await AsyncStorage.getItem(PHOTO_DELETIONS_KEY);
+export const listPhotoDeletionIds = async (ownerId: OwnerId = getActiveOwnerId()): Promise<string[]> => {
+  const keys = ownerKeys(ownerId);
+  const serialized = await AsyncStorage.getItem(keys.deletions);
+  if (!serialized && ownerId === GUEST_OWNER_ID) {
+    const legacy = await AsyncStorage.getItem(PHOTO_DELETIONS_KEY);
+    if (!legacy) return [];
+    try {
+      const ids = JSON.parse(legacy) as string[];
+      await AsyncStorage.setItem(keys.deletions, JSON.stringify(ids));
+      return ids;
+    } catch {
+      return [];
+    }
+  }
   if (!serialized) return [];
   try {
     return JSON.parse(serialized) as string[];
@@ -133,9 +185,10 @@ export const listPhotoDeletionIds = async (): Promise<string[]> => {
   }
 };
 
-export const clearPhotoDeletionId = (photoId: string) => serializeWrite(async () => {
-  const ids = await listPhotoDeletionIds();
-  await AsyncStorage.setItem(PHOTO_DELETIONS_KEY, JSON.stringify(ids.filter((id) => id !== photoId)));
+export const clearPhotoDeletionId = (photoId: string, ownerId: OwnerId = getActiveOwnerId()) => serializeWrite(async () => {
+  const keys = ownerKeys(ownerId);
+  const ids = await listPhotoDeletionIds(ownerId);
+  await AsyncStorage.setItem(keys.deletions, JSON.stringify(ids.filter((id) => id !== photoId)));
 });
 
 const deleteLocalFile = (uri: string | undefined) => {
@@ -144,17 +197,19 @@ const deleteLocalFile = (uri: string | undefined) => {
   if (file.exists) file.delete();
 };
 
-export const deletePhoto = (photo: PhotoRecord) => serializeWrite(async () => {
+export const deletePhoto = (photo: PhotoRecord, ownerId: OwnerId = photo.ownerId) => serializeWrite(async () => {
+  assertOwnerMatches(photo.ownerId, ownerId);
+  const keys = ownerKeys(ownerId);
   const [serializedIndex, deletedIds] = await Promise.all([
-    AsyncStorage.getItem(PHOTO_INDEX_KEY),
-    listPhotoDeletionIds(),
+    AsyncStorage.getItem(keys.index),
+    listPhotoDeletionIds(ownerId),
   ]);
   const ids = serializedIndex ? JSON.parse(serializedIndex) as string[] : [];
   await AsyncStorage.multiSet([
-    [PHOTO_INDEX_KEY, JSON.stringify(ids.filter((id) => id !== photo.id))],
-    [PHOTO_DELETIONS_KEY, JSON.stringify([...new Set([...deletedIds, photo.id])])],
+    [keys.index, JSON.stringify(ids.filter((id) => id !== photo.id))],
+    [keys.deletions, JSON.stringify([...new Set([...deletedIds, photo.id])])],
   ]);
-  await AsyncStorage.removeItem(photoKey(photo.id));
+  await AsyncStorage.removeItem(keys.photo(photo.id));
 
   deleteLocalFile(photo.originalUri);
   deleteLocalFile(photo.analysisProxyUri);
@@ -164,16 +219,20 @@ export const deletePhoto = (photo: PhotoRecord) => serializeWrite(async () => {
 });
 
 const prependPhoto = (photo: PhotoRecord) => serializeWrite(async () => {
-  const serialized = await AsyncStorage.getItem(PHOTO_INDEX_KEY);
+  const keys = ownerKeys(photo.ownerId);
+  const serialized = await AsyncStorage.getItem(keys.index);
   const ids = serialized ? JSON.parse(serialized) as string[] : [];
   await AsyncStorage.multiSet([
-    [photoKey(photo.id), JSON.stringify(photo)],
-    [PHOTO_INDEX_KEY, JSON.stringify([photo.id, ...ids.filter((id) => id !== photo.id)])],
+    [keys.photo(photo.id), JSON.stringify(photo)],
+    [keys.index, JSON.stringify([photo.id, ...ids.filter((id) => id !== photo.id)])],
   ]);
 });
 
-export const ingestPhoto = async (input: IngestPhotoInput): Promise<PhotoRecord> => {
-  ensureDirectories();
+export const ingestPhoto = async (
+  input: IngestPhotoInput,
+  ownerId: OwnerId = getActiveOwnerId(),
+): Promise<PhotoRecord> => {
+  const { originalsDirectory, proxiesDirectory, thumbnailsDirectory } = ensureDirectories(ownerId);
   const id = randomUUID();
   const versionId = randomUUID();
   const mimeType = input.mimeType ?? 'image/jpeg';
@@ -199,6 +258,7 @@ export const ingestPhoto = async (input: IngestPhotoInput): Promise<PhotoRecord>
   const createdAt = new Date().toISOString();
   const photo: PhotoRecord = {
     id,
+    ownerId,
     createdAt,
     captureSource: input.source,
     originalUri: original.uri,
@@ -241,19 +301,20 @@ const decodeBase64 = (encoded: string) => {
 };
 
 export const saveGeneratedLayerAsset = (id: string, encoded: string) => {
-  ensureDirectories();
+  const { layerAssetsDirectory } = ensureDirectories(getActiveOwnerId());
   const asset = new File(layerAssetsDirectory, `${id}.png`);
   asset.write(decodeBase64(encoded));
   return asset.uri;
 };
 
 export const deleteGeneratedLayerAsset = (id: string) => {
+  const { layerAssetsDirectory } = directoriesForOwner(getActiveOwnerId());
   const asset = new File(layerAssetsDirectory, `${id}.png`);
   if (asset.exists) asset.delete();
 };
 
 export const saveImportedLayerAsset = async (id: string, sourceUri: string, mimeType = 'image/jpeg') => {
-  ensureDirectories();
+  const { layerAssetsDirectory } = ensureDirectories(getActiveOwnerId());
   const extension = mimeType === 'image/png' ? 'png' : 'jpg';
   const asset = new File(layerAssetsDirectory, `${id}.${extension}`);
   await new File(sourceUri).copy(asset);

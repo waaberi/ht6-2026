@@ -1,7 +1,39 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { clampZoom, horizonRollForOrientation, normalizeFlashMode, zoomFromPinch } from './cameraControls';
+import {
+  captureControlsForSession,
+  clampZoom,
+  highestQualityCaptureOptions,
+  highestQualityPictureSize,
+  horizonRollForOrientation,
+  normalizeFlashMode,
+  zoomFromPinch,
+} from './cameraControls';
+
+test('capture processing keeps maximum JPEG quality, EXIF, and normalized orientation', () => {
+  assert.deepEqual(highestQualityCaptureOptions, {
+    quality: 1,
+    exif: true,
+    skipProcessing: false,
+  });
+});
+
+test('iOS uses the full-resolution photo preset for 4:3 instead of VGA', () => {
+  const sizes = ['3840x2160', '1920x1080', '640x480', 'Photo', 'High'];
+  assert.equal(highestQualityPictureSize(sizes, '4:3', 'ios'), 'Photo');
+  assert.equal(highestQualityPictureSize(sizes, '16:9', 'ios'), '3840x2160');
+});
+
+test('Android selects the largest advertised size for the requested ratio', () => {
+  const sizes = ['1920x1080', '4000x3000', '1280x720', '8000x6000', 'invalid'];
+  assert.equal(highestQualityPictureSize(sizes, '4:3', 'android'), '8000x6000');
+  assert.equal(highestQualityPictureSize(sizes, '16:9', 'android'), '1920x1080');
+});
+
+test('Android falls back to its native highest-resolution ratio strategy', () => {
+  assert.equal(highestQualityPictureSize(['1024x1024', 'invalid'], '4:3', 'android'), undefined);
+});
 
 test('pinch zoom is monotonic and clamped to the camera range', () => {
   assert.ok(zoomFromPinch(0.2, 100, 160) > 0.2);
@@ -26,4 +58,34 @@ test('unknown or stale flash values fail closed', () => {
   assert.equal(normalizeFlashMode('off'), 'off');
   assert.equal(normalizeFlashMode('torch'), 'off');
   assert.equal(normalizeFlashMode(undefined), 'off');
+});
+
+test('non-preserved capture controls cannot return on the next camera session', () => {
+  const defaults = {
+    defaultFlash: 'off' as const,
+    timerSeconds: 0 as const,
+    photoRatio: '4:3' as const,
+    zoom: 0,
+    preserveCaptureSettings: false,
+  };
+  assert.deepEqual(captureControlsForSession({
+    defaultFlash: 'on',
+    timerSeconds: 10,
+    photoRatio: '16:9',
+    zoom: 0.8,
+    preserveCaptureSettings: false,
+  }, defaults), defaults);
+  assert.deepEqual(captureControlsForSession({
+    defaultFlash: 'auto',
+    timerSeconds: 3,
+    photoRatio: '16:9',
+    zoom: 0.4,
+    preserveCaptureSettings: true,
+  }, defaults), {
+    defaultFlash: 'auto',
+    timerSeconds: 3,
+    photoRatio: '16:9',
+    zoom: 0.4,
+    preserveCaptureSettings: true,
+  });
 });

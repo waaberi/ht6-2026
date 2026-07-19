@@ -21,8 +21,16 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { colors } from '../components/theme';
-import { clampZoom, horizonRollForOrientation, normalizeFlashMode, zoomFromPinch } from '../domain/cameraControls';
+import { colors, typography } from '../components/theme';
+import {
+  captureControlsForSession,
+  clampZoom,
+  highestQualityCaptureOptions,
+  highestQualityPictureSize,
+  horizonRollForOrientation,
+  normalizeFlashMode,
+  zoomFromPinch,
+} from '../domain/cameraControls';
 import {
   defaultPreferences,
   loadPreferences,
@@ -50,30 +58,21 @@ const distanceBetweenTouches = (touches: ReadonlyArray<{ pageX: number; pageY: n
 const nextValue = <T,>(options: readonly T[], current: T) =>
   options[(options.indexOf(current) + 1) % options.length];
 
-const pictureSizeForRatio = (sizes: string[], ratio: CameraPreferences['photoRatio']) => {
-  const target = ratio === '16:9' ? 16 / 9 : 4 / 3;
-  return sizes
-    .map((size) => {
-      const [width, height] = size.split('x').map(Number);
-      return { size, width, height, distance: Math.abs(width / height - target) };
-    })
-    .filter(({ width, height }) => Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0)
-    .sort((left, right) => left.distance - right.distance || right.width * right.height - left.width * left.height)
-    .find(({ distance }) => distance < 0.04)?.size;
-};
-
 export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps) => {
   const insets = useSafeAreaInsets();
   const [permission, requestPermission] = useCameraPermissions();
   const camera = useRef<CameraView>(null);
   const busyRef = useRef(false);
+  const pictureSizesRequestedRef = useRef(false);
   const preferencesRef = useRef<CameraPreferences>(defaultPreferences.camera);
   const zoomRef = useRef(defaultPreferences.camera.zoom);
   const pinchRef = useRef({ distance: 0, zoom: 0 });
   const [facing, setFacing] = useState<CameraType>('back');
   const [cameraPreferences, setCameraPreferences] = useState<CameraPreferences>(defaultPreferences.camera);
   const [availablePictureSizes, setAvailablePictureSizes] = useState<string[]>([]);
+  const [pictureSizesLoaded, setPictureSizesLoaded] = useState(false);
   const [ready, setReady] = useState(false);
+  const [captureConfigurationReady, setCaptureConfigurationReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [countdown, setCountdown] = useState<number>();
   const [controlsOpen, setControlsOpen] = useState(false);
@@ -84,16 +83,29 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
 
   useEffect(() => {
     void loadPreferences().then(({ camera: saved }) => {
-      preferencesRef.current = saved;
-      zoomRef.current = saved.zoom;
-      setCameraPreferences(saved);
+      const sessionControls = captureControlsForSession(saved, defaultPreferences.camera);
+      const next = { ...saved, ...sessionControls };
+      preferencesRef.current = next;
+      zoomRef.current = next.zoom;
+      setCameraPreferences(next);
     });
   }, []);
 
   const pictureSize = useMemo(
-    () => pictureSizeForRatio(availablePictureSizes, cameraPreferences.photoRatio),
+    () => highestQualityPictureSize(
+      availablePictureSizes,
+      cameraPreferences.photoRatio,
+      Platform.OS === 'ios' ? 'ios' : 'android',
+    ),
     [availablePictureSizes, cameraPreferences.photoRatio],
   );
+
+  useEffect(() => {
+    setCaptureConfigurationReady(false);
+    if (!ready || !pictureSizesLoaded) return;
+    const timeout = setTimeout(() => setCaptureConfigurationReady(true), 180);
+    return () => clearTimeout(timeout);
+  }, [cameraPreferences.photoRatio, facing, pictureSize, pictureSizesLoaded, ready]);
 
   const persistCamera = useCallback(async (changes: Partial<CameraPreferences>) => {
     await updateCameraPreferences(changes);
@@ -123,6 +135,22 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
       return next;
     });
   }, []);
+
+  const updateLevel = useCallback((showLevel: boolean) => {
+    if (!showLevel) {
+      updateCamera({ showLevel: false });
+      return;
+    }
+    setError(undefined);
+    void (async () => {
+      if (!await DeviceMotion.isAvailableAsync()) throw new Error('Level is not available on this device.');
+      const permission = await DeviceMotion.requestPermissionsAsync();
+      if (!permission.granted) throw new Error('Motion access is needed for the level.');
+      updateCamera({ showLevel: true });
+    })().catch((caught: unknown) => {
+      setError(caught instanceof Error ? caught.message : 'Level is unavailable.');
+    });
+  }, [updateCamera]);
 
   const finishZoom = useCallback((zoom: number) => {
     const nextZoom = clampZoom(zoom);
@@ -204,9 +232,11 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
   };
 
   const capture = () => run(async () => {
-    if (!camera.current || !ready || flashSettling) throw new Error('Camera controls are still updating.');
+    if (!camera.current || !ready || !captureConfigurationReady || flashSettling) {
+      throw new Error('Camera controls are still updating.');
+    }
     await waitForTimer();
-    const picture = await camera.current.takePictureAsync({ quality: 1, exif: true, skipProcessing: false });
+    const picture = await camera.current.takePictureAsync(highestQualityCaptureOptions);
     await ingest({
       uri: picture.uri,
       name: `Exposure-${Date.now()}.${picture.format}`,
@@ -228,17 +258,23 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
 
   const onCameraReady = async () => {
     setReady(true);
-    if (Platform.OS !== 'ios' || !camera.current) return;
+    if (!camera.current || pictureSizesRequestedRef.current) return;
+    pictureSizesRequestedRef.current = true;
     try {
       setAvailablePictureSizes(await camera.current.getAvailablePictureSizesAsync());
     } catch {
       setAvailablePictureSizes([]);
+    } finally {
+      setPictureSizesLoaded(true);
     }
   };
 
   const switchCamera = () => {
     setReady(false);
+    setCaptureConfigurationReady(false);
     setAvailablePictureSizes([]);
+    setPictureSizesLoaded(false);
+    pictureSizesRequestedRef.current = false;
     setFacing((current) => (current === 'back' ? 'front' : 'back'));
   };
 
@@ -252,18 +288,18 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
     const canRequest = permission.canAskAgain;
     return (
       <View style={[styles.permission, { paddingTop: insets.top + 24, paddingBottom: insets.bottom + 24 }]}>
-        <MaterialCommunityIcons name="camera-outline" size={42} color={colors.lime} />
+        <MaterialCommunityIcons name="camera-outline" size={42} color={colors.primary} />
         <Text style={styles.permissionTitle}>Camera access</Text>
         <Pressable
           accessibilityRole="button"
-          style={({ pressed }) => [styles.primaryButton, pressed && styles.pressed]}
+          style={({ pressed }) => [styles.primaryButton, pressed && styles.primaryPressed]}
           onPress={canRequest ? requestPermission : Linking.openSettings}
         >
           <Text style={styles.primaryButtonText}>{canRequest ? 'Allow camera' : 'Open settings'}</Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}
+          style={({ pressed }) => [styles.secondaryButton, pressed && styles.controlPressed]}
           onPress={onOpenLibrary}
         >
           <Text style={styles.secondaryButtonText}>Open Library</Text>
@@ -276,7 +312,7 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
   const panelBottomPadding = 12;
   const guideBottom = controlsOpen ? 254 : 178;
   const levelAligned = levelRoll !== undefined && Math.abs(levelRoll) <= Math.PI / 120;
-  const levelColor = levelAligned ? colors.success : colors.primary;
+  const levelColor = levelAligned ? colors.success : colors.warning;
 
   return (
     <View style={styles.screen}>
@@ -287,12 +323,13 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
         facing={facing}
         flash={flash}
         mirror={facing === 'front' && cameraPreferences.mirrorSelfies}
+        autofocus={Platform.OS === 'ios' ? 'off' : undefined}
         mode="picture"
         zoom={cameraPreferences.zoom}
         enableTorch={false}
         animateShutter={false}
         ratio={Platform.OS === 'android' ? cameraPreferences.photoRatio : undefined}
-        pictureSize={Platform.OS === 'ios' ? pictureSize : undefined}
+        pictureSize={pictureSize}
         responsiveOrientationWhenOrientationLocked={Platform.OS === 'ios' ? true : undefined}
         onCameraReady={onCameraReady}
         onMountError={(event) => setError(event.message)}
@@ -332,30 +369,36 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
         {error ? <Text accessibilityLiveRegion="polite" numberOfLines={2} style={styles.error}>{error}</Text> : null}
 
         <View style={styles.zoomRow}>
-          <MaterialCommunityIcons name="magnify-minus-outline" size={20} color={colors.muted} />
+          <MaterialCommunityIcons name="magnify-minus-outline" size={20} color={colors.textSecondary} />
           <Slider
             style={styles.zoomSlider}
             minimumValue={0}
             maximumValue={1}
             step={0.01}
             value={cameraPreferences.zoom}
-            minimumTrackTintColor={colors.lime}
-            maximumTrackTintColor={colors.line}
-            thumbTintColor={colors.ink}
+            minimumTrackTintColor={colors.primary}
+            maximumTrackTintColor={colors.outline}
+            thumbTintColor={colors.text}
             onValueChange={updateZoom}
             onSlidingComplete={finishZoom}
             accessibilityLabel="Zoom"
             accessibilityValue={{ min: 0, max: 100, now: Math.round(cameraPreferences.zoom * 100) }}
           />
-          <MaterialCommunityIcons name="magnify-plus-outline" size={20} color={colors.ink} />
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={controlsOpen ? 'Hide camera controls' : 'Show camera controls'}
-            style={({ pressed }) => [styles.trayButton, controlsOpen && styles.trayButtonActive, pressed && styles.pressed]}
-            onPress={() => setControlsOpen((open) => !open)}
-          >
-            <MaterialCommunityIcons name={controlsOpen ? 'chevron-down' : 'tune-variant'} size={24} color={controlsOpen ? colors.limeInk : colors.ink} />
-          </Pressable>
+          <MaterialCommunityIcons name="magnify-plus-outline" size={20} color={colors.text} />
+          <View style={styles.trailingControlSlot}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={controlsOpen ? 'Hide camera controls' : 'Show camera controls'}
+              style={({ pressed }) => [
+                styles.trayButton,
+                controlsOpen && styles.trayButtonActive,
+                pressed && (controlsOpen ? styles.primaryPressed : styles.controlPressed),
+              ]}
+              onPress={() => setControlsOpen((open) => !open)}
+            >
+              <MaterialCommunityIcons name={controlsOpen ? 'chevron-down' : 'tune-variant'} size={24} color={controlsOpen ? colors.onPrimary : colors.text} />
+            </Pressable>
+          </View>
         </View>
 
         {controlsOpen ? (
@@ -363,7 +406,9 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
             <View style={styles.controlRow}>
               <ControlButton
                 icon={flash === 'off' ? 'flash-off' : flash === 'auto' ? 'flash-auto' : 'flash'}
-                label={flash === 'off' ? 'Flash off' : flash === 'auto' ? 'Flash auto' : 'Flash on'}
+                label={flash === 'off' ? 'Off' : flash === 'auto' ? 'Auto' : 'On'}
+                accessibilityLabel={flash === 'off' ? 'Flash off' : flash === 'auto' ? 'Flash auto' : 'Flash on'}
+                active={flash !== 'off'}
                 onPress={() => {
                   setFlashSettling(true);
                   updateCamera({ defaultFlash: nextValue(['off', 'auto', 'on'] as const, flash) });
@@ -371,13 +416,29 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
               />
               <ControlButton
                 icon="timer-outline"
-                label={cameraPreferences.timerSeconds ? `${cameraPreferences.timerSeconds}s` : 'Timer off'}
+                label={cameraPreferences.timerSeconds ? `${cameraPreferences.timerSeconds}s` : 'Off'}
+                accessibilityLabel={cameraPreferences.timerSeconds ? `${cameraPreferences.timerSeconds} second timer` : 'Timer off'}
+                active={cameraPreferences.timerSeconds > 0}
                 onPress={() => updateCamera({ timerSeconds: nextValue(timerOptions, cameraPreferences.timerSeconds) })}
               />
               <ControlButton
                 icon="aspect-ratio"
                 label={cameraPreferences.photoRatio}
                 onPress={() => updateCamera({ photoRatio: nextValue(ratioOptions, cameraPreferences.photoRatio) })}
+              />
+              <ControlButton
+                icon="grid"
+                label="Grid"
+                accessibilityLabel={cameraPreferences.showGrid ? 'Grid on' : 'Grid off'}
+                active={cameraPreferences.showGrid}
+                onPress={() => updateCamera({ showGrid: !cameraPreferences.showGrid })}
+              />
+              <ControlButton
+                icon="angle-acute"
+                label="Level"
+                accessibilityLabel={cameraPreferences.showLevel ? 'Level on' : 'Level off'}
+                active={cameraPreferences.showLevel}
+                onPress={() => updateLevel(!cameraPreferences.showLevel)}
               />
             </View>
           </View>
@@ -387,35 +448,35 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={selectedPhoto ? 'Open recent photo' : 'Open Library'}
-            style={({ pressed }) => [styles.recentButton, pressed && styles.pressed]}
+            style={({ pressed }) => [styles.recentButton, pressed && styles.controlPressed]}
             onPress={openRecent}
             disabled={busy}
           >
             {selectedPhoto ? (
               <Image source={{ uri: selectedPhoto.thumbnailUri }} style={styles.recentImage} />
             ) : (
-              <MaterialCommunityIcons name="image-outline" size={26} color={colors.ink} />
+              <MaterialCommunityIcons name="image-outline" size={26} color={colors.text} />
             )}
           </Pressable>
 
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={cameraPreferences.timerSeconds ? `Take photo with ${cameraPreferences.timerSeconds} second timer` : 'Take photo'}
-            style={({ pressed }) => [styles.shutter, (!ready || busy || flashSettling) && styles.disabled, pressed && styles.pressed]}
+            style={({ pressed }) => [styles.shutter, pressed && styles.shutterPressed, (!ready || !captureConfigurationReady || busy || flashSettling) && styles.disabled]}
             onPress={capture}
-            disabled={!ready || busy || flashSettling}
+            disabled={!ready || !captureConfigurationReady || busy || flashSettling}
           >
-            {busy && !countdown ? <ActivityIndicator color={colors.ink} /> : <View style={styles.shutterCore} />}
+            {busy && !countdown ? <ActivityIndicator color={colors.text} /> : <View style={styles.shutterCore} />}
           </Pressable>
 
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={facing === 'back' ? 'Switch to front camera' : 'Switch to rear camera'}
-            style={({ pressed }) => [styles.flipButton, pressed && styles.pressed]}
+            style={({ pressed }) => [styles.flipButton, pressed && styles.controlPressed]}
             onPress={switchCamera}
             disabled={busy}
           >
-            <MaterialCommunityIcons name="camera-switch-outline" size={30} color={colors.ink} />
+            <MaterialCommunityIcons name="camera-switch-outline" size={30} color={colors.text} />
           </Pressable>
         </View>
       </View>
@@ -423,51 +484,67 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
   );
 };
 
-const ControlButton = ({ icon, label, onPress }: { icon: IconName; label: string; onPress: () => void }) => (
+const ControlButton = ({ icon, label, accessibilityLabel = label, active = false, onPress }: {
+  icon: IconName;
+  label: string;
+  accessibilityLabel?: string;
+  active?: boolean;
+  onPress: () => void;
+}) => (
   <Pressable
     accessibilityRole="button"
-    accessibilityLabel={label}
-    style={({ pressed }) => [styles.controlButton, pressed && styles.pressed]}
+    accessibilityLabel={accessibilityLabel}
+    accessibilityState={{ selected: active }}
+    style={({ pressed }) => [
+      styles.controlButton,
+      active && styles.controlButtonActive,
+      pressed && (active ? styles.primaryPressed : styles.controlPressed),
+    ]}
     onPress={onPress}
   >
-    <MaterialCommunityIcons name={icon} size={22} color={colors.ink} />
-    <Text numberOfLines={1} style={styles.controlLabel}>{label}</Text>
+    <MaterialCommunityIcons name={icon} size={22} color={active ? colors.onPrimary : colors.text} />
+    <Text numberOfLines={1} style={[styles.controlLabel, active && styles.controlLabelActive]}>{label}</Text>
   </Pressable>
 );
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: colors.canvas },
+  screen: { flex: 1, backgroundColor: colors.background },
   pinchTarget: { position: 'absolute', left: 0, right: 0 },
   guides: { position: 'absolute', left: 0, right: 0 },
   verticalLine: { position: 'absolute', top: 0, bottom: 0, width: StyleSheet.hairlineWidth, backgroundColor: 'rgba(234,189,168,0.46)' },
   horizontalLine: { position: 'absolute', left: 0, right: 0, height: StyleSheet.hairlineWidth, backgroundColor: 'rgba(234,189,168,0.46)' },
   levelGuide: { position: 'absolute', left: '28%', right: '28%', top: '50%', flexDirection: 'row', alignItems: 'center', gap: 5 },
-  levelLine: { flex: 1, height: 2, borderRadius: 1 },
-  levelMark: { width: 7, height: 7, borderRadius: 4, borderWidth: 2 },
+  levelLine: { flex: 1, height: 4, borderRadius: 2, borderWidth: 1, borderColor: colors.background },
+  levelMark: { width: 9, height: 9, borderRadius: 5, borderWidth: 2, backgroundColor: colors.background },
   countdown: { ...StyleSheet.absoluteFillObject, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(34,26,27,0.2)' },
-  countdownText: { color: colors.ink, fontSize: 76, fontWeight: '300' },
+  countdownText: { color: colors.text, fontSize: 76, fontWeight: '300' },
   bottomPanel: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 16, paddingTop: 8, backgroundColor: colors.background },
-  error: { color: colors.danger, textAlign: 'center', fontSize: 13, lineHeight: 18, marginBottom: 6 },
+  error: { color: colors.error, textAlign: 'center', fontSize: 13, lineHeight: 18, marginBottom: 6 },
   zoomRow: { minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 7 },
   zoomSlider: { flex: 1, height: 40 },
-  trayButton: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceStrong },
-  trayButtonActive: { backgroundColor: colors.lime },
+  trailingControlSlot: { width: 58, height: 48, alignItems: 'center', justifyContent: 'center' },
+  trayButton: { width: 48, height: 48, borderRadius: 24, borderWidth: 1, borderColor: colors.outline, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.controlSurface },
+  trayButtonActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  primaryPressed: { backgroundColor: colors.primaryPressed, borderColor: colors.primaryPressed },
+  controlPressed: { backgroundColor: colors.controlPressed, borderColor: colors.outlineStrong },
   controlTray: { gap: 8, paddingBottom: 8 },
   controlRow: { flexDirection: 'row', gap: 6 },
-  controlButton: { flex: 1, minHeight: 60, minWidth: 0, borderRadius: 10, backgroundColor: colors.surfaceStrong, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 2, gap: 4 },
-  controlLabel: { color: colors.ink, fontSize: 11, textAlign: 'center' },
-  captureRow: { minHeight: 100, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 6 },
-  recentButton: { width: 58, height: 58, borderRadius: 12, overflow: 'hidden', borderWidth: 2, borderColor: colors.text, backgroundColor: colors.surfaceStrong, alignItems: 'center', justifyContent: 'center' },
+  controlButton: { flex: 1, minHeight: 60, minWidth: 0, borderRadius: 10, borderWidth: 1, borderColor: colors.outline, backgroundColor: colors.controlSurface, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 2, gap: 4 },
+  controlButtonActive: { borderColor: colors.primary, backgroundColor: colors.primary },
+  controlLabel: { color: colors.text, fontSize: 11, textAlign: 'center' },
+  controlLabelActive: { color: colors.onPrimary },
+  captureRow: { minHeight: 100, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  recentButton: { width: 58, height: 58, borderRadius: 12, overflow: 'hidden', borderWidth: 2, borderColor: colors.text, backgroundColor: colors.controlSurface, alignItems: 'center', justifyContent: 'center' },
   recentImage: { width: '100%', height: '100%' },
-  shutter: { width: 82, height: 82, borderRadius: 41, borderWidth: 3, borderColor: colors.ink, padding: 6, alignItems: 'center', justifyContent: 'center' },
-  shutterCore: { width: '100%', height: '100%', borderRadius: 34, backgroundColor: colors.ink },
-  flipButton: { width: 58, height: 58, borderRadius: 29, backgroundColor: colors.surfaceStrong, alignItems: 'center', justifyContent: 'center' },
+  shutter: { width: 82, height: 82, borderRadius: 41, borderWidth: 3, borderColor: colors.text, padding: 6, alignItems: 'center', justifyContent: 'center' },
+  shutterPressed: { borderColor: colors.primary },
+  shutterCore: { width: '100%', height: '100%', borderRadius: 34, backgroundColor: colors.text },
+  flipButton: { width: 58, height: 58, borderRadius: 29, borderWidth: 1, borderColor: colors.outline, backgroundColor: colors.controlSurface, alignItems: 'center', justifyContent: 'center' },
   disabled: { opacity: 0.45 },
-  pressed: { opacity: 0.7 },
-  permission: { flex: 1, paddingHorizontal: 28, backgroundColor: colors.canvas, justifyContent: 'center' },
-  permissionTitle: { color: colors.ink, fontFamily: 'ZenOldMincho_700Bold', fontSize: 30, lineHeight: 38, marginTop: 22 },
-  primaryButton: { backgroundColor: colors.lime, minHeight: 52, alignItems: 'center', justifyContent: 'center', borderRadius: 12, marginTop: 24 },
-  primaryButtonText: { color: colors.limeInk, fontWeight: '800', fontSize: 15 },
+  permission: { flex: 1, paddingHorizontal: 28, backgroundColor: colors.background, justifyContent: 'center' },
+  permissionTitle: { color: colors.text, fontFamily: typography.displayFamily, fontSize: 30, lineHeight: 38, marginTop: 22 },
+  primaryButton: { backgroundColor: colors.primary, minHeight: 52, alignItems: 'center', justifyContent: 'center', borderRadius: 12, marginTop: 24 },
+  primaryButtonText: { color: colors.onPrimary, fontWeight: '800', fontSize: 15 },
   secondaryButton: { minHeight: 52, alignItems: 'center', justifyContent: 'center', marginTop: 4 },
-  secondaryButtonText: { color: colors.ink, fontWeight: '700', fontSize: 14 },
+  secondaryButtonText: { color: colors.text, fontWeight: '700', fontSize: 14 },
 });

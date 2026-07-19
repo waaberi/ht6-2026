@@ -133,6 +133,7 @@ export type PhotoVersion = {
 
 export type PhotoRecord = {
   id: Id;
+  ownerId: Id;
   createdAt: string;
   captureSource: 'camera' | 'library' | 'document' | 'usb';
   originalUri: string;

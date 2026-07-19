@@ -15,9 +15,20 @@ test('uses the launcher-provided API URL before every persisted configuration', 
 });
 
 test('API errors expose a concise FastAPI detail instead of raw JSON', () => {
-  assert.equal(apiErrorMessage('{"detail":"Image quota is unavailable."}', 503), 'Image quota is unavailable.');
+  assert.equal(apiErrorMessage('{"detail":"The image is too large."}', 413), 'The image is too large.');
   assert.equal(apiErrorMessage('Gateway unavailable', 502), 'Gateway unavailable');
   assert.equal(apiErrorMessage('', 500), 'Exposure service returned 500');
+});
+
+test('API errors turn Gemini configuration failures into actionable app copy', () => {
+  assert.equal(
+    apiErrorMessage('{"detail":"GEMINI_API_KEY is required for Nano Banana generative layers"}', 503),
+    'AI generation is not configured. Restart the Exposure API after adding its Gemini key.',
+  );
+  assert.equal(
+    apiErrorMessage('{"detail":"The configured Gemini project has no available image-generation quota."}', 503),
+    'AI generation is unavailable for this Gemini project. Enable image-generation quota in Google AI Studio, then try again.',
+  );
 });
 
 test('uses the configured URL when there is no launcher URL', () => {

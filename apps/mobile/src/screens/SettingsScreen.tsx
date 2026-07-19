@@ -5,7 +5,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { colors } from '../components/theme';
+import { colors, layout, typography } from '../components/theme';
 import {
   defaultPreferences,
   loadPreferences,
@@ -14,6 +14,7 @@ import {
   type ExposurePreferences,
 } from '../data/preferences';
 import { resolveApiUrl } from '../domain/apiConfiguration';
+import { captureControlsForSession } from '../domain/cameraControls';
 import { sendMagicLink, signOut } from '../services/auth';
 import { supabase } from '../services/supabase';
 import { persistPreferences as persistPreferencesToCloud } from '../services/sync';
@@ -26,21 +27,38 @@ export const SettingsScreen = () => {
     process.env.EXPO_PUBLIC_API_URL,
     undefined,
   );
-  const { photos, syncing, syncError, synchronize } = useExposure();
+  const { ownerId, photos, syncing, syncError, lastSyncedAt, synchronize } = useExposure();
   const [session, setSession] = useState<Session | null>(null);
   const [email, setEmail] = useState('');
   const [preferences, setPreferences] = useState<ExposurePreferences>(defaultPreferences);
   const [message, setMessage] = useState<string>();
   const [cameraMessage, setCameraMessage] = useState<string>();
   const preferencesRef = useRef(defaultPreferences);
+  const ownerIdRef = useRef(ownerId);
+  const loadedPreferencesOwnerIdRef = useRef<string | undefined>(undefined);
   const sessionRef = useRef<Session | null>(null);
   const preferenceWriteQueue = useRef(Promise.resolve());
 
+  ownerIdRef.current = ownerId;
+
   useEffect(() => {
-    void loadPreferences().then((stored) => {
+    let stale = false;
+    if (loadedPreferencesOwnerIdRef.current !== ownerId) {
+      preferencesRef.current = defaultPreferences;
+      setPreferences(defaultPreferences);
+    }
+    void loadPreferences(ownerId).then((stored) => {
+      if (stale || ownerIdRef.current !== ownerId) return;
+      loadedPreferencesOwnerIdRef.current = ownerId;
       preferencesRef.current = stored;
       setPreferences(stored);
     });
+    return () => {
+      stale = true;
+    };
+  }, [ownerId, lastSyncedAt]);
+
+  useEffect(() => {
     if (!supabase) return;
     const updateSession = (next: Session | null) => {
       sessionRef.current = next;
@@ -52,13 +70,18 @@ export const SettingsScreen = () => {
   }, []);
 
   const savePreferences = (next: ExposurePreferences) => {
+    const targetOwnerId = ownerIdRef.current;
     preferencesRef.current = next;
     setPreferences(next);
     preferenceWriteQueue.current = preferenceWriteQueue.current.then(async () => {
-      await persistPreferences(next);
-      if (sessionRef.current) await persistPreferencesToCloud(next);
+      await persistPreferences(next, targetOwnerId);
+      if (sessionRef.current?.user.id === targetOwnerId) {
+        await persistPreferencesToCloud(next, targetOwnerId);
+      }
     }).catch((caught: unknown) => {
-      setMessage(caught instanceof Error ? caught.message : 'Preference sync failed.');
+      if (ownerIdRef.current === targetOwnerId) {
+        setMessage(caught instanceof Error ? caught.message : 'Preference sync failed.');
+      }
     });
   };
 
@@ -131,7 +154,7 @@ export const SettingsScreen = () => {
                 <MaterialCommunityIcons
                   name={cloudReady ? 'cloud-check-outline' : syncError ? 'cloud-alert-outline' : syncing ? 'cloud-sync-outline' : 'cloud-upload-outline'}
                   size={22}
-                  color={cloudReady ? colors.success : colors.ink}
+                  color={cloudReady ? colors.onSuccess : colors.text}
                 />
               </View>
               <View style={styles.accountText}>
@@ -140,18 +163,20 @@ export const SettingsScreen = () => {
               </View>
             </View>
             <View style={styles.accountActions}>
+              {!cloudReady ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityState={{ busy: syncing }}
+                  disabled={syncing}
+                  style={({ pressed }) => [styles.textButton, styles.accountActionsButton, pressed && styles.controlPressed]}
+                  onPress={() => void synchronize()}
+                >
+                  <Text style={styles.textButtonLabel}>{syncing ? 'Syncing…' : syncError ? 'Retry sync' : 'Sync now'}</Text>
+                </Pressable>
+              ) : null}
               <Pressable
                 accessibilityRole="button"
-                accessibilityState={{ busy: syncing }}
-                disabled={syncing}
-                style={({ pressed }) => [styles.textButton, styles.accountActionsButton, pressed && styles.pressed]}
-                onPress={() => void synchronize()}
-              >
-                <Text style={styles.textButtonLabel}>{syncing ? 'Syncing…' : 'Sync now'}</Text>
-              </Pressable>
-              <Pressable
-                accessibilityRole="button"
-                style={({ pressed }) => [styles.textButton, styles.accountActionsButton, pressed && styles.pressed]}
+                style={({ pressed }) => [styles.textButton, styles.accountActionsButton, pressed && styles.controlPressed]}
                 onPress={() => void signOut().catch((caught: unknown) => setMessage(caught instanceof Error ? caught.message : 'Sign-out failed.'))}
               >
                 <Text style={styles.textButtonLabel}>Sign out</Text>
@@ -171,16 +196,16 @@ export const SettingsScreen = () => {
               returnKeyType="send"
               onSubmitEditing={signIn}
               placeholder="Email address"
-              placeholderTextColor={colors.muted}
+              placeholderTextColor={colors.textSecondary}
               style={styles.input}
               accessibilityLabel="Email address"
             />
             <Pressable
               accessibilityRole="button"
-              style={({ pressed }) => [styles.primaryButton, pressed && styles.pressed]}
+              style={({ pressed }) => [styles.primaryButton, pressed && styles.primaryPressed]}
               onPress={signIn}
             >
-              <Text style={styles.primaryButtonText}>Sign in to sync</Text>
+              <Text style={styles.primaryButtonText}>Send sign-in link</Text>
             </Pressable>
           </>
         )}
@@ -189,9 +214,17 @@ export const SettingsScreen = () => {
 
       <Section title="Camera">
         <SettingRow label="Grid" value={preferences.camera.showGrid} onChange={(showGrid) => updateCamera({ showGrid })} />
-        <SettingRow label="Level guide" value={preferences.camera.showLevel} onChange={updateLevel} />
+        <SettingRow label="Level" value={preferences.camera.showLevel} onChange={updateLevel} />
         <SettingRow label="Mirror selfies" value={preferences.camera.mirrorSelfies} onChange={(mirrorSelfies) => updateCamera({ mirrorSelfies })} />
-        <SettingRow label="Preserve capture controls" value={preferences.camera.preserveCaptureSettings} onChange={(preserveCaptureSettings) => updateCamera({ preserveCaptureSettings })} last />
+        <SettingRow
+          label="Remember camera settings"
+          value={preferences.camera.preserveCaptureSettings}
+          onChange={(preserveCaptureSettings) => updateCamera(captureControlsForSession(
+            { ...preferencesRef.current.camera, preserveCaptureSettings },
+            defaultPreferences.camera,
+          ))}
+          last
+        />
         {cameraMessage ? <Text accessibilityRole="alert" style={styles.message}>{cameraMessage}</Text> : null}
       </Section>
 
@@ -203,7 +236,7 @@ export const SettingsScreen = () => {
           onChange={(skillLevel) => updatePreferences({ skillLevel: skillLevel as ExposurePreferences['skillLevel'] })}
         />
         <ChoiceRow
-          label="Feedback"
+          label="Response length"
           value={preferences.detail}
           options={[{ label: 'Concise', value: 'concise' }, { label: 'Detailed', value: 'detailed' }]}
           onChange={(detail) => updatePreferences({ detail: detail as ExposurePreferences['detail'] })}
@@ -213,15 +246,18 @@ export const SettingsScreen = () => {
 
       <Section title="Privacy & export">
         <SettingRow
-          label="Include camera metadata"
-          detail="Camera, lens, exposure and capture time"
+          label="Camera metadata"
           value={preferences.exportMetadata}
-          onChange={(exportMetadata) => updatePreferences({ exportMetadata })}
+          onChange={(exportMetadata) => updatePreferences({
+            exportMetadata,
+            exportGps: exportMetadata ? preferencesRef.current.exportGps : false,
+          })}
         />
         <SettingRow
-          label="Include location"
+          label="Location metadata"
           value={preferences.exportGps}
           onChange={(exportGps) => updatePreferences({ exportGps })}
+          disabled={!preferences.exportMetadata}
           last
         />
       </Section>
@@ -236,7 +272,7 @@ export const SettingsScreen = () => {
             autoCorrect={false}
             keyboardType="url"
             placeholder={configuredApiUrl || 'API URL'}
-            placeholderTextColor={colors.muted}
+            placeholderTextColor={colors.textSecondary}
             style={[styles.input, styles.developerInput]}
             accessibilityLabel="Development API URL"
           />
@@ -281,14 +317,15 @@ const ChoiceRow = ({ label, value, options, onChange, last = false }: {
   </View>
 );
 
-const SettingRow = ({ label, detail, value, onChange, last = false }: {
+const SettingRow = ({ label, detail, value, onChange, disabled = false, last = false }: {
   label: string;
   detail?: string;
   value: boolean;
   onChange: (value: boolean) => void;
+  disabled?: boolean;
   last?: boolean;
 }) => (
-  <View style={[styles.settingRow, last && styles.lastRow]}>
+  <View style={[styles.settingRow, disabled && styles.disabledRow, last && styles.lastRow]}>
     <View style={styles.settingCopy}>
       <Text style={styles.rowLabel}>{label}</Text>
       {detail ? <Text style={styles.rowDetail}>{detail}</Text> : null}
@@ -296,45 +333,48 @@ const SettingRow = ({ label, detail, value, onChange, last = false }: {
     <Switch
       value={value}
       onValueChange={onChange}
+      disabled={disabled}
       trackColor={{ false: colors.outline, true: colors.primary }}
-      thumbColor={value ? colors.onPrimary : colors.textSecondary}
+      thumbColor={colors.onPrimary}
       accessibilityLabel={label}
     />
   </View>
 );
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: colors.canvas },
-  content: { width: '100%', maxWidth: 720, alignSelf: 'center', paddingHorizontal: 18 },
-  title: { color: colors.ink, fontFamily: 'ZenOldMincho_700Bold', fontSize: 32, lineHeight: 40, marginBottom: 22 },
+  screen: { flex: 1, backgroundColor: colors.background },
+  content: { width: '100%', maxWidth: 720, alignSelf: 'center', paddingHorizontal: layout.screenPadding },
+  title: { color: colors.text, fontFamily: typography.displayFamily, ...typography.display, marginBottom: 22 },
   sectionGroup: { marginBottom: 20 },
-  sectionTitle: { color: colors.muted, fontSize: 13, fontWeight: '700', marginLeft: 4, marginBottom: 8 },
+  sectionTitle: { color: colors.textSecondary, fontSize: 13, fontWeight: '700', marginLeft: 4, marginBottom: 8 },
   section: { borderRadius: 14, backgroundColor: colors.surface, overflow: 'hidden' },
   accountRow: { minHeight: 68, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, gap: 12 },
-  statusIcon: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.panelRaised },
-  statusIconReady: { backgroundColor: 'rgba(97, 152, 142, 0.14)' },
+  statusIcon: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceStrong },
+  statusIconReady: { backgroundColor: colors.success },
   accountText: { flex: 1 },
-  accountEmail: { color: colors.ink, fontSize: 15, fontWeight: '700' },
-  accountStatus: { color: colors.muted, fontSize: 12, marginTop: 3 },
+  accountEmail: { color: colors.text, fontSize: 15, fontWeight: '700' },
+  accountStatus: { color: colors.textSecondary, fontSize: 12, marginTop: 3 },
   input: { minHeight: 52, borderRadius: 10, color: colors.text, backgroundColor: colors.background, fontSize: 15, paddingHorizontal: 14, marginHorizontal: 12, marginTop: 12, borderWidth: 1, borderColor: colors.outline },
   primaryButton: { minHeight: 52, borderRadius: 10, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center', marginHorizontal: 12, marginTop: 10, marginBottom: 12 },
+  primaryPressed: { backgroundColor: colors.primaryPressed },
   primaryButtonText: { color: colors.onPrimary, fontSize: 14, fontWeight: '800' },
-  textButton: { minHeight: 48, alignItems: 'center', justifyContent: 'center', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line },
-  accountActions: { flexDirection: 'row' },
-  accountActionsButton: { flex: 1 },
-  textButtonLabel: { color: colors.lime, fontSize: 14, fontWeight: '700' },
-  message: { color: colors.ink, fontSize: 12, lineHeight: 18, paddingHorizontal: 14, paddingVertical: 10, textAlign: 'center' },
-  choiceBlock: { paddingHorizontal: 12, paddingTop: 11, paddingBottom: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
-  rowLabel: { color: colors.ink, fontSize: 14, fontWeight: '600' },
-  rowDetail: { color: colors.muted, fontSize: 12, lineHeight: 17, marginTop: 2 },
-  segmented: { height: 52, flexDirection: 'row', alignItems: 'stretch', borderRadius: 10, backgroundColor: colors.background, padding: 4, marginTop: 9 },
-  segment: { flex: 1, height: 44, borderRadius: 8, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
+  textButton: { minHeight: 48, alignItems: 'center', justifyContent: 'center' },
+  controlPressed: { backgroundColor: colors.controlPressed },
+  accountActions: { flexDirection: 'row', justifyContent: 'flex-end', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.separator },
+  accountActionsButton: { flexBasis: '50%', flexGrow: 0 },
+  textButtonLabel: { color: colors.actionText, fontSize: 14, fontWeight: '700' },
+  message: { color: colors.text, fontSize: 12, lineHeight: 18, paddingHorizontal: 14, paddingVertical: 10, textAlign: 'center' },
+  choiceBlock: { paddingHorizontal: 12, paddingTop: 11, paddingBottom: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.separator },
+  rowLabel: { color: colors.text, fontSize: 14, fontWeight: '600' },
+  rowDetail: { color: colors.textSecondary, fontSize: 12, lineHeight: 17, marginTop: 2 },
+  segmented: { height: 56, flexDirection: 'row', alignItems: 'stretch', borderRadius: 10, backgroundColor: colors.background, padding: 4, marginTop: 9 },
+  segment: { flex: 1, height: 48, borderRadius: 8, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
   segmentSelected: { backgroundColor: colors.primary },
-  segmentLabel: { width: '100%', color: colors.muted, fontSize: 12, lineHeight: 16, fontWeight: '700', textAlign: 'center' },
+  segmentLabel: { width: '100%', color: colors.textSecondary, fontSize: 12, lineHeight: 16, fontWeight: '700', textAlign: 'center' },
   segmentLabelSelected: { color: colors.onPrimary },
-  settingRow: { minHeight: 60, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
+  settingRow: { minHeight: 60, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.separator },
+  disabledRow: { opacity: 0.46 },
   settingCopy: { flex: 1, paddingRight: 14 },
   lastRow: { borderBottomWidth: 0 },
   developerInput: { marginBottom: 12 },
-  pressed: { opacity: 0.7 },
 });
