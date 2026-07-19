@@ -21,18 +21,15 @@ import { ActionButton } from '../components/ui/ActionButton';
 import { EmptyState } from '../components/ui/EmptyState';
 import { ScreenHeader } from '../components/ui/ScreenHeader';
 import { StickyActionBar } from '../components/ui/StickyActionBar';
-import { saveStyleProfile } from '../data/styleRepository';
 import type { PhotoRecord } from '../domain/types';
 import {
-  createStyleProfile,
   reviewPortfolio,
   type PortfolioReview,
-  type StyleProfileResult,
 } from '../services/api';
-import { persistPortfolioReview, persistStyleProfile } from '../services/sync';
+import { persistPortfolioReview } from '../services/sync';
 import { useExposure } from '../state/ExposureContext';
 
-type LibraryView = 'browse' | 'select' | 'portfolio-result' | 'look-result';
+type LibraryView = 'browse' | 'select' | 'portfolio-result';
 
 type LibraryScreenProps = {
   onOpenStudio: () => void;
@@ -45,8 +42,7 @@ export const LibraryScreen = ({ onOpenStudio, onOpenCamera }: LibraryScreenProps
   const [view, setView] = useState<LibraryView>('browse');
   const [selection, setSelection] = useState<string[]>([]);
   const [portfolioReview, setPortfolioReview] = useState<PortfolioReview>();
-  const [activeStyle, setActiveStyle] = useState<StyleProfileResult>();
-  const [busy, setBusy] = useState<'portfolio' | 'look' | 'delete'>();
+  const [busy, setBusy] = useState<'portfolio' | 'delete'>();
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
@@ -131,7 +127,6 @@ export const LibraryScreen = ({ onOpenStudio, onOpenCamera }: LibraryScreenProps
     setView('browse');
     setSelection([]);
     setPortfolioReview(undefined);
-    setActiveStyle(undefined);
     setError(undefined);
     setNotice(undefined);
   };
@@ -158,24 +153,6 @@ export const LibraryScreen = ({ onOpenStudio, onOpenCamera }: LibraryScreenProps
       AccessibilityInfo.announceForAccessibility('Portfolio review ready.');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Portfolio review failed.');
-    } finally {
-      setBusy(undefined);
-    }
-  };
-
-  const createLook = async () => {
-    setBusy('look');
-    setError(undefined);
-    try {
-      const references = selection.slice(0, 8);
-      const created = await createStyleProfile(photos.filter((photo) => references.includes(photo.id)));
-      await saveStyleProfile(created, references);
-      setActiveStyle(created);
-      setView('look-result');
-      await persistStyleProfile(created, references);
-      AccessibilityInfo.announceForAccessibility(`${created.name} is ready.`);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Look creation failed.');
     } finally {
       setBusy(undefined);
     }
@@ -218,14 +195,12 @@ export const LibraryScreen = ({ onOpenStudio, onOpenCamera }: LibraryScreenProps
           ? 'Select'
           : view === 'portfolio-result'
             ? 'Curate'
-            : view === 'look-result'
-              ? 'New Look'
-              : 'Library'}
+            : 'Library'}
         detail={headerDetail}
         actions={photos.length ? view === 'select' ? [
           ...(selection.length ? [{ label: 'Clear selection', icon: 'remove-circle-outline' as const, onPress: () => setSelection([]) }] : []),
           { label: 'Cancel selection', icon: 'close', onPress: leaveSelection },
-        ] : view === 'portfolio-result' || view === 'look-result' ? [
+        ] : view === 'portfolio-result' ? [
           { label: 'Close result', icon: 'close', onPress: leaveSelection },
         ] : [
           { label: 'Select photos', icon: 'checkmark-circle-outline', onPress: enterSelection },
@@ -244,22 +219,6 @@ export const LibraryScreen = ({ onOpenStudio, onOpenCamera }: LibraryScreenProps
           onReset={() => {
             setPortfolioReview(undefined);
             setSelection([]);
-            setView('select');
-          }}
-        />
-      ) : view === 'look-result' && activeStyle ? (
-        <LookResult
-          style={activeStyle}
-          onUse={() => {
-            setActiveStyle(undefined);
-            setSelection([]);
-            setError(undefined);
-            setView('browse');
-          }}
-          onReset={() => {
-            setActiveStyle(undefined);
-            setSelection([]);
-            setError(undefined);
             setView('select');
           }}
         />
@@ -324,7 +283,6 @@ export const LibraryScreen = ({ onOpenStudio, onOpenCamera }: LibraryScreenProps
               <Ionicons name="trash-outline" size={22} color={colors.danger} />
             </Pressable>
             <ActionButton label="Curate set" accessibilityHint="Select at least two photos" style={styles.taskAction} onPress={() => void runPortfolioReview()} disabled={selection.length < 2 || Boolean(busy)} loading={busy === 'portfolio'} />
-            <ActionButton label="New Look" accessibilityHint="Select three to eight photos" variant="tonal" style={styles.taskAction} onPress={() => void createLook()} disabled={selection.length < 3 || selection.length > 8 || Boolean(busy)} loading={busy === 'look'} />
           </View>
         </StickyActionBar>
       ) : null}
@@ -386,30 +344,6 @@ const PortfolioResult = ({ review, photoById, onReset }: {
       })}
     </View>
     <ActionButton label="Curate another set" variant="outlined" onPress={onReset} />
-  </ScrollView>
-);
-
-const LookResult = ({
-  style,
-  onUse,
-  onReset,
-}: {
-  style: StyleProfileResult;
-  onUse: () => void;
-  onReset: () => void;
-}) => (
-  <ScrollView contentContainerStyle={styles.resultContent}>
-    <Text accessibilityRole="header" style={styles.resultTitle}>{style.name}</Text>
-    {style.mood ? <Text numberOfLines={2} style={styles.resultSummary}>{style.mood}</Text> : null}
-    <View style={styles.palette} accessibilityLabel={`${style.name} color palette`}>
-      {style.palette.map((color, index) => (
-        <View key={`${color}-${index}`} style={[styles.swatch, { backgroundColor: color }]} />
-      ))}
-    </View>
-    <View style={styles.resultActions}>
-      <ActionButton label="Apply to a photo" onPress={onUse} />
-      <ActionButton label="Change references" variant="outlined" onPress={onReset} />
-    </View>
   </ScrollView>
 );
 
@@ -492,8 +426,6 @@ const styles = StyleSheet.create({
   rankNumber: { width: 24, color: colors.text, ...typography.section, fontWeight: '800', textAlign: 'center' },
   rankImage: { width: 52, height: 52, borderRadius: radii.sm, backgroundColor: colors.surface },
   rankText: { flex: 1, color: colors.text, ...typography.label },
-  palette: { height: 48, flexDirection: 'row', marginTop: spacing.lg, borderRadius: radii.sm, overflow: 'hidden' },
-  swatch: { flex: 1 },
   taskActions: { flexDirection: 'row', gap: spacing.sm },
   importFab: {
     position: 'absolute',
@@ -517,5 +449,4 @@ const styles = StyleSheet.create({
   },
   taskAction: { flex: 1 },
   disabled: { opacity: 0.42 },
-  resultActions: { gap: spacing.sm, marginTop: spacing.sm },
 });

@@ -2,7 +2,7 @@ import { randomUUID } from 'expo-crypto';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import Slider from '@react-native-community/slider';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { PhotoCanvas } from '../components/PhotoCanvas';
@@ -12,7 +12,7 @@ import { StudioToolRail, type StudioTool } from '../components/studio/StudioTool
 import { colors } from '../components/theme';
 import { deleteGeneratedLayerAsset, saveGeneratedLayerAsset } from '../data/photoRepository';
 import { recordRecommendationFeedback } from '../data/preferences';
-import { loadStyleProfiles, type SavedStyleProfile } from '../data/styleRepository';
+import { deleteStyleProfile, loadStyleProfiles, renameStyleProfile, saveStyleProfile, type SavedStyleProfile } from '../data/styleRepository';
 import { centeredCrop, restoreManualTransform, rotateClockwise, withStraighten } from '../domain/canvasTransforms';
 import {
   buildCoachEditPreview,
@@ -22,7 +22,7 @@ import {
   type CoachEditPreview,
   type PreviewableCoachActionPlan,
 } from '../domain/coachHarness';
-import { collectiveAdjustmentValues, currentVersion, mergeCollectiveAdjustments, removeLayer, reorderLayer, setCollectiveAdjustments, setLayerOpacity, StalePhotoVersionError, toggleLayer } from '../domain/layers';
+import { collectiveAdjustmentValues, currentVersion, mergeCollectiveAdjustments, removeLayer, reorderLayer, reusableStyleAdjustments, setCollectiveAdjustments, setLayerOpacity, StalePhotoVersionError, toggleLayer } from '../domain/layers';
 import type {
   AdjustmentValues,
   CanvasTransform,
@@ -37,7 +37,7 @@ import type {
 } from '../domain/types';
 import { ApiUnavailableError, askCoach, createGenerativePatch } from '../services/api';
 import { exportAndShare } from '../services/export';
-import { persistPreferences } from '../services/sync';
+import { persistPreferences, persistStyleProfile, syncStyleProfileDeletions } from '../services/sync';
 import { useExposure } from '../state/ExposureContext';
 import { identityCanvasTransform } from '../domain/types';
 
@@ -106,6 +106,7 @@ const applyStyleLayer = (
 
 export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRetake: () => void }) => {
   const {
+    ownerId,
     selectedPhoto,
     analysis,
     analyzing,
@@ -150,6 +151,8 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   const [lookStrength, setLookStrength] = useState(0.75);
   const [lookDraftLayerId, setLookDraftLayerId] = useState(() => randomUUID());
   const lookCommitRef = useRef(false);
+  const [renamingLookId, setRenamingLookId] = useState<string>();
+  const [presetBusy, setPresetBusy] = useState(false);
   const [draftTransform, setDraftTransform] = useState<CanvasTransform>(() => identityCanvasTransform());
   const [draftLayerOpacities, setDraftLayerOpacities] = useState<Record<string, number>>({});
   const [layerBusyId, setLayerBusyId] = useState<string>();
@@ -231,12 +234,14 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
 
   useEffect(() => {
     let active = true;
-    loadStyleProfiles()
+    setLooksLoading(true);
+    setRenamingLookId(undefined);
+    loadStyleProfiles(ownerId)
       .then((looks) => { if (active) setSavedLooks(looks); })
       .catch(() => { if (active) setMessage('Saved Looks could not be loaded.'); })
       .finally(() => { if (active) setLooksLoading(false); });
     return () => { active = false; };
-  }, []);
+  }, [ownerId]);
 
   useEffect(() => {
     setDraftAdjustments(savedAdjustments);
@@ -251,6 +256,15 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     setLookStrength(appliedLookLayer?.strength ?? 0.75);
     setLookDraftLayerId(appliedLookLayer?.id ?? randomUUID());
   }, [appliedLookLayer?.id, appliedLookLayer?.strength, appliedLookLayer?.styleProfileId, version?.id]);
+
+  const presetAdjustments = useMemo(
+    () => version
+      ? reusableStyleAdjustments(setCollectiveAdjustments(version.stack, draftAdjustments))
+      : {},
+    [draftAdjustments, version],
+  );
+  const canCreatePreset = Object.values(presetAdjustments)
+    .some((value) => Math.abs(value ?? 0) > 0.0001);
 
   useEffect(() => {
     if (!version) return;
@@ -674,6 +688,104 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     }
   };
 
+  const createPreset = async () => {
+    if (presetBusy || !canCreatePreset) return;
+    setPresetBusy(true);
+    setMessage(undefined);
+    try {
+      const customPresetCount = savedLooks.filter((look) => !look.isBuiltIn).length;
+      const created = await saveStyleProfile({
+        id: randomUUID(),
+        name: `Preset ${customPresetCount + 1}`,
+        adjustments: presetAdjustments,
+        palette: [],
+        mood: 'Created from your current edits',
+      }, []);
+      setSavedLooks((current) => [
+        ...current.filter((look) => look.isBuiltIn),
+        created,
+        ...current.filter((look) => !look.isBuiltIn && look.id !== created.id),
+      ]);
+      setRenamingLookId(created.id);
+      setTool('looks');
+      setMessage('Preset saved. Give it a name.');
+      void persistStyleProfile(created, []).catch(() => {
+        if (mountedRef.current) setMessage('Preset saved on this device, but it could not sync yet.');
+      });
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Preset could not be saved.');
+    } finally {
+      setPresetBusy(false);
+    }
+  };
+
+  const renamePreset = async (lookId: string, name: string) => {
+    if (presetBusy) return;
+    setPresetBusy(true);
+    setMessage(undefined);
+    try {
+      const updated = await renameStyleProfile(lookId, name, ownerId);
+      setSavedLooks((current) => current.map((look) => look.id === updated.id ? updated : look));
+      setRenamingLookId(undefined);
+      setMessage(`Preset renamed to ${updated.name}.`);
+      void persistStyleProfile(updated, updated.referencePhotoIds).catch(() => {
+        if (mountedRef.current) setMessage(`${updated.name} was renamed on this device, but it could not sync yet.`);
+      });
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Preset could not be renamed.');
+    } finally {
+      setPresetBusy(false);
+    }
+  };
+
+  const deletePreset = async (look: SavedStyleProfile) => {
+    if (look.isBuiltIn || presetBusy) return;
+    setPresetBusy(true);
+    setMessage(undefined);
+    const keepsCurrentEdits = appliedLookLayer?.styleProfileId === look.id;
+    try {
+      if (keepsCurrentEdits) {
+        const flattenedAdjustments = reusableStyleAdjustments(version.stack);
+        const changed = await commit(
+          setCollectiveAdjustments(removeStyleLayers(version.stack), flattenedAdjustments),
+          `Keep edits after deleting ${look.name}`,
+          version.id,
+        );
+        if (!changed) return;
+      }
+      await deleteStyleProfile(look.id, ownerId);
+      setSavedLooks((current) => current.filter((item) => item.id !== look.id));
+      setRenamingLookId((current) => current === look.id ? undefined : current);
+      if (selectedLookId === look.id) {
+        setSelectedLookId(undefined);
+        setLookStrength(0.75);
+        setLookDraftLayerId(randomUUID());
+      }
+      setMessage(keepsCurrentEdits
+        ? `${look.name} was deleted. Its edits remain on this photo.`
+        : `${look.name} was deleted.`);
+      void syncStyleProfileDeletions(ownerId, [look.id]).catch(() => {
+        if (mountedRef.current) setMessage(`${look.name} was deleted on this device and will be removed from the cloud when sync resumes.`);
+      });
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Preset could not be deleted.');
+    } finally {
+      setPresetBusy(false);
+    }
+  };
+
+  const confirmDeletePreset = (look: SavedStyleProfile) => {
+    if (look.isBuiltIn || presetBusy) return;
+    Alert.alert(
+      `Delete ${look.name}?`,
+      'Photos already edited with this preset will keep their appearance.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: () => void deletePreset(look) },
+      ],
+    );
+  };
+
   const exportPhoto = async () => {
     setMessage(undefined);
     setExporting(true);
@@ -889,6 +1001,9 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
               onCommit={commitAdjustment}
               onResetControl={(key) => void commitAdjustment(key, 0)}
               onRestore={() => void restoreAdjustments()}
+              onCreatePreset={() => void createPreset()}
+              canCreatePreset={canCreatePreset}
+              presetBusy={presetBusy}
               busy={applying}
               section={adjustmentSection}
               onSectionChange={setAdjustmentSection}
@@ -918,11 +1033,16 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
               strength={lookStrength}
               loading={looksLoading}
               busy={lookBusy}
-              canRestore={Boolean(appliedLookLayer)}
+              renamingLookId={renamingLookId}
+              renameBusy={presetBusy}
               onSelect={(look) => void chooseLook(look)}
               onStrengthChange={setLookStrength}
               onStrengthCommit={(strength) => void commitLookStrength(strength)}
               onRestore={() => void restoreLook()}
+              onStartRename={setRenamingLookId}
+              onRename={(lookId, name) => void renamePreset(lookId, name)}
+              onCancelRename={() => setRenamingLookId(undefined)}
+              onDelete={confirmDeletePreset}
             />
           ) : null}
 

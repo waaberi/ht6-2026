@@ -35,6 +35,23 @@ export const collectiveAdjustmentValues = (stack: LayerStack): AdjustmentValues 
   return values;
 };
 
+/**
+ * Flattens the transferable, global parts of a photo's edit stack into one
+ * reusable preset. Photo-specific geometry, masks, and generated pixels stay
+ * with the source photo, while enabled Looks are folded in at their strength.
+ */
+export const reusableStyleAdjustments = (stack: LayerStack): AdjustmentValues => {
+  const values = collectiveAdjustmentValues(stack);
+  for (const layer of stack.layers) {
+    if (layer.type === 'style' && layer.enabled) {
+      addAdjustmentValues(values, layer.adjustments, layer.opacity * layer.strength);
+    }
+  }
+  return Object.fromEntries(
+    Object.entries(values).filter(([, value]) => Math.abs(value ?? 0) > 0.0001),
+  ) as AdjustmentValues;
+};
+
 export const setCollectiveAdjustments = (stack: LayerStack, adjustments: AdjustmentValues): LayerStack => ({
   ...stack,
   adjustments: Object.fromEntries(

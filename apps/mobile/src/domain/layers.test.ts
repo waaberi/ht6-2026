@@ -8,6 +8,7 @@ import {
   emptyLayerStack,
   makeAdjustmentLayer,
   mergeCollectiveAdjustments,
+  reusableStyleAdjustments,
   restoreVersion,
   setCollectiveAdjustments,
   setLayerOpacity,
@@ -105,6 +106,38 @@ test('collective edits stay on one photo stack and do not become defaults', () =
   assert.deepEqual(revised.adjustments, { exposure: 0.15, saturation: 0.2 });
   assert.deepEqual(emptyLayerStack().adjustments, {});
   assert.equal(revised.layers.length, 0);
+});
+
+test('reusable presets flatten global edits and enabled Looks without photo-specific layers', () => {
+  const stack = emptyLayerStack();
+  stack.adjustments = { exposure: 0.2, contrast: 0.1 };
+  stack.layers.push({
+    id: 'look',
+    type: 'style',
+    name: 'Warm',
+    enabled: true,
+    opacity: 0.5,
+    strength: 0.8,
+    styleProfileId: 'warm',
+    adjustments: { exposure: 0.25, temperature: 0.5 },
+    createdAt: '2026-01-01T00:00:00.000Z',
+  });
+  stack.layers.push({
+    id: 'face',
+    type: 'masked-adjustment',
+    name: 'Face',
+    enabled: true,
+    opacity: 1,
+    adjustments: { exposure: 0.4 },
+    mask: { type: 'subject' },
+    createdAt: '2026-01-01T00:00:00.000Z',
+  });
+
+  const reusable = reusableStyleAdjustments(stack);
+  assert.ok(Math.abs((reusable.exposure ?? 0) - 0.3) < 0.0001);
+  assert.equal(reusable.contrast, 0.1);
+  assert.equal(reusable.temperature, 0.2);
+  assert.equal(Object.keys(reusable).length, 3);
 });
 
 test('layer opacity is immutable and clamped to the supported range', () => {
