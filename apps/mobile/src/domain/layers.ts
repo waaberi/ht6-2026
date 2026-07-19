@@ -1,4 +1,4 @@
-import type { AdjustmentValues, CanvasTransform, Layer, LayerStack, PhotoRecord, PhotoVersion } from './types';
+import type { AdjustmentValues, CanvasTransform, Layer, LayerStack, LayerTranslation, PhotoRecord, PhotoVersion } from './types';
 import { identityCanvasTransform } from './types';
 
 const copyStack = (stack: LayerStack): LayerStack => JSON.parse(JSON.stringify(stack)) as LayerStack;
@@ -113,6 +113,39 @@ export const setLayerOpacity = (stack: LayerStack, layerId: string, opacity: num
   layers: stack.layers.map((layer) =>
     layer.id === layerId ? { ...layer, opacity: Math.max(0, Math.min(1, opacity)) } : layer,
   ),
+});
+
+export type TranslatableLayer = Extract<Layer, { type: 'image' | 'retouch' | 'generative-patch' }>;
+
+export const isTranslatableLayer = (layer: Layer): layer is TranslatableLayer => (
+  layer.type === 'image' || layer.type === 'retouch' || layer.type === 'generative-patch'
+);
+
+export const layerTranslation = (layer: Layer): LayerTranslation => ({
+  x: layer.translation?.x ?? 0,
+  y: layer.translation?.y ?? 0,
+});
+
+const clampLayerTranslation = (value: number) => Math.max(-1, Math.min(1, value));
+
+export const setLayerTranslation = (
+  stack: LayerStack,
+  layerId: string,
+  translation: LayerTranslation,
+): LayerStack => ({
+  ...stack,
+  canvasTransform: { ...stack.canvasTransform },
+  layers: stack.layers.map((layer) => (
+    layer.id === layerId && isTranslatableLayer(layer)
+      ? {
+          ...layer,
+          translation: {
+            x: clampLayerTranslation(translation.x),
+            y: clampLayerTranslation(translation.y),
+          },
+        }
+      : layer
+  )),
 });
 
 export const reorderLayer = (stack: LayerStack, layerId: string, direction: -1 | 1): LayerStack => {

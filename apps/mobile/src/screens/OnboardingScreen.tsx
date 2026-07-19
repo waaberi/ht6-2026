@@ -198,7 +198,7 @@ export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => 
                     <FeatureRow
                       icon="sparkles-outline"
                       title="Generate"
-                      detail="Remove distractions, add elements or expand the frame."
+                      detail="Amplify details or expand the frame with editable AI layers."
                     />
                     <FeatureRow
                       icon="color-palette-outline"

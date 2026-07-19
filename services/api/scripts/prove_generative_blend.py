@@ -13,7 +13,7 @@ import numpy as np
 from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageOps
 
 from exposure_api.generative import embed_localized_patch, extract_localized_patch, prepare_local_generation
-from exposure_api.models import GenerativePatchResult, LayerStack, Region
+from exposure_api.models import GenerativeLayerBatchResult, GenerativePatchResult, LayerStack, Region
 from exposure_api.providers import GeminiProvider
 from exposure_api.renderer import render_layer_stack
 
@@ -97,7 +97,7 @@ async def _request_endpoint(
     api_url: str,
     original_bytes: bytes,
     target: Region,
-    operation: Literal["remove", "add", "expand"],
+    operation: Literal["amplify", "expand"],
     prompt: str,
 ) -> GenerativePatchResult:
     data = {
@@ -117,7 +117,10 @@ async def _request_endpoint(
             data=data,
         )
         response.raise_for_status()
-    return GenerativePatchResult.model_validate(response.json())
+    batch = GenerativeLayerBatchResult.model_validate(response.json())
+    if len(batch.layers) != 1:
+        raise RuntimeError(f"Blend proof requires one generated layer, received {len(batch.layers)}")
+    return GenerativePatchResult.model_validate(batch.layers[0]).model_copy(update={"expansion": batch.expansion})
 
 
 async def _request_render_endpoint(
@@ -152,7 +155,7 @@ async def prove(
     *,
     offline: bool = False,
     api_url: str | None = None,
-    operation: Literal["remove", "add", "expand"] = "remove",
+    operation: Literal["amplify", "expand"] = "amplify",
     image_path: Path | None = None,
     target_override: Region | None = None,
     prompt_override: str | None = None,
@@ -164,20 +167,15 @@ async def prove(
         expected = None
         target = target_override or Region(x=0.35, y=0.35, width=0.3, height=0.3)
         prompt = prompt_override or {
-            "remove": "Remove the selected distraction and reconstruct the background naturally.",
-            "add": "Add the requested object naturally inside the selected area.",
+            "amplify": "Remove the selected distraction and reconstruct the background naturally.",
             "expand": "Continue the scene naturally into the new canvas edge.",
         }[operation]
     else:
         fixture_with_object, clean, target = _fixture()
-        if operation == "remove":
+        if operation == "amplify":
             original = fixture_with_object
             expected = clean
             prompt = "Remove the red ball and reconstruct the grass and horizon behind it."
-        elif operation == "add":
-            original = clean
-            expected = None
-            prompt = "Add a small bright red ball centered inside the target, resting on the grass."
         else:
             original = clean
             expected = None
@@ -423,7 +421,7 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=Path, default=Path("../../artifacts/generative-proof"))
     parser.add_argument("--offline", action="store_true", help="Use a deterministic noisy full-image candidate.")
     parser.add_argument("--api-url", help="Call the running API endpoint and verify its exact response payload.")
-    parser.add_argument("--operation", choices=("remove", "add", "expand"), default="remove")
+    parser.add_argument("--operation", choices=("amplify", "expand"), default="amplify")
     parser.add_argument("--image", type=Path, help="Use a real photograph instead of the synthetic fixture.")
     parser.add_argument("--target-json", help="Normalized target region for --image.")
     parser.add_argument("--prompt", help="Operation prompt for --image.")

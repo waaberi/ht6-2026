@@ -422,10 +422,23 @@ export const deleteGeneratedLayerAsset = (id: string) => {
   if (asset.exists) asset.delete();
 };
 
-export const saveImportedLayerAsset = async (id: string, sourceUri: string, mimeType = 'image/jpeg') => {
+export const saveImportedLayerAsset = async (id: string, sourceUri: string, mimeType?: string) => {
   const { layerAssetsDirectory } = ensureDirectories(getActiveOwnerId());
-  const extension = mimeType === 'image/png' ? 'png' : 'jpg';
+  const isPng = mimeType === 'image/png' || (!mimeType && /\.png(?:$|\?)/i.test(sourceUri));
+  const isJpeg = mimeType === 'image/jpeg' || (!mimeType && /\.jpe?g(?:$|\?)/i.test(sourceUri));
+  const extension = isPng ? 'png' : 'jpg';
   const asset = new File(layerAssetsDirectory, `${id}.${extension}`);
-  await new File(sourceUri).copy(asset);
+  if (isPng || isJpeg) {
+    await new File(sourceUri).copy(asset);
+  } else {
+    const context = ImageManipulator.manipulate(sourceUri);
+    const rendered = await context.renderAsync();
+    const normalized = await rendered.saveAsync({ compress: 0.95, format: SaveFormat.JPEG });
+    const temporary = new File(normalized.uri);
+    await temporary.copy(asset);
+    temporary.delete();
+  }
   return asset.uri;
 };
+
+export const deleteImportedLayerAsset = (uri: string) => deleteLocalFile(uri);

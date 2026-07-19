@@ -12,6 +12,9 @@ from PIL import Image, ImageFilter, ImageOps
 from .models import GenerativePatchResult, Region
 
 
+FocusedMaskIntent = Literal["cover-source", "candidate-detail"]
+
+
 LOCAL_CHANGE_THRESHOLD = 14
 MATERIAL_DRIFT_THRESHOLD = 32
 MAX_ADAPTIVE_THRESHOLD = 40
@@ -39,10 +42,16 @@ _PROMPT_COLOR_RGB: dict[str, tuple[tuple[int, int, int], ...]] = {
 }
 _DARK_INTENT_WORDS = {"black", "dark", "darken", "darkened", "night", "shadow", "silhouette"}
 _LIGHT_INTENT_WORDS = {"bright", "brighten", "brightened", "light", "white"}
+_REMOVAL_INTENT_WORDS = {"clean", "delete", "erase", "hide", "remove", "without"}
 
 
 def _prompt_words(prompt: str) -> set[str]:
     return set(re.findall(r"[a-z]+", prompt.lower()))
+
+
+def _focused_edit_intent(prompt: str) -> FocusedMaskIntent:
+    """Choose mask behavior from the prompt without exposing separate user modes."""
+    return "cover-source" if _REMOVAL_INTENT_WORDS & _prompt_words(prompt) else "candidate-detail"
 
 
 def _prompt_color_palette(prompt: str) -> np.ndarray | None:
@@ -56,7 +65,7 @@ def _intent_color_seeds(
     residual_delta: np.ndarray,
     allowed: np.ndarray,
     prompt: str,
-    operation: Literal["remove", "add"],
+    intent: FocusedMaskIntent,
     threshold: float,
 ) -> np.ndarray | None:
     """Locate pixels that move toward the color explicitly requested by the user.
@@ -78,7 +87,7 @@ def _intent_color_seeds(
         np.linalg.norm(candidate_rgb[..., None, :] - palette[None, None, ...], axis=3),
         axis=2,
     )
-    if operation == "add":
+    if intent == "candidate-detail":
         intended_distance = candidate_distance
         other_distance = original_distance
     else:
@@ -181,7 +190,7 @@ def _refine_focused_change(
     candidate_rgb: np.ndarray,
     residual_delta: np.ndarray,
     prompt: str,
-    operation: Literal["remove", "add"],
+    intent: FocusedMaskIntent,
     threshold: float,
     allowed_bounds: tuple[int, int, int, int],
 ) -> np.ndarray:
@@ -197,7 +206,7 @@ def _refine_focused_change(
         residual_delta,
         allowed,
         prompt,
-        operation,
+        intent,
         threshold,
     )
     minimum_seed_pixels = max(3, round(int(np.count_nonzero(allowed)) * 0.0002))
@@ -529,7 +538,7 @@ def extract_localized_patch(
     candidate_bytes: bytes,
     target: Region,
     *,
-    operation: Literal["remove", "add", "expand"] = "remove",
+    operation: Literal["amplify", "expand"] = "amplify",
     model: str,
     source_version_id: str,
     prompt: str = "",
@@ -588,7 +597,8 @@ def extract_localized_patch(
         mask = expansion_mask
     else:
         threshold = _adaptive_change_threshold(residual_delta, outside)
-        if operation in {"add", "remove"}:
+        if operation == "amplify":
+            edit_intent = _focused_edit_intent(prompt)
             # Image models often repaint texture throughout the requested box.
             # Seed the layer from the much stronger added/removed-object signal;
             # padding and feathering then bring in only nearby matching context
@@ -602,14 +612,14 @@ def extract_localized_patch(
                 patch_rgb_pixels,
                 residual_delta,
                 prompt,
-                operation,
+                edit_intent,
                 threshold,
                 (allowed_x0, allowed_y0, allowed_x1, allowed_y1),
             )
             mask = _clean_mask(
                 focused_change,
                 allowed,
-                cover_removed_source=operation == "remove",
+                cover_removed_source=edit_intent == "cover-source",
             )
             if mask.getbbox() is None:
                 # Subtle requested edits can have no high-contrast core.
@@ -623,14 +633,14 @@ def extract_localized_patch(
                     patch_rgb_pixels,
                     residual_delta,
                     prompt,
-                    operation,
+                    edit_intent,
                     threshold,
                     (allowed_x0, allowed_y0, allowed_x1, allowed_y1),
                 )
                 mask = _clean_mask(
                     subtle_change,
                     allowed,
-                    cover_removed_source=operation == "remove",
+                    cover_removed_source=edit_intent == "cover-source",
                 )
         else:
             mask = _clean_mask(residual_delta > threshold, allowed)

@@ -165,8 +165,7 @@ CoachTool = Literal[
     "adjust_masked",
     "crop",
     "straighten",
-    "remove",
-    "add",
+    "amplify",
     "expand",
     "retake",
 ]
@@ -175,8 +174,7 @@ DEFAULT_COACH_TOOLS: tuple[CoachTool, ...] = (
     "adjust_masked",
     "crop",
     "straighten",
-    "remove",
-    "add",
+    "amplify",
     "expand",
     "retake",
 )
@@ -268,14 +266,14 @@ class CoachAction(ApiModel):
             raise ValueError("Adjustment tools require adjustments")
         if self.tool not in {"adjust_global", "adjust_masked"} and self.adjustments is not None:
             raise ValueError("adjustments are only valid for adjustment tools")
-        if self.tool in {"adjust_masked", "remove", "add"} and self.target is None:
+        if self.tool in {"adjust_masked", "amplify"} and self.target is None:
             raise ValueError(f"{self.tool} requires an explicit target")
-        if self.tool not in {"adjust_masked", "remove", "add"} and self.target is not None:
-            raise ValueError("target is only valid for masked, remove, or add tools")
-        if self.tool == "add" and not self.prompt:
-            raise ValueError("add requires a prompt describing the element")
-        if self.tool not in {"remove", "add", "expand"} and self.prompt is not None:
-            raise ValueError("prompt is only valid for remove, add, or expand")
+        if self.tool not in {"adjust_masked", "amplify"} and self.target is not None:
+            raise ValueError("target is only valid for masked or amplify tools")
+        if self.tool == "amplify" and not self.prompt:
+            raise ValueError("amplify requires a prompt describing the edit")
+        if self.tool not in {"amplify", "expand"} and self.prompt is not None:
+            raise ValueError("prompt is only valid for amplify or expand")
         if self.tool == "crop":
             transform = self.canvas_transform or {}
             if set(transform) != {"crop"} or not isinstance(transform.get("crop"), dict):
@@ -367,4 +365,29 @@ class GenerativePatchResult(ApiModel):
     drift_score: float
     model: str
     source_version_id: str
+    expansion: CanvasExpansion | None = None
+
+
+class GenerativeLayerInstruction(ApiModel):
+    name: str = Field(min_length=1, max_length=48)
+    prompt: str = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_concise_name(self) -> "GenerativeLayerInstruction":
+        if len(self.name.split()) > 6:
+            raise ValueError("Generative layer names must be at most 6 words")
+        return self
+
+
+class GenerativeLayerPlan(ApiModel):
+    layers: list[GenerativeLayerInstruction] = Field(min_length=1, max_length=6)
+
+
+class GenerativeLayerResult(GenerativePatchResult):
+    name: str = Field(min_length=1, max_length=48)
+    prompt: str = Field(min_length=1, max_length=500)
+
+
+class GenerativeLayerBatchResult(ApiModel):
+    layers: list[GenerativeLayerResult] = Field(min_length=1, max_length=6)
     expansion: CanvasExpansion | None = None

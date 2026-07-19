@@ -109,7 +109,7 @@ export const askCoach = async (
       },
       layerStack: context.stack,
       selectedIssueId: context.selectedIssueId,
-      availableTools: ['adjust_global', 'adjust_masked', 'crop', 'straighten', 'remove', 'add', 'expand', 'retake'],
+      availableTools: ['adjust_global', 'adjust_masked', 'crop', 'straighten', 'amplify', 'expand', 'retake'],
     }),
   });
   return parseCoachResponse(await parseResponse<unknown>(response));
@@ -137,25 +137,31 @@ export const requestRender = async (
   return response.blob();
 };
 
-export type GenerativePatchResult = {
+export type GeneratedLayerResult = {
+  name: string;
+  prompt: string;
   patchBase64: string;
   maskBase64: string;
   target: Region;
   driftScore: number;
   model: string;
   sourceVersionId: string;
+};
+
+export type GenerativeLayerBatchResult = {
+  layers: GeneratedLayerResult[];
   expansion?: CanvasExpansion;
 };
 
-export const createGenerativePatch = async (
+export const createGenerativeLayers = async (
   photo: PhotoRecord,
   stack: LayerStack,
   target: Region,
   prompt: string,
-  operation: GenerativeOperation = 'remove',
+  operation: GenerativeOperation = 'amplify',
   expansionDirection: 'top' | 'right' | 'bottom' | 'left' = 'right',
   expansionFraction = 0.25,
-): Promise<GenerativePatchResult> => {
+): Promise<GenerativeLayerBatchResult> => {
   const form = new FormData();
   const original = await ensureLocalOriginal(photo);
   form.append('image', original as unknown as Blob, original.name);
@@ -177,7 +183,7 @@ export const createGenerativePatch = async (
   }
   form.append('asset_ids_json', JSON.stringify(assets.map((asset) => asset.id)));
   const response = await apiFetch('/v1/layers/generative', { method: 'POST', body: form });
-  return parseResponse<GenerativePatchResult>(response);
+  return parseResponse<GenerativeLayerBatchResult>(response);
 };
 
 export type PortfolioReview = {

@@ -152,7 +152,51 @@ def _overlay_alpha(
     return alpha.point(lambda value: round(value * opacity))
 
 
-def _composite_asset(base: Image.Image, layer: dict[str, Any], assets: dict[str, bytes]) -> Image.Image:
+def _layer_offset(
+    layer: dict[str, Any],
+    size: tuple[int, int],
+    applied_rotation_degrees: float = 0,
+) -> tuple[int, int]:
+    translation = layer.get("translation") or {}
+    try:
+        x = max(-1, min(1, float(translation.get("x", 0))))
+        y = max(-1, min(1, float(translation.get("y", 0))))
+    except (TypeError, ValueError):
+        return (0, 0)
+    if not math.isfinite(x) or not math.isfinite(y):
+        return (0, 0)
+    desired_x = x * size[0]
+    desired_y = y * size[1]
+    applied_rotation = math.radians(applied_rotation_degrees)
+    cosine = math.cos(applied_rotation)
+    sine = math.sin(applied_rotation)
+    return (
+        round(cosine * desired_x - sine * desired_y),
+        round(sine * desired_x + cosine * desired_y),
+    )
+
+
+def _place_overlay(overlay: Image.Image, size: tuple[int, int], position: tuple[int, int]) -> Image.Image:
+    x, y = position
+    canvas = Image.new("RGBA", size, (0, 0, 0, 0))
+    source_left = max(0, -x)
+    source_top = max(0, -y)
+    source_right = min(overlay.width, size[0] - x)
+    source_bottom = min(overlay.height, size[1] - y)
+    if source_right <= source_left or source_bottom <= source_top:
+        return canvas
+    visible = overlay.crop((source_left, source_top, source_right, source_bottom))
+    canvas.alpha_composite(visible, (max(0, x), max(0, y)))
+    return canvas
+
+
+def _composite_asset(
+    base: Image.Image,
+    layer: dict[str, Any],
+    assets: dict[str, bytes],
+    translation_canvas_size: tuple[int, int],
+    applied_rotation_degrees: float,
+) -> Image.Image:
     asset_id = layer.get("assetId") or layer.get("patchAssetId")
     if not asset_id or asset_id not in assets:
         return base
@@ -163,6 +207,10 @@ def _composite_asset(base: Image.Image, layer: dict[str, Any], assets: dict[str,
     overlay = overlay.resize(base.size, Image.Resampling.LANCZOS)
     alpha = _overlay_alpha(overlay, layer, assets, base.size)
     overlay.putalpha(alpha)
+    offset = _layer_offset(layer, translation_canvas_size, applied_rotation_degrees)
+    if offset != (0, 0):
+        overlay = _place_overlay(overlay, base.size, offset)
+        alpha = overlay.getchannel("A")
     base_rgb = base.convert("RGB")
     overlay_rgb = overlay.convert("RGB")
     blend_mode = layer.get("blendMode", "normal")
@@ -198,10 +246,10 @@ def _composite_canvas_asset(
     overlay = overlay.resize(snapshot_size, Image.Resampling.LANCZOS)
     alpha = _overlay_alpha(overlay, layer, assets, snapshot_size)
     overlay.putalpha(alpha)
-    x = current_pixels["left"] - snapshot_pixels["left"]
-    y = current_pixels["top"] - snapshot_pixels["top"]
-    canvas = Image.new("RGBA", base.size, (0, 0, 0, 0))
-    canvas.alpha_composite(overlay, (x, y))
+    offset_x, offset_y = _layer_offset(layer, base.size)
+    x = current_pixels["left"] - snapshot_pixels["left"] + offset_x
+    y = current_pixels["top"] - snapshot_pixels["top"] + offset_y
+    canvas = _place_overlay(overlay, base.size, (x, y))
     return Image.alpha_composite(base.convert("RGBA"), canvas).convert("RGB")
 
 
@@ -281,6 +329,12 @@ def render_layer_stack(image_bytes: bytes, stack: LayerStack, assets: dict[str, 
         rendered,
         {key: value for key, value in stack.canvas_transform.items() if key != "expansion"},
     ).size
+    expansion_pixels = resolve_canvas_expansion(current_expansion, content_size)
+    translation_canvas_size = (
+        content_size[0] + expansion_pixels["left"] + expansion_pixels["right"],
+        content_size[1] + expansion_pixels["top"] + expansion_pixels["bottom"],
+    )
+    applied_rotation_degrees = -float(stack.canvas_transform.get("rotationDegrees", 0) or 0)
     for layer in stack.layers:
         if not layer.get("enabled", True):
             continue
@@ -304,7 +358,13 @@ def render_layer_stack(image_bytes: bytes, stack: LayerStack, assets: dict[str, 
             mask = _mask_for(layer, rendered.size, assets).point(lambda value: round(value * opacity))
             rendered = Image.composite(adjusted, rendered, mask)
         elif layer_type in {"image", "retouch", "generative-patch"}:
-            rendered = _composite_asset(rendered, layer, assets)
+            rendered = _composite_asset(
+                rendered,
+                layer,
+                assets,
+                translation_canvas_size,
+                applied_rotation_degrees,
+            )
     if not canvas_applied:
         rendered = _apply_canvas_transform(rendered, stack.canvas_transform)
     # Collective sliders are a photo-wide final composition stage, not an

@@ -199,7 +199,7 @@ def test_thin_connected_edit_survives_noise_cleanup() -> None:
     assert patch.getpixel((20, 50))[3] == 0
 
 
-def test_add_isolates_the_new_object_from_repainted_background_texture() -> None:
+def test_amplify_addition_isolates_the_new_object_from_repainted_background_texture() -> None:
     original = Image.new("RGB", (100, 100), "#507050")
     candidate = original.copy()
     draw = ImageDraw.Draw(candidate)
@@ -210,7 +210,7 @@ def test_add_isolates_the_new_object_from_repainted_background_texture() -> None
         _png(original),
         _png(candidate),
         Region(x=0.2, y=0.2, width=0.6, height=0.6),
-        operation="add",
+        operation="amplify",
         model="fixture",
         source_version_id="v",
     )
@@ -243,7 +243,7 @@ def test_color_edit_keeps_both_eyes_and_discards_black_corner_and_unrelated_chan
         _png(original),
         _png(candidate),
         Region(x=0.1, y=0.1, width=0.8, height=0.75),
-        operation="add",
+        operation="amplify",
         model="fixture",
         source_version_id="v",
         prompt="Make both of my eyes red.",
@@ -265,7 +265,7 @@ def test_requested_black_corner_is_retained() -> None:
         _png(original),
         _png(candidate),
         Region(x=0.2, y=0.2, width=0.6, height=0.6),
-        operation="add",
+        operation="amplify",
         model="fixture",
         source_version_id="v",
         prompt="Add a black rectangular corner detail.",
@@ -275,7 +275,7 @@ def test_requested_black_corner_is_retained() -> None:
     assert patch.getpixel((32, 32))[3] > 245
 
 
-def test_remove_isolates_reconstructed_object_from_repainted_context() -> None:
+def test_amplify_removal_isolates_reconstructed_object_from_repainted_context() -> None:
     original = Image.new("RGB", (100, 100), "#507050")
     ImageDraw.Draw(original).rectangle((43, 35, 57, 65), fill="#e32636")
     candidate = Image.new("RGB", original.size, "#507050")
@@ -285,9 +285,10 @@ def test_remove_isolates_reconstructed_object_from_repainted_context() -> None:
         _png(original),
         _png(candidate),
         Region(x=0.2, y=0.2, width=0.6, height=0.6),
-        operation="remove",
+        operation="amplify",
         model="fixture",
         source_version_id="v",
+        prompt="Remove the red object.",
     )
     patch = Image.open(io.BytesIO(base64.b64decode(result.patch_base64))).convert("RGBA")
     alpha = np.asarray(patch.getchannel("A"))
@@ -306,8 +307,10 @@ def test_feather_falls_outside_removed_object_to_prevent_source_halo() -> None:
         _png(original),
         _png(candidate),
         Region(x=0.25, y=0.25, width=0.5, height=0.5),
+        operation="amplify",
         model="fixture",
         source_version_id="v",
+        prompt="Remove the red object.",
     )
     patch = Image.open(io.BytesIO(base64.b64decode(result.patch_base64))).convert("RGBA")
     composited = Image.alpha_composite(original.convert("RGBA"), patch).convert("RGB")

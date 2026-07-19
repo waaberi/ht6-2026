@@ -1,8 +1,10 @@
 import { randomUUID } from 'expo-crypto';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import Slider from '@react-native-community/slider';
+import * as DocumentPicker from 'expo-document-picker';
+import * as ImagePicker from 'expo-image-picker';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { PhotoCanvas } from '../components/PhotoCanvas';
@@ -10,7 +12,7 @@ import { AdjustmentSheet, type AdjustmentSection } from '../components/studio/Ad
 import { LooksPanel } from '../components/studio/LooksPanel';
 import { StudioToolRail, type StudioTool } from '../components/studio/StudioToolRail';
 import { colors } from '../components/theme';
-import { deleteGeneratedLayerAsset, saveGeneratedLayerAsset } from '../data/photoRepository';
+import { deleteGeneratedLayerAsset, deleteImportedLayerAsset, saveGeneratedLayerAsset, saveImportedLayerAsset } from '../data/photoRepository';
 import { recordRecommendationFeedback } from '../data/preferences';
 import { deleteStyleProfile, loadStyleProfiles, renameStyleProfile, saveStyleProfile, type SavedStyleProfile } from '../data/styleRepository';
 import { centeredCrop, restoreManualTransform, rotateClockwise, withStraighten } from '../domain/canvasTransforms';
@@ -22,7 +24,7 @@ import {
   type CoachEditPreview,
   type PreviewableCoachActionPlan,
 } from '../domain/coachHarness';
-import { collectiveAdjustmentValues, currentVersion, mergeCollectiveAdjustments, removeLayer, reorderLayer, reusableStyleAdjustments, setCollectiveAdjustments, setLayerOpacity, StalePhotoVersionError, toggleLayer } from '../domain/layers';
+import { appendLayer, collectiveAdjustmentValues, currentVersion, isTranslatableLayer, layerTranslation, mergeCollectiveAdjustments, removeLayer, reorderLayer, reusableStyleAdjustments, setCollectiveAdjustments, setLayerOpacity, setLayerTranslation, StalePhotoVersionError, toggleLayer, type TranslatableLayer } from '../domain/layers';
 import type {
   AdjustmentValues,
   CanvasTransform,
@@ -30,12 +32,14 @@ import type {
   CoachResponse,
   GenerativeOperation,
   GenerativePatchLayer,
+  ImageLayer,
   Issue,
+  LayerTranslation,
   LayerStack,
   Region,
   StyleLayer,
 } from '../domain/types';
-import { ApiUnavailableError, askCoach, createGenerativePatch } from '../services/api';
+import { ApiUnavailableError, askCoach, createGenerativeLayers } from '../services/api';
 import { exportAndShare } from '../services/export';
 import { persistPreferences, persistStyleProfile, syncStyleProfileDeletions } from '../services/sync';
 import { useExposure } from '../state/ExposureContext';
@@ -51,7 +55,7 @@ type GenerativeDraft = {
   sourceVersionId: string;
   label: string;
   stack: LayerStack;
-  layer: GenerativePatchLayer;
+  layers: GenerativePatchLayer[];
   recommendation?: Issue;
 };
 type CoachEditDraft = {
@@ -62,6 +66,12 @@ type CoachEditDraft = {
   recommendation?: Issue;
 };
 type PreviewComparison = 'before' | 'after';
+type ReusableLayerSource = {
+  sourceAssetId: string;
+  name: string;
+  uri: string;
+  mimeType: 'image/jpeg' | 'image/png';
+};
 
 const aspectLabel = (aspect: number) => {
   if (Math.abs(aspect - 1) < 0.001) return '1:1';
@@ -70,6 +80,11 @@ const aspectLabel = (aspect: number) => {
   if (Math.abs(aspect - 16 / 9) < 0.001) return '16:9';
   if (Math.abs(aspect - 9 / 16) < 0.001) return '9:16';
   return aspect.toFixed(2);
+};
+
+const layerNameFromFile = (name?: string | null) => {
+  const withoutExtension = name?.replace(/\.(jpe?g|png|heic|heif)$/i, '').trim();
+  return withoutExtension || 'Image layer';
 };
 
 const removeStyleLayers = (stack: LayerStack): LayerStack => ({
@@ -107,6 +122,7 @@ const applyStyleLayer = (
 export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRetake: () => void }) => {
   const {
     ownerId,
+    photos,
     selectedPhoto,
     analysis,
     analyzing,
@@ -128,14 +144,14 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   const [applying, setApplying] = useState(false);
   const [draftAdjustments, setDraftAdjustments] = useState<AdjustmentValues>({});
   const [assetBusy, setAssetBusy] = useState(false);
-  const [generativeOperation, setGenerativeOperation] = useState<GenerativeOperation>('remove');
-  const [generativePrompt, setGenerativePrompt] = useState('Remove the selected distraction and reconstruct the background.');
+  const [generativeOperation, setGenerativeOperation] = useState<GenerativeOperation>('amplify');
+  const [generativePrompt, setGenerativePrompt] = useState('');
   const [generativeTarget, setGenerativeTarget] = useState<Region>(CENTER_TARGET);
   const [generativeRecommendationId, setGenerativeRecommendationId] = useState<string>();
   const [expansionDirection, setExpansionDirection] = useState<ExpansionDirection>('right');
   const [expansionFraction, setExpansionFraction] = useState(0.25);
   const [generativeDraft, setGenerativeDraft] = useState<GenerativeDraft>();
-  const [generativePreviewLoaded, setGenerativePreviewLoaded] = useState(false);
+  const [generativePreviewLoadedLayerIds, setGenerativePreviewLoadedLayerIds] = useState<string[]>([]);
   const generativeDraftRef = useRef<GenerativeDraft | undefined>(undefined);
   const generativeCommitRef = useRef(false);
   const [coachEditDraft, setCoachEditDraft] = useState<CoachEditDraft>();
@@ -155,6 +171,10 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   const [presetBusy, setPresetBusy] = useState(false);
   const [draftTransform, setDraftTransform] = useState<CanvasTransform>(() => identityCanvasTransform());
   const [draftLayerOpacities, setDraftLayerOpacities] = useState<Record<string, number>>({});
+  const [draftLayerTranslations, setDraftLayerTranslations] = useState<Record<string, LayerTranslation>>({});
+  const [selectedLayerId, setSelectedLayerId] = useState<string>();
+  const [showLayerSources, setShowLayerSources] = useState(false);
+  const [layerImporting, setLayerImporting] = useState(false);
   const [layerBusyId, setLayerBusyId] = useState<string>();
   const transformCommitRef = useRef(false);
 
@@ -182,10 +202,34 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   const explicitRecommendation = generativeRecommendationId
     ? visibleIssues.find((issue) => issue.id === generativeRecommendationId)
     : undefined;
+  const reusableLayerSources = useMemo<ReusableLayerSource[]>(() => {
+    const seen = new Set<string>();
+    const sources: ReusableLayerSource[] = [];
+    for (const photo of photos) {
+      for (const photoVersion of [...photo.versions].reverse()) {
+        for (const layer of [...photoVersion.stack.layers].reverse()) {
+          if (layer.type !== 'image' || !layer.uri.startsWith('file:')) continue;
+          const sourceAssetId = layer.sourceAssetId ?? layer.assetId;
+          if (seen.has(sourceAssetId)) continue;
+          seen.add(sourceAssetId);
+          sources.push({
+            sourceAssetId,
+            name: layer.name,
+            uri: layer.uri,
+            mimeType: /\.png(?:$|\?)/i.test(layer.uri) ? 'image/png' : 'image/jpeg',
+          });
+          if (sources.length === 12) return sources;
+        }
+      }
+    }
+    return sources;
+  }, [photos]);
 
   const deleteDraftAssets = useCallback((draft: GenerativeDraft) => {
-    deleteGeneratedLayerAsset(draft.layer.patchAssetId);
-    deleteGeneratedLayerAsset(draft.layer.maskAssetId);
+    for (const layer of draft.layers) {
+      deleteGeneratedLayerAsset(layer.patchAssetId);
+      deleteGeneratedLayerAsset(layer.maskAssetId);
+    }
   }, []);
 
   const releaseGenerativeDraft = useCallback((deleteAssets: boolean) => {
@@ -194,7 +238,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     generativeDraftRef.current = undefined;
     if (mountedRef.current) {
       setGenerativeDraft(undefined);
-      setGenerativePreviewLoaded(false);
+      setGenerativePreviewLoadedLayerIds([]);
     }
   }, [deleteDraftAssets]);
 
@@ -270,6 +314,12 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     if (!version) return;
     setDraftTransform(version.stack.canvasTransform);
     setDraftLayerOpacities(Object.fromEntries(version.stack.layers.map((layer) => [layer.id, layer.opacity])));
+    setDraftLayerTranslations(Object.fromEntries(version.stack.layers.map((layer) => [layer.id, layerTranslation(layer)])));
+    setSelectedLayerId((current) => (
+      current && version.stack.layers.some((layer) => layer.id === current)
+        ? current
+        : [...version.stack.layers].reverse().find(isTranslatableLayer)?.id
+    ));
   }, [version?.id]);
 
   const previewStack = useMemo<LayerStack | undefined>(() => {
@@ -298,6 +348,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
           layers: transformedStack.layers.map((layer) => ({
             ...layer,
             opacity: draftLayerOpacities[layer.id] ?? layer.opacity,
+            translation: draftLayerTranslations[layer.id] ?? layer.translation,
           })),
         }
       : transformedStack;
@@ -309,7 +360,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
       appliedLookLayer?.id ?? lookDraftLayerId,
       appliedLookLayer?.createdAt ?? new Date().toISOString(),
     );
-  }, [appliedLookLayer?.createdAt, appliedLookLayer?.id, coachEditDraft, coachPreviewComparison, draftAdjustments, draftLayerOpacities, draftTransform, generativeDraft, lookDraftLayerId, lookStrength, selectedLook, selectedPhoto?.id, tool, version]);
+  }, [appliedLookLayer?.createdAt, appliedLookLayer?.id, coachEditDraft, coachPreviewComparison, draftAdjustments, draftLayerOpacities, draftLayerTranslations, draftTransform, generativeDraft, lookDraftLayerId, lookStrength, selectedLook, selectedPhoto?.id, tool, version]);
 
   const updateGenerativeTarget = useCallback((target: Region) => {
     setGenerativeTarget(target);
@@ -360,8 +411,8 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     setSelectedIssueId(undefined);
   };
 
-  const openGenerativeTool = (operation: GenerativeOperation, target: Region, prompt: string, recommendationIssueId?: string) => {
-    setGenerativeOperation(operation);
+  const openAmplifyTool = (target: Region, prompt: string, recommendationIssueId?: string) => {
+    setGenerativeOperation('amplify');
     setGenerativeTarget(target);
     setGenerativePrompt(prompt);
     setSelectedIssueId(recommendationIssueId);
@@ -413,8 +464,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
         },
       }, issue);
     } else if (issue.fix?.kind === 'retouch' || issue.fix?.kind === 'generative') {
-      openGenerativeTool(
-        issue.fix.kind === 'retouch' ? 'remove' : 'add',
+      openAmplifyTool(
         issue.location,
         issue.fix.kind === 'retouch'
           ? `Remove ${issue.title.toLowerCase()} and reconstruct the surrounding background.`
@@ -463,7 +513,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
       if (isPreviewableCoachActionPlan(plan)) {
         openCoachEditPreview(action.label, plan, selectedIssue);
       } else if (plan.kind === 'generative') {
-        openGenerativeTool(plan.operation, plan.target, plan.prompt, selectedIssue?.id);
+        openAmplifyTool(plan.target, plan.prompt, selectedIssue?.id);
       } else if (plan.kind === 'expand') {
         setExpansionDirection(plan.direction);
         setExpansionFraction(plan.fraction);
@@ -601,6 +651,100 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
       setLayerBusyId(undefined);
     }
   };
+
+  const commitLayerTranslation = async (layerId: string, translation: LayerTranslation) => {
+    if (layerBusyId) return;
+    const layer = version.stack.layers.find((candidate) => candidate.id === layerId);
+    if (!layer || !isTranslatableLayer(layer)) return;
+    const saved = layerTranslation(layer);
+    if (Math.abs(saved.x - translation.x) < 0.0001 && Math.abs(saved.y - translation.y) < 0.0001) {
+      setDraftLayerTranslations((current) => ({ ...current, [layerId]: saved }));
+      return;
+    }
+    setDraftLayerTranslations((current) => ({ ...current, [layerId]: translation }));
+    setLayerBusyId(layerId);
+    try {
+      const changed = await commit(
+        setLayerTranslation(version.stack, layerId, translation),
+        `Move ${layer.name}`,
+      );
+      if (!changed) setDraftLayerTranslations((current) => ({ ...current, [layerId]: saved }));
+    } finally {
+      setLayerBusyId(undefined);
+    }
+  };
+
+  const addImageLayerFromSource = async (source: { uri: string; name?: string | null; mimeType?: string; sourceAssetId?: string }) => {
+    const layerId = randomUUID();
+    const assetId = randomUUID();
+    let savedUri: string | undefined;
+    try {
+      savedUri = await saveImportedLayerAsset(assetId, source.uri, source.mimeType);
+      const name = layerNameFromFile(source.name);
+      const layer: ImageLayer = {
+        id: layerId,
+        type: 'image',
+        name,
+        enabled: true,
+        opacity: 1,
+        translation: { x: 0, y: 0 },
+        createdAt: new Date().toISOString(),
+        assetId,
+        sourceAssetId: source.sourceAssetId ?? assetId,
+        uri: savedUri,
+        transform: identityCanvasTransform(),
+        blendMode: 'normal',
+      };
+      const changed = await commit(appendLayer(version.stack, layer), `Add ${name}`);
+      if (!changed) {
+        deleteImportedLayerAsset(savedUri);
+        return;
+      }
+      setSelectedLayerId(layerId);
+      setShowLayerSources(false);
+      setMessage(`${name} added. Drag on the canvas to position it.`);
+    } catch (error) {
+      if (savedUri) deleteImportedLayerAsset(savedUri);
+      setMessage(error instanceof Error ? error.message : 'The image layer could not be added.');
+    }
+  };
+
+  const runLayerImport = async (
+    pick: () => Promise<{ uri: string; name?: string | null; mimeType?: string; sourceAssetId?: string } | undefined>,
+  ) => {
+    if (layerImporting) return;
+    setLayerImporting(true);
+    setMessage(undefined);
+    try {
+      const source = await pick();
+      if (source) await addImageLayerFromSource(source);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'The image layer could not be opened.');
+    } finally {
+      setLayerImporting(false);
+    }
+  };
+
+  const importLayerFromPhotos = () => void runLayerImport(async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: 'images',
+      allowsMultipleSelection: false,
+      quality: 1,
+    });
+    if (result.canceled) return undefined;
+    const asset = result.assets[0];
+    return { uri: asset.uri, name: asset.fileName, mimeType: asset.mimeType };
+  });
+
+  const importLayerFromFiles = () => void runLayerImport(async () => {
+    const result = await DocumentPicker.getDocumentAsync({
+      type: ['image/jpeg', 'image/png', 'image/heic', 'image/heif'],
+      copyToCacheDirectory: true,
+    });
+    if (result.canceled) return undefined;
+    const asset = result.assets[0];
+    return { uri: asset.uri, name: asset.name, mimeType: asset.mimeType };
+  });
 
   const chooseLook = async (look: SavedStyleProfile) => {
     if (lookCommitRef.current) return;
@@ -801,15 +945,14 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   const generateEdit = async () => {
     if (!generativePrompt.trim()) return;
     if (generativeDraftRef.current) releaseGenerativeDraft(true);
-    setGenerativePreviewLoaded(false);
+    setGenerativePreviewLoadedLayerIds([]);
     const sourceVersionId = version.id;
     const sourcePhotoId = selectedPhoto.id;
     setMessage(undefined);
     setAssetBusy(true);
-    let patchAssetId: string | undefined;
-    let maskAssetId: string | undefined;
+    const savedAssetIds: string[] = [];
     try {
-      const result = await createGenerativePatch(
+      const result = await createGenerativeLayers(
         selectedPhoto,
         version.stack,
         generativeTarget,
@@ -818,55 +961,59 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
         expansionDirection,
         expansionFraction,
       );
-      if (result.sourceVersionId !== sourceVersionId) throw new StalePhotoVersionError();
+      if (!result.layers.length) throw new Error('The generation returned no editable layers.');
+      if (result.layers.some((layer) => layer.sourceVersionId !== sourceVersionId)) {
+        throw new StalePhotoVersionError();
+      }
       if (!mountedRef.current) return;
       if (
         currentSelectionRef.current.photoId !== sourcePhotoId
         || currentSelectionRef.current.versionId !== sourceVersionId
       ) throw new StalePhotoVersionError();
-      patchAssetId = randomUUID();
-      maskAssetId = randomUUID();
-      const patchUri = saveGeneratedLayerAsset(patchAssetId, result.patchBase64);
-      const maskUri = saveGeneratedLayerAsset(maskAssetId, result.maskBase64);
-      const label = generativeOperation === 'remove'
-        ? `Removed ${explicitRecommendation?.title.toLowerCase() ?? 'selection'}`
-        : generativeOperation === 'expand'
-          ? `Expanded ${expansionDirection}`
-          : `Added ${generativePrompt.trim().slice(0, 42)}`;
-      const generatedLayer: GenerativePatchLayer = {
-        id: randomUUID(), type: 'generative-patch', name: label, enabled: true, opacity: 1,
-        createdAt: new Date().toISOString(), patchAssetId, patchUri, maskAssetId, maskUri,
-        target: result.target, prompt: generativePrompt.trim(),
-        canvasSpace: true,
-        canvasExpansion: result.expansion ?? version.stack.canvasTransform.expansion ?? { top: 0, right: 0, bottom: 0, left: 0 },
-        provenance: { model: result.model, sourceVersionId: result.sourceVersionId, driftScore: result.driftScore },
-      };
+      const generatedLayers = result.layers.map((generated): GenerativePatchLayer => {
+        const patchAssetId = randomUUID();
+        const maskAssetId = randomUUID();
+        savedAssetIds.push(patchAssetId, maskAssetId);
+        const patchUri = saveGeneratedLayerAsset(patchAssetId, generated.patchBase64);
+        const maskUri = saveGeneratedLayerAsset(maskAssetId, generated.maskBase64);
+        return {
+          id: randomUUID(), type: 'generative-patch', name: generated.name, enabled: true, opacity: 1,
+          createdAt: new Date().toISOString(), patchAssetId, patchUri, maskAssetId, maskUri,
+          target: generated.target, prompt: generated.prompt,
+          canvasSpace: true,
+          canvasExpansion: result.expansion ?? version.stack.canvasTransform.expansion ?? { top: 0, right: 0, bottom: 0, left: 0 },
+          provenance: { model: generated.model, sourceVersionId: generated.sourceVersionId, driftScore: generated.driftScore },
+        };
+      });
+      const label = generativeOperation === 'expand'
+        ? `Expanded ${expansionDirection}`
+        : generatedLayers.length === 1
+          ? `Amplified ${generatedLayers[0].name}`
+          : `Amplified ${generatedLayers.length} layers`;
       let candidateStack: LayerStack;
       if (generativeOperation === 'expand') {
         if (!result.expansion) throw new Error('The expansion result did not include canvas geometry.');
         candidateStack = {
           ...version.stack,
           canvasTransform: { ...version.stack.canvasTransform, expansion: result.expansion },
-          layers: [...version.stack.layers, generatedLayer],
+          layers: [...version.stack.layers, ...generatedLayers],
         };
       } else {
-        candidateStack = { ...version.stack, layers: [...version.stack.layers, generatedLayer] };
+        candidateStack = { ...version.stack, layers: [...version.stack.layers, ...generatedLayers] };
       }
       const draft: GenerativeDraft = {
         sourcePhotoId,
         sourceVersionId,
         label,
         stack: candidateStack,
-        layer: generatedLayer,
+        layers: generatedLayers,
         recommendation: explicitRecommendation,
       };
       generativeDraftRef.current = draft;
       setGenerativeDraft(draft);
-      patchAssetId = undefined;
-      maskAssetId = undefined;
+      savedAssetIds.length = 0;
     } catch (error) {
-      if (patchAssetId) deleteGeneratedLayerAsset(patchAssetId);
-      if (maskAssetId) deleteGeneratedLayerAsset(maskAssetId);
+      for (const assetId of savedAssetIds) deleteGeneratedLayerAsset(assetId);
       if (mountedRef.current) setMessage(error instanceof Error ? error.message : 'AI edit failed.');
     } finally {
       if (mountedRef.current) setAssetBusy(false);
@@ -876,8 +1023,8 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   const acceptGenerativeDraft = async () => {
     const draft = generativeDraftRef.current;
     if (!draft) return;
-    if (!generativePreviewLoaded) {
-      setMessage('The generated layer is still loading. Wait for the preview before accepting it.');
+    if (!draft.layers.every((layer) => generativePreviewLoadedLayerIds.includes(layer.id))) {
+      setMessage('The generated layers are still loading. Wait for the preview before accepting them.');
       return;
     }
     setMessage(undefined);
@@ -903,15 +1050,20 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
 
   const handleGenerativeLayerReady = useCallback((layerId: string) => {
     const draft = generativeDraftRef.current;
-    if (!draft || draft.layer.id !== layerId) return;
+    if (!draft || !draft.layers.some((layer) => layer.id === layerId)) return;
     console.info('[generative-preview] decoded image layer');
-    setGenerativePreviewLoaded(true);
-    setMessage('Generated layer loaded. Review the visible change before accepting it.');
+    setGenerativePreviewLoadedLayerIds((current) => {
+      const next = [...new Set([...current, layerId])];
+      if (draft.layers.every((layer) => next.includes(layer.id))) {
+        setMessage(`${draft.layers.length} generated ${draft.layers.length === 1 ? 'layer is' : 'layers are'} ready to review.`);
+      }
+      return next;
+    });
   }, []);
 
   const handleGenerativeLayerError = useCallback((layerId: string, error: Error) => {
     const draft = generativeDraftRef.current;
-    if (!draft || draft.layer.id !== layerId) return;
+    if (!draft || !draft.layers.some((layer) => layer.id === layerId)) return;
     console.error('[generative-preview] image layer decode failed', error.message);
     releaseGenerativeDraft(true);
     setMessage('The generated PNG could not be decoded on this device, so the preview was discarded.');
@@ -921,6 +1073,11 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     setSelectedIssueId(issue.id);
     setGenerativeTarget(issue.location);
   };
+
+  const generativePreviewReady = Boolean(
+    generativeDraft
+    && generativeDraft.layers.every((layer) => generativePreviewLoadedLayerIds.includes(layer.id)),
+  );
 
   return (
     <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
@@ -941,8 +1098,8 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
           uri={selectedPhoto.analysisProxyUri}
           stack={previewStack}
           analysis={analysis}
-          target={tool === 'ai' && generativeOperation !== 'expand' ? generativeTarget : undefined}
-          onTargetChange={tool === 'ai' && generativeOperation !== 'expand' ? updateGenerativeTarget : undefined}
+          target={tool === 'ai' && generativeOperation === 'amplify' ? generativeTarget : undefined}
+          onTargetChange={tool === 'ai' && generativeOperation === 'amplify' ? updateGenerativeTarget : undefined}
           showIssues={tool === 'coach' && !coachEditDraft}
           editingCrop={tool === 'adjust' && adjustmentSection === 'crop'}
           cropRegion={draftTransform.crop}
@@ -952,6 +1109,11 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
           onImageSizeChange={handlePreviewImageSizeChange}
           onGeneratedLayerReady={handleGenerativeLayerReady}
           onGeneratedLayerError={handleGenerativeLayerError}
+          movableLayerId={tool === 'layers' ? selectedLayerId : undefined}
+          onLayerTranslationChange={tool === 'layers' ? (layerId, translation, shouldCommit) => {
+            setDraftLayerTranslations((current) => ({ ...current, [layerId]: translation }));
+            if (shouldCommit) void commitLayerTranslation(layerId, translation);
+          } : undefined}
         />
       </View>
 
@@ -1055,16 +1217,16 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
               busy={assetBusy}
               expansionDirection={expansionDirection}
               expansionFraction={expansionFraction}
-              previewLoading={Boolean(generativeDraft && !generativePreviewLoaded)}
-              previewReady={Boolean(generativeDraft && generativePreviewLoaded)}
+              previewLoading={Boolean(generativeDraft && !generativePreviewReady)}
+              previewReady={generativePreviewReady}
+              previewLayerCount={generativeDraft?.layers.length ?? 0}
+              loadedLayerCount={generativePreviewLoadedLayerIds.length}
               onOperationChange={(operation) => {
                 setGenerativeOperation(operation);
                 setGenerativeRecommendationId(undefined);
-                setGenerativePrompt(operation === 'remove'
-                  ? 'Remove the selected distraction and reconstruct the background.'
-                  : operation === 'expand'
-                    ? 'Extend the scene naturally into the new canvas.'
-                    : '');
+                setGenerativePrompt(operation === 'expand'
+                  ? 'Extend the scene naturally into the new canvas.'
+                  : '');
               }}
               onPromptChange={setGenerativePrompt}
               onTargetChange={(target, issueId) => {
@@ -1086,9 +1248,21 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
             <LayersPanel
               stack={version.stack}
               opacities={draftLayerOpacities}
+              translations={draftLayerTranslations}
+              selectedLayerId={selectedLayerId}
+              reusableSources={reusableLayerSources}
+              showSources={showLayerSources}
+              importing={layerImporting}
               busyLayerId={layerBusyId}
+              onSelectLayer={setSelectedLayerId}
+              onToggleSources={() => setShowLayerSources((current) => !current)}
+              onImportPhotos={importLayerFromPhotos}
+              onImportFiles={importLayerFromFiles}
+              onReuseSource={(source) => void runLayerImport(async () => source)}
               onOpacityChange={(layerId, opacity) => setDraftLayerOpacities((current) => ({ ...current, [layerId]: opacity }))}
               onOpacityCommit={(layerId, opacity) => void commitLayerOpacity(layerId, opacity)}
+              onTranslationChange={(layerId, translation) => setDraftLayerTranslations((current) => ({ ...current, [layerId]: translation }))}
+              onTranslationCommit={(layerId, translation) => void commitLayerTranslation(layerId, translation)}
               onCommit={commit}
             />
           ) : null}
@@ -1109,6 +1283,8 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
             if (generativeDraft && nextTool !== 'ai') releaseGenerativeDraft(true);
             if (tool === 'layers' && nextTool !== 'layers') {
               setDraftLayerOpacities(Object.fromEntries(version.stack.layers.map((layer) => [layer.id, layer.opacity])));
+              setDraftLayerTranslations(Object.fromEntries(version.stack.layers.map((layer) => [layer.id, layerTranslation(layer)])));
+              setShowLayerSources(false);
             }
             if (nextTool === 'ai') setGenerativeRecommendationId(undefined);
             setTool(nextTool);
@@ -1316,6 +1492,8 @@ const AiPanel = ({
   expansionFraction,
   previewLoading,
   previewReady,
+  previewLayerCount,
+  loadedLayerCount,
   onOperationChange,
   onPromptChange,
   onTargetChange,
@@ -1334,6 +1512,8 @@ const AiPanel = ({
   expansionFraction: number;
   previewLoading: boolean;
   previewReady: boolean;
+  previewLayerCount: number;
+  loadedLayerCount: number;
   onOperationChange: (operation: GenerativeOperation) => void;
   onPromptChange: (value: string) => void;
   onTargetChange: (target: Region, issueId?: string) => void;
@@ -1346,9 +1526,11 @@ const AiPanel = ({
   const selected = (candidate: Region) => JSON.stringify(candidate) === JSON.stringify(target);
   if (previewLoading) {
     return (
-      <View accessibilityLabel="Loading generated image layer" style={styles.previewLoading}>
+      <View accessibilityLabel="Loading generated image layers" style={styles.previewLoading}>
         <ActivityIndicator color={colors.primary} />
-        <Text style={styles.previewLoadingText}>Loading the generated image layer…</Text>
+        <Text style={styles.previewLoadingText}>
+          Loading {loadedLayerCount} of {previewLayerCount} generated {previewLayerCount === 1 ? 'layer' : 'layers'}…
+        </Text>
       </View>
     );
   }
@@ -1359,7 +1541,7 @@ const AiPanel = ({
           <Text style={styles.previewDiscardText}>Discard</Text>
         </Pressable>
         <Pressable accessibilityRole="button" style={[styles.previewAccept, busy && styles.disabled]} onPress={onAccept} disabled={busy}>
-          {busy ? <ActivityIndicator color={colors.onPrimary} /> : <Text style={styles.previewAcceptText}>Accept</Text>}
+          {busy ? <ActivityIndicator color={colors.onPrimary} /> : <Text style={styles.previewAcceptText}>Accept {previewLayerCount === 1 ? 'layer' : `${previewLayerCount} layers`}</Text>}
         </Pressable>
       </View>
     );
@@ -1367,7 +1549,7 @@ const AiPanel = ({
   return (
     <>
       <View style={styles.segmented}>
-        {(['remove', 'add', 'expand'] as GenerativeOperation[]).map((item) => (
+        {(['amplify', 'expand'] as GenerativeOperation[]).map((item) => (
           <Pressable key={item} accessibilityRole="tab" accessibilityState={{ selected: operation === item }} style={[styles.segment, operation === item && styles.segmentActive]} onPress={() => onOperationChange(item)}>
             <Text style={[styles.segmentText, operation === item && styles.segmentTextActive]}>{item[0].toUpperCase() + item.slice(1)}</Text>
           </Pressable>
@@ -1425,17 +1607,20 @@ const AiPanel = ({
         </ScrollView>
       )}
 
+      {operation === 'amplify' ? (
+        <Text style={styles.generativeHint}>Each independent change becomes its own editable layer.</Text>
+      ) : null}
       <TextInput
-        accessibilityLabel={operation === 'remove' ? 'Removal instructions' : operation === 'expand' ? 'Expansion instructions' : 'Element to add'}
+        accessibilityLabel={operation === 'expand' ? 'Expansion instructions' : 'Amplify instructions'}
         value={prompt}
         onChangeText={onPromptChange}
         multiline
-        placeholder={operation === 'remove' ? 'What should be removed?' : operation === 'expand' ? 'How should the scene continue?' : 'What should be added?'}
+        placeholder={operation === 'expand' ? 'How should the scene continue?' : 'Describe every change you want…'}
         placeholderTextColor={colors.textSecondary}
         style={styles.promptInput}
       />
       <Pressable accessibilityRole="button" style={[styles.primary, (busy || !prompt.trim()) && styles.disabled]} onPress={onGenerate} disabled={busy || !prompt.trim()}>
-        {busy ? <ActivityIndicator color={colors.onPrimary} /> : <Text style={styles.primaryText}>{operation === 'remove' ? 'Preview removal' : operation === 'expand' ? 'Preview expansion' : 'Preview addition'}</Text>}
+        {busy ? <ActivityIndicator color={colors.onPrimary} /> : <Text style={styles.primaryText}>{operation === 'expand' ? 'Preview expansion' : 'Preview layers'}</Text>}
       </Pressable>
     </>
   );
@@ -1467,31 +1652,140 @@ const MorePanel = ({ onSelect }: { onSelect: (tool: StudioTool) => void }) => (
 const LayersPanel = ({
   stack,
   opacities,
+  translations,
+  selectedLayerId,
+  reusableSources,
+  showSources,
+  importing,
   busyLayerId,
+  onSelectLayer,
+  onToggleSources,
+  onImportPhotos,
+  onImportFiles,
+  onReuseSource,
   onOpacityChange,
   onOpacityCommit,
+  onTranslationChange,
+  onTranslationCommit,
   onCommit,
 }: {
   stack: LayerStack;
   opacities: Record<string, number>;
+  translations: Record<string, LayerTranslation>;
+  selectedLayerId?: string;
+  reusableSources: ReusableLayerSource[];
+  showSources: boolean;
+  importing: boolean;
   busyLayerId?: string;
+  onSelectLayer: (layerId: string) => void;
+  onToggleSources: () => void;
+  onImportPhotos: () => void;
+  onImportFiles: () => void;
+  onReuseSource: (source: ReusableLayerSource) => void;
   onOpacityChange: (layerId: string, opacity: number) => void;
   onOpacityCommit: (layerId: string, opacity: number) => void;
+  onTranslationChange: (layerId: string, translation: LayerTranslation) => void;
+  onTranslationCommit: (layerId: string, translation: LayerTranslation) => void;
   onCommit: (stack: LayerStack, label: string) => Promise<boolean>;
 }) => (
   <>
-    {stack.layers.length === 0 ? <Text style={styles.placeholder}>No edits yet</Text> : null}
+    <View style={styles.layersHeader}>
+      <View style={styles.layerInfo}>
+        <Text style={styles.layersTitle}>Layer stack</Text>
+        <Text style={styles.caption}>Tap a layer to edit it. Drag spatial layers on the photo.</Text>
+      </View>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={showSources ? 'Close image layer sources' : 'Add image layer'}
+        style={({ pressed }) => [styles.addLayerButton, pressed && styles.controlPressed]}
+        onPress={onToggleSources}
+        disabled={importing}
+      >
+        {importing
+          ? <ActivityIndicator size="small" color={colors.onPrimary} />
+          : <MaterialCommunityIcons name={showSources ? 'close' : 'plus'} size={22} color={colors.onPrimary} />}
+        <Text style={styles.addLayerButtonText}>{showSources ? 'Close' : 'Add image'}</Text>
+      </Pressable>
+    </View>
+
+    {showSources ? (
+      <View style={styles.layerSources}>
+        <View style={styles.sourceActions}>
+          <Pressable
+            accessibilityRole="button"
+            style={({ pressed }) => [styles.sourceAction, pressed && styles.controlPressed]}
+            onPress={onImportPhotos}
+            disabled={importing}
+          >
+            <MaterialCommunityIcons name="image-multiple-outline" size={22} color={colors.text} />
+            <Text style={styles.sourceActionText}>Photos</Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            style={({ pressed }) => [styles.sourceAction, pressed && styles.controlPressed]}
+            onPress={onImportFiles}
+            disabled={importing}
+          >
+            <MaterialCommunityIcons name="folder-outline" size={22} color={colors.text} />
+            <Text style={styles.sourceActionText}>Files</Text>
+          </Pressable>
+        </View>
+        <Text style={styles.sourceTitle}>Previously used</Text>
+        {reusableSources.length > 0 ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.recentSources}
+          >
+            {reusableSources.map((source) => (
+              <Pressable
+                key={source.sourceAssetId}
+                accessibilityRole="button"
+                accessibilityLabel={`Reuse ${source.name}`}
+                style={({ pressed }) => [styles.recentSource, pressed && styles.controlPressed]}
+                onPress={() => onReuseSource(source)}
+                disabled={importing}
+              >
+                <Image accessibilityIgnoresInvertColors source={{ uri: source.uri }} resizeMode="cover" style={styles.sourceThumbnail} />
+                <Text numberOfLines={1} style={styles.sourceName}>{source.name}</Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        ) : (
+          <Text style={styles.sourceEmpty}>Images you add will appear here for quick reuse.</Text>
+        )}
+      </View>
+    ) : null}
+
+    {stack.layers.length === 0 ? (
+      <View style={styles.layerEmpty}>
+        <MaterialCommunityIcons name="layers-plus" size={30} color={colors.textSecondary} />
+        <Text style={styles.layerEmptyTitle}>Your original stays untouched</Text>
+        <Text style={styles.sourceEmpty}>Add an image as a new layer, then position and blend it independently.</Text>
+      </View>
+    ) : null}
     {[...stack.layers].reverse().map((layer, reverseIndex) => {
       const index = stack.layers.length - 1 - reverseIndex;
       const opacity = opacities[layer.id] ?? layer.opacity;
+      const translation = translations[layer.id] ?? layerTranslation(layer);
+      const selected = selectedLayerId === layer.id;
       const busy = Boolean(busyLayerId);
       return (
-        <View key={layer.id} style={styles.layerBlock}>
+        <View key={layer.id} style={[styles.layerBlock, selected && styles.layerBlockSelected]}>
           <View style={[styles.layerRow, !layer.enabled && styles.layerDisabled]}>
             <Pressable accessibilityRole="switch" accessibilityState={{ checked: layer.enabled }} accessibilityLabel={`${layer.enabled ? 'Hide' : 'Show'} ${layer.name}`} style={styles.layerControl} disabled={busy} onPress={() => onCommit(toggleLayer(stack, layer.id), `${layer.enabled ? 'Hide' : 'Show'} ${layer.name}`)}>
               <MaterialCommunityIcons name={layer.enabled ? 'eye' : 'eye-off-outline'} size={20} color={colors.primary} />
             </Pressable>
-            <View style={styles.layerInfo}><Text numberOfLines={1} style={styles.layerName}>{layer.name}</Text></View>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityState={{ selected }}
+              accessibilityLabel={`Edit ${layer.name}`}
+              style={styles.layerSelect}
+              onPress={() => onSelectLayer(layer.id)}
+            >
+              <Text numberOfLines={1} style={styles.layerName}>{layer.name}</Text>
+              <Text style={styles.layerKind}>{layer.type.replace(/-/g, ' ')}</Text>
+            </Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel={`Move ${layer.name} up`} style={styles.layerControl} onPress={() => onCommit(reorderLayer(stack, layer.id, 1), `Move ${layer.name}`)} disabled={index === stack.layers.length - 1 || busy}><MaterialCommunityIcons name="arrow-up" size={20} color={colors.text} /></Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel={`Move ${layer.name} down`} style={styles.layerControl} onPress={() => onCommit(reorderLayer(stack, layer.id, -1), `Move ${layer.name}`)} disabled={index === 0 || busy}><MaterialCommunityIcons name="arrow-down" size={20} color={colors.text} /></Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${layer.name}`} style={styles.layerControl} onPress={() => onCommit(removeLayer(stack, layer.id), `Remove ${layer.name}`)} disabled={busy}><MaterialCommunityIcons name="close" size={22} color={colors.danger} /></Pressable>
@@ -1514,11 +1808,86 @@ const LayersPanel = ({
               thumbTintColor={colors.text}
             />
           </View>
+          {selected ? (
+            isTranslatableLayer(layer) ? (
+              <LayerPositionControls
+                layer={layer}
+                translation={translation}
+                disabled={busy || !layer.enabled}
+                onChange={(next) => onTranslationChange(layer.id, next)}
+                onCommit={(next) => onTranslationCommit(layer.id, next)}
+              />
+            ) : (
+              <Text style={styles.globalLayerHint}>This layer affects the full image, so it has no canvas position.</Text>
+            )
+          ) : null}
         </View>
       );
     })}
   </>
 );
+
+const LayerPositionControls = ({
+  layer,
+  translation,
+  disabled,
+  onChange,
+  onCommit,
+}: {
+  layer: TranslatableLayer;
+  translation: LayerTranslation;
+  disabled: boolean;
+  onChange: (translation: LayerTranslation) => void;
+  onCommit: (translation: LayerTranslation) => void;
+}) => {
+  const axis = (key: keyof LayerTranslation, label: string) => (
+    <View style={styles.positionAxis}>
+      <Text style={styles.axisLabel}>{label}</Text>
+      <Slider
+        style={styles.positionSlider}
+        accessibilityLabel={`${layer.name} ${label.toLowerCase()} position`}
+        accessibilityHint="Move the layer from minus one canvas length to plus one canvas length"
+        minimumValue={-1}
+        maximumValue={1}
+        step={0.01}
+        value={translation[key]}
+        disabled={disabled}
+        onValueChange={(value) => onChange({ ...translation, [key]: value })}
+        onSlidingComplete={(value) => onCommit({ ...translation, [key]: value })}
+        minimumTrackTintColor={colors.primary}
+        maximumTrackTintColor={colors.outline}
+        thumbTintColor={colors.text}
+      />
+      <Text style={styles.axisValue}>{Math.round(translation[key] * 100)}%</Text>
+    </View>
+  );
+  return (
+    <View style={styles.positionControls}>
+      <View style={styles.positionHeader}>
+        <View style={styles.layerInfo}>
+          <Text style={styles.positionTitle}>Position</Text>
+          <Text style={styles.positionHint}>{disabled ? 'Show this layer to position it.' : 'Drag on the photo, or use the sliders for precision.'}</Text>
+        </View>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`Center ${layer.name}`}
+          style={({ pressed }) => [styles.centerLayerButton, pressed && styles.controlPressed, (disabled || (translation.x === 0 && translation.y === 0)) && styles.disabled]}
+          disabled={disabled || (translation.x === 0 && translation.y === 0)}
+          onPress={() => {
+            const centered = { x: 0, y: 0 };
+            onChange(centered);
+            onCommit(centered);
+          }}
+        >
+          <MaterialCommunityIcons name="image-filter-center-focus" size={19} color={colors.text} />
+          <Text style={styles.centerLayerText}>Center</Text>
+        </Pressable>
+      </View>
+      {axis('x', 'X')}
+      {axis('y', 'Y')}
+    </View>
+  );
+};
 
 const HistoryPanel = ({ photo, onRestore }: { photo: NonNullable<ReturnType<typeof useExposure>['selectedPhoto']>; onRestore: (versionId: string) => Promise<void> }) => (
   <>
@@ -1571,6 +1940,7 @@ const styles = StyleSheet.create({
   directionGrid: { flexDirection: 'row', gap: 8, marginBottom: 12 },
   directionButton: { flex: 1, minHeight: 48, borderRadius: 8, borderWidth: 1, borderColor: colors.outline, backgroundColor: colors.controlSurface, alignItems: 'center', justifyContent: 'center' },
   expansionAmountRow: { minHeight: 48, flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
+  generativeHint: { color: colors.textSecondary, fontSize: 12, lineHeight: 18, marginBottom: 10 },
   focusedFinding: { paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.separator },
   findingTitle: { flex: 1, color: colors.text, fontSize: 13, fontWeight: '800' },
   findingActions: { flexDirection: 'row', gap: 18 },
@@ -1604,15 +1974,45 @@ const styles = StyleSheet.create({
   moreGrid: { flexDirection: 'row', gap: 12 },
   moreButton: { flex: 1, minHeight: 72, borderRadius: 10, borderWidth: 1, borderColor: colors.outline, backgroundColor: colors.controlSurface, alignItems: 'center', justifyContent: 'center', gap: 6 },
   moreButtonText: { color: colors.onControlSurface, fontSize: 13, fontWeight: '700' },
-  layerBlock: { paddingBottom: 8, borderBottomColor: colors.separator, borderBottomWidth: StyleSheet.hairlineWidth },
+  layersHeader: { minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 12 },
+  layersTitle: { color: colors.text, fontSize: 16, lineHeight: 21, fontWeight: '800', marginBottom: 2 },
+  addLayerButton: { minWidth: 106, minHeight: 48, paddingHorizontal: 12, borderRadius: 8, backgroundColor: colors.primary, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 },
+  addLayerButtonText: { color: colors.onPrimary, fontSize: 12, fontWeight: '800' },
+  layerSources: { padding: 12, borderRadius: 10, backgroundColor: colors.background, marginBottom: 12 },
+  sourceActions: { flexDirection: 'row', gap: 10, marginBottom: 14 },
+  sourceAction: { flex: 1, minHeight: 52, borderRadius: 8, borderWidth: 1, borderColor: colors.outline, backgroundColor: colors.controlSurface, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  sourceActionText: { color: colors.onControlSurface, fontSize: 13, fontWeight: '800' },
+  sourceTitle: { color: colors.text, fontSize: 12, lineHeight: 17, fontWeight: '800', marginBottom: 8 },
+  recentSources: { gap: 10, paddingRight: 4 },
+  recentSource: { width: 104, minHeight: 96, borderRadius: 8, padding: 6, backgroundColor: colors.controlSurface },
+  sourceThumbnail: { width: 92, height: 58, borderRadius: 6, backgroundColor: colors.surfaceStrong, marginBottom: 5 },
+  sourceName: { color: colors.onControlSurface, fontSize: 11, lineHeight: 15, fontWeight: '700' },
+  sourceEmpty: { color: colors.textSecondary, fontSize: 12, lineHeight: 17 },
+  layerEmpty: { minHeight: 144, alignItems: 'center', justifyContent: 'center', gap: 7, paddingHorizontal: 24 },
+  layerEmptyTitle: { color: colors.text, fontSize: 14, lineHeight: 19, fontWeight: '800', textAlign: 'center' },
+  layerBlock: { paddingHorizontal: 8, paddingBottom: 8, borderBottomColor: colors.separator, borderBottomWidth: StyleSheet.hairlineWidth },
+  layerBlockSelected: { backgroundColor: colors.surfaceStrong, borderRadius: 10 },
   layerRow: { minHeight: 54, flexDirection: 'row', gap: 2, alignItems: 'center' },
   layerDisabled: { opacity: 0.48 },
   layerControl: { width: 48, height: 48, alignItems: 'center', justifyContent: 'center' },
+  layerSelect: { flex: 1, minHeight: 48, justifyContent: 'center', paddingHorizontal: 4 },
   layerInfo: { flex: 1 },
   layerName: { color: colors.text, fontSize: 13, fontWeight: '700' },
+  layerKind: { color: colors.text, fontSize: 11, lineHeight: 15, marginTop: 2, textTransform: 'capitalize' },
   opacityRow: { minHeight: 48, flexDirection: 'row', alignItems: 'center', paddingLeft: 48, paddingRight: 4 },
-  opacityValue: { width: 42, color: colors.textSecondary, fontSize: 11, fontVariant: ['tabular-nums'] },
+  opacityValue: { width: 42, color: colors.text, fontSize: 11, fontVariant: ['tabular-nums'] },
   opacitySlider: { flex: 1, height: 48 },
+  positionControls: { marginLeft: 48, marginRight: 4, paddingTop: 10, paddingBottom: 4, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.separator },
+  positionHeader: { minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  positionTitle: { color: colors.text, fontSize: 12, lineHeight: 17, fontWeight: '800' },
+  positionHint: { color: colors.text, fontSize: 11, lineHeight: 15, marginTop: 1 },
+  centerLayerButton: { minWidth: 78, minHeight: 44, paddingHorizontal: 8, borderRadius: 8, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, backgroundColor: colors.controlSurface },
+  centerLayerText: { color: colors.onControlSurface, fontSize: 11, fontWeight: '800' },
+  positionAxis: { minHeight: 48, flexDirection: 'row', alignItems: 'center' },
+  axisLabel: { width: 22, color: colors.text, fontSize: 12, fontWeight: '800' },
+  positionSlider: { flex: 1, height: 48 },
+  axisValue: { width: 44, color: colors.text, fontSize: 11, textAlign: 'right', fontVariant: ['tabular-nums'] },
+  globalLayerHint: { color: colors.text, fontSize: 11, lineHeight: 16, marginLeft: 48, paddingBottom: 8 },
   historyRow: { minHeight: 62, flexDirection: 'row', alignItems: 'center', gap: 10, borderBottomColor: colors.separator, borderBottomWidth: StyleSheet.hairlineWidth },
   timelineDot: { width: 10, height: 10, borderRadius: 5, borderWidth: 2, borderColor: colors.textSecondary },
   timelineDotActive: { borderColor: colors.primary, backgroundColor: colors.primary },

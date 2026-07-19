@@ -79,7 +79,7 @@ Each committed version stores an immutable layer-stack snapshot. Render caches c
 | Saliency and distractions | Saliency, edge density, and color/brightness outliers |
 | Main subject and background | Deterministic saliency with Gemini segmentation fallback |
 | Mood and photographic intent | Gemini semantic reasoning |
-| Generative add/remove/expand | Nano Banana donor-patch generation |
+| Generative Amplify/Expand | Nano Banana donor-patch generation |
 
 Deterministic and Gemini analysis run concurrently. Gemini receives the proxy plus measured evidence and returns validated structured output.
 
@@ -127,15 +127,16 @@ Issue-to-edit mapping:
 Generative workflow:
 
 1. Render the current original-plus-layers composition.
-2. For bounded add/remove edits, crop enough surrounding context to make the selected real-world subject visually unambiguous; send that crop and its remapped target to Nano Banana. Send the full expanded canvas for outpainting.
-3. Align the generated candidate with the input.
-4. Choose extraction by edit geometry instead of forcing every result through a diff: use a localized Lab difference map for bounded add/remove edits, but use the complete target band for canvas expansion because every pixel there is newly generated.
-5. For localized edits, use pixels outside the intended region to estimate global color drift and codec noise, then restrict the edit alpha to the exact intended region.
-6. Remove isolated noise, pad the solid donor area, and feather the localized mask into matching context so source edges cannot bleed through.
-7. For expansion, keep the new target band solid and complete so dark generated pixels are not mistaken for an unchanged black placeholder, then crossfade across a narrow declared overlap on the old canvas edge to prevent a hard seam.
-8. Extract the selected generated pixels as an RGBA donor patch, map crop-local patches back onto the full canvas, and store the patch and mask separately.
-9. Superpose the patch as a generative or retouch layer.
-10. Record unrelated drift diagnostically, but never composite generated pixels outside the intended mask or replace the full photograph.
+2. Decompose each Amplify prompt into the minimum set of independently controllable visual instructions; generate and name one layer per instruction.
+3. For bounded Amplify edits, crop enough surrounding context to make the selected real-world subject visually unambiguous; send that crop and its remapped target to Nano Banana. Send the full expanded canvas for outpainting.
+4. Align each generated candidate with the input.
+5. Choose extraction by edit geometry instead of forcing every result through a diff: use a localized Lab difference map for bounded Amplify layers, but use the complete target band for canvas expansion because every pixel there is newly generated.
+6. For localized edits, use pixels outside the intended region to estimate global color drift and codec noise, then restrict the edit alpha to the exact intended region.
+7. Remove isolated noise, pad the solid donor area, and feather the localized mask into matching context so source edges cannot bleed through.
+8. For expansion, keep the new target band solid and complete so dark generated pixels are not mistaken for an unchanged black placeholder, then crossfade across a narrow declared overlap on the old canvas edge to prevent a hard seam.
+9. Extract the selected generated pixels as RGBA donor patches, map crop-local patches back onto the full canvas, and store each patch and mask separately.
+10. Superpose every patch as its own named generative layer.
+11. Record unrelated drift diagnostically, but never composite generated pixels outside the intended mask or replace the full photograph.
 
 The generated image is never substituted for the photograph; it only supplies localized pixels to add or cover. [Nano Banana image editing](https://ai.google.dev/gemini-api/docs/image-generation).
 

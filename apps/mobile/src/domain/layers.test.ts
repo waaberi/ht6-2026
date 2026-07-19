@@ -8,10 +8,13 @@ import {
   emptyLayerStack,
   makeAdjustmentLayer,
   mergeCollectiveAdjustments,
+  isTranslatableLayer,
+  layerTranslation,
   reusableStyleAdjustments,
   restoreVersion,
   setCollectiveAdjustments,
   setLayerOpacity,
+  setLayerTranslation,
   StalePhotoVersionError,
 } from './layers';
 import type { PhotoRecord } from './types';
@@ -150,4 +153,41 @@ test('layer opacity is immutable and clamped to the supported range', () => {
   assert.equal(stack.layers[0].opacity, 1);
   assert.equal(faded.layers[0].opacity, 0.35);
   assert.equal(clamped.layers[0].opacity, 1);
+});
+
+test('pixel layers can be positioned without mutating their saved source stack', () => {
+  const stack = emptyLayerStack();
+  stack.layers.push({
+    id: 'generated',
+    type: 'generative-patch',
+    name: 'Generated sky',
+    enabled: true,
+    opacity: 1,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    patchAssetId: 'patch',
+    patchUri: 'file:///patch.png',
+    maskAssetId: 'mask',
+    target: { x: 0, y: 0, width: 1, height: 1 },
+    prompt: 'extend the sky',
+    provenance: { model: 'fixture', sourceVersionId: 'original', driftScore: 0 },
+  });
+
+  const moved = setLayerTranslation(stack, 'generated', { x: 0.18, y: -0.24 });
+  const clamped = setLayerTranslation(moved, 'generated', { x: 2, y: -2 });
+
+  assert.equal(isTranslatableLayer(stack.layers[0]), true);
+  assert.deepEqual(layerTranslation(stack.layers[0]), { x: 0, y: 0 });
+  assert.deepEqual(layerTranslation(moved.layers[0]), { x: 0.18, y: -0.24 });
+  assert.deepEqual(layerTranslation(clamped.layers[0]), { x: 1, y: -1 });
+});
+
+test('non-spatial layers ignore translation changes', () => {
+  const stack = emptyLayerStack();
+  stack.layers.push(makeAdjustmentLayer('adjustment', { exposure: 0.3 }));
+
+  const moved = setLayerTranslation(stack, 'adjustment', { x: 0.4, y: 0.3 });
+
+  assert.equal(isTranslatableLayer(moved.layers[0]), false);
+  assert.deepEqual(layerTranslation(moved.layers[0]), { x: 0, y: 0 });
+  assert.equal(moved.layers[0].translation, undefined);
 });
