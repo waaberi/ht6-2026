@@ -55,7 +55,7 @@ def test_analysis_cache_does_not_cross_authenticated_users(
         semantic_model = "local-fixture"
 
     async def validate(access_token: str) -> dict[str, str]:
-        return {"id": f"user-{access_token}"}
+        return {"sub": f"auth0|user-{access_token}"}
 
     original_analyze = main.analyze_deterministic
     calls: list[str] = []
@@ -68,7 +68,7 @@ def test_analysis_cache_does_not_cross_authenticated_users(
     monkeypatch.setattr(main, "provider", LocalProvider())
     monkeypatch.setattr(main, "analyze_deterministic", counted_analyze)
     monkeypatch.setattr(auth, "AUTH_REQUIRED", True)
-    monkeypatch.setattr(auth, "validate_supabase_access_token", validate)
+    monkeypatch.setattr(auth, "validate_auth0_access_token", validate)
     checksum = hashlib.sha256(image_bytes).hexdigest()
 
     def request(version_id: str, token: str):

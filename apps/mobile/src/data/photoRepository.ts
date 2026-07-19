@@ -6,18 +6,25 @@ import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
 import { layerAssetsForStacks } from '../domain/assets';
 import { emptyLayerStack } from '../domain/layers';
 import {
+  claimGuestPhotos,
+  claimableGuestPhotos,
+  mergeOfflinePhotos,
+  type GuestPhotoClaims,
+} from '../domain/offlineMerge';
+import {
   GUEST_OWNER_ID,
   assertOwnerMatches,
   ownerDirectorySegment,
   ownerStorageSegment,
   type OwnerId,
 } from '../domain/ownership';
-import type { PhotoRecord } from '../domain/types';
+import type { Layer, PhotoRecord } from '../domain/types';
 import { getActiveOwnerId } from './ownerScope';
 
 const PHOTO_INDEX_KEY = 'exposure.photos.index.v2';
 const PHOTO_DELETIONS_KEY = 'exposure.photos.deletions.v1';
 const LEGACY_PHOTOS_KEY = 'exposure.photos.v1';
+const GUEST_PHOTO_CLAIMS_KEY = 'exposure.guest.photo-claims.v1';
 const legacyPhotoKey = (id: string) => `exposure.photo.v2.${id}`;
 const ownerKeys = (ownerId: OwnerId) => {
   const owner = ownerStorageSegment(ownerId);
@@ -72,6 +79,80 @@ const ensureDirectories = (ownerId: OwnerId) => {
   directories.thumbnailsDirectory.create({ intermediates: true, idempotent: true });
   directories.layerAssetsDirectory.create({ intermediates: true, idempotent: true });
   return directories;
+};
+
+const copyPrivateFile = async (sourceUri: string, destination: File) => {
+  if (destination.exists) return destination.uri;
+  const source = new File(sourceUri);
+  if (!source.exists) throw new Error(`A local photo file is missing: ${sourceUri}`);
+  await source.copy(destination);
+  return destination.uri;
+};
+
+const withCopiedAssetUris = (layer: Layer, assetUris: Map<string, string>): Layer => {
+  if (layer.type === 'image') {
+    return { ...layer, uri: assetUris.get(layer.assetId) ?? layer.uri };
+  }
+  if (layer.type === 'retouch' || layer.type === 'generative-patch') {
+    return {
+      ...layer,
+      patchUri: assetUris.get(layer.patchAssetId) ?? layer.patchUri,
+      maskUri: assetUris.get(layer.maskAssetId) ?? layer.maskUri,
+    };
+  }
+  if (layer.type === 'masked-adjustment' && layer.mask.assetId) {
+    return { ...layer, mask: { ...layer.mask, uri: assetUris.get(layer.mask.assetId) ?? layer.mask.uri } };
+  }
+  return layer;
+};
+
+const copyGuestPhotoToOwner = async (photo: PhotoRecord, ownerId: OwnerId): Promise<PhotoRecord> => {
+  assertOwnerMatches(photo.ownerId, GUEST_OWNER_ID);
+  const { originalsDirectory, proxiesDirectory, thumbnailsDirectory, layerAssetsDirectory } = ensureDirectories(ownerId);
+  const original = new File(originalsDirectory, `${photo.id}.${extensionFor(photo.originalName, photo.originalMimeType)}`);
+  const proxy = new File(proxiesDirectory, `${photo.id}.jpg`);
+  const thumbnail = new File(thumbnailsDirectory, `${photo.id}.jpg`);
+  const [originalUri, analysisProxyUri, thumbnailUri] = await Promise.all([
+    copyPrivateFile(photo.originalUri, original),
+    copyPrivateFile(photo.analysisProxyUri, proxy),
+    copyPrivateFile(photo.thumbnailUri, thumbnail),
+  ]);
+
+  const assetUris = new Map<string, string>();
+  for (const asset of layerAssetsForStacks(photo.versions.map((version) => version.stack))) {
+    const destination = new File(layerAssetsDirectory, `${asset.id}.${asset.mimeType === 'image/png' ? 'png' : 'jpg'}`);
+    assetUris.set(asset.id, await copyPrivateFile(asset.uri, destination));
+  }
+
+  return {
+    ...photo,
+    ownerId,
+    originalUri,
+    remoteOriginalPath: undefined,
+    analysisProxyUri,
+    thumbnailUri,
+    versions: photo.versions.map((version) => ({
+      ...version,
+      stack: {
+        ...version.stack,
+        layers: version.stack.layers.map((layer) => withCopiedAssetUris(layer, assetUris)),
+      },
+    })),
+    syncState: 'queued',
+  };
+};
+
+const readGuestPhotoClaims = async (): Promise<GuestPhotoClaims> => {
+  const serialized = await AsyncStorage.getItem(GUEST_PHOTO_CLAIMS_KEY);
+  if (!serialized) return {};
+  try {
+    const parsed = JSON.parse(serialized) as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+    );
+  } catch {
+    return {};
+  }
 };
 
 const extensionFor = (name: string, mimeType: string) => {
@@ -162,6 +243,34 @@ export const savePhoto = (photo: PhotoRecord, ownerId: OwnerId = photo.ownerId) 
   assertOwnerMatches(photo.ownerId, ownerId);
   await AsyncStorage.setItem(ownerKeys(ownerId).photo(photo.id), JSON.stringify(photo));
 });
+
+export const migrateGuestPhotosToOwner = async (ownerId: OwnerId): Promise<PhotoRecord[]> => {
+  if (ownerId === GUEST_OWNER_ID) return listPhotos(GUEST_OWNER_ID);
+  const [guestPhotos, accountPhotos, deletedPhotoIds, claims] = await Promise.all([
+    listPhotos(GUEST_OWNER_ID),
+    listPhotos(ownerId),
+    listPhotoDeletionIds(ownerId),
+    readGuestPhotoClaims(),
+  ]);
+  const claimable = claimableGuestPhotos(
+    guestPhotos,
+    claims,
+    ownerId,
+    deletedPhotoIds,
+    accountPhotos.map((photo) => photo.id),
+  );
+  if (claimable.length === 0) return accountPhotos;
+
+  const offlineCopies: PhotoRecord[] = [];
+  for (const photo of claimable) offlineCopies.push(await copyGuestPhotoToOwner(photo, ownerId));
+  const merged = mergeOfflinePhotos(ownerId, accountPhotos, offlineCopies);
+  await savePhotos(merged, ownerId);
+  await AsyncStorage.setItem(
+    GUEST_PHOTO_CLAIMS_KEY,
+    JSON.stringify(claimGuestPhotos(claims, claimable.map((photo) => photo.id), ownerId)),
+  );
+  return merged;
+};
 
 export const listPhotoDeletionIds = async (ownerId: OwnerId = getActiveOwnerId()): Promise<string[]> => {
   const keys = ownerKeys(ownerId);

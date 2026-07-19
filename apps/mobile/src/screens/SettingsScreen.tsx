@@ -1,5 +1,4 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import type { Session } from '@supabase/supabase-js';
 import { DeviceMotion } from 'expo-sensors';
 import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
@@ -15,31 +14,30 @@ import {
 } from '../data/preferences';
 import { resolveApiUrl } from '../domain/apiConfiguration';
 import { captureControlsForSession } from '../domain/cameraControls';
-import { sendMagicLink, signOut } from '../services/auth';
-import { supabase } from '../services/supabase';
 import { persistPreferences as persistPreferencesToCloud } from '../services/sync';
+import { useAuthSession } from '../state/AuthContext';
 import { useExposure } from '../state/ExposureContext';
 
 export const SettingsScreen = () => {
   const insets = useSafeAreaInsets();
+  const { configured: authConfigured, signIn: signInWithAuth0, signOut: signOutWithAuth0, user } = useAuthSession();
   const configuredApiUrl = resolveApiUrl(
     process.env.EXPO_PUBLIC_LAUNCHER_API_URL,
     process.env.EXPO_PUBLIC_API_URL,
     undefined,
   );
   const { ownerId, photos, syncing, syncError, lastSyncedAt, synchronize } = useExposure();
-  const [session, setSession] = useState<Session | null>(null);
-  const [email, setEmail] = useState('');
   const [preferences, setPreferences] = useState<ExposurePreferences>(defaultPreferences);
   const [message, setMessage] = useState<string>();
   const [cameraMessage, setCameraMessage] = useState<string>();
   const preferencesRef = useRef(defaultPreferences);
   const ownerIdRef = useRef(ownerId);
   const loadedPreferencesOwnerIdRef = useRef<string | undefined>(undefined);
-  const sessionRef = useRef<Session | null>(null);
+  const userRef = useRef(user);
   const preferenceWriteQueue = useRef(Promise.resolve());
 
   ownerIdRef.current = ownerId;
+  userRef.current = user;
 
   useEffect(() => {
     let stale = false;
@@ -58,24 +56,13 @@ export const SettingsScreen = () => {
     };
   }, [ownerId, lastSyncedAt]);
 
-  useEffect(() => {
-    if (!supabase) return;
-    const updateSession = (next: Session | null) => {
-      sessionRef.current = next;
-      setSession(next);
-    };
-    void supabase.auth.getSession().then(({ data }) => updateSession(data.session));
-    const { data } = supabase.auth.onAuthStateChange((_event, next) => updateSession(next));
-    return () => data.subscription.unsubscribe();
-  }, []);
-
   const savePreferences = (next: ExposurePreferences) => {
     const targetOwnerId = ownerIdRef.current;
     preferencesRef.current = next;
     setPreferences(next);
     preferenceWriteQueue.current = preferenceWriteQueue.current.then(async () => {
       await persistPreferences(next, targetOwnerId);
-      if (sessionRef.current?.user.id === targetOwnerId) {
+      if (userRef.current?.sub === targetOwnerId) {
         await persistPreferencesToCloud(next, targetOwnerId);
       }
     }).catch((caught: unknown) => {
@@ -121,8 +108,7 @@ export const SettingsScreen = () => {
   const signIn = async () => {
     setMessage(undefined);
     try {
-      await sendMagicLink(email);
-      setMessage('Open the link in your email to finish signing in.');
+      await signInWithAuth0();
     } catch (caught) {
       setMessage(caught instanceof Error ? caught.message : 'Sign-in failed.');
     }
@@ -147,7 +133,7 @@ export const SettingsScreen = () => {
       <Text style={styles.title}>Settings</Text>
 
       <Section title="Account & sync">
-        {session ? (
+        {user ? (
           <>
             <View style={styles.accountRow}>
               <View style={[styles.statusIcon, cloudReady && styles.statusIconReady]}>
@@ -158,7 +144,7 @@ export const SettingsScreen = () => {
                 />
               </View>
               <View style={styles.accountText}>
-                <Text numberOfLines={1} style={styles.accountEmail}>{session.user.email}</Text>
+                <Text numberOfLines={1} style={styles.accountEmail}>{user.email ?? user.name ?? 'Signed in'}</Text>
                 <Text style={styles.accountStatus}>{cloudStatus}</Text>
               </View>
             </View>
@@ -177,7 +163,7 @@ export const SettingsScreen = () => {
               <Pressable
                 accessibilityRole="button"
                 style={({ pressed }) => [styles.textButton, styles.accountActionsButton, pressed && styles.controlPressed]}
-                onPress={() => void signOut().catch((caught: unknown) => setMessage(caught instanceof Error ? caught.message : 'Sign-out failed.'))}
+                onPress={() => void signOutWithAuth0().catch((caught: unknown) => setMessage(caught instanceof Error ? caught.message : 'Sign-out failed.'))}
               >
                 <Text style={styles.textButtonLabel}>Sign out</Text>
               </Pressable>
@@ -185,29 +171,16 @@ export const SettingsScreen = () => {
             {syncError ? <Text accessibilityRole="alert" style={styles.message}>{syncError}</Text> : null}
           </>
         ) : (
-          <>
-            <TextInput
-              value={email}
-              onChangeText={setEmail}
-              keyboardType="email-address"
-              autoCapitalize="none"
-              autoCorrect={false}
-              autoComplete="email"
-              returnKeyType="send"
-              onSubmitEditing={signIn}
-              placeholder="Email address"
-              placeholderTextColor={colors.textSecondary}
-              style={styles.input}
-              accessibilityLabel="Email address"
-            />
-            <Pressable
-              accessibilityRole="button"
-              style={({ pressed }) => [styles.primaryButton, pressed && styles.primaryPressed]}
-              onPress={signIn}
-            >
-              <Text style={styles.primaryButtonText}>Send sign-in link</Text>
-            </Pressable>
-          </>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityHint="Opens secure Auth0 login with Google and email options"
+            accessibilityState={{ disabled: !authConfigured }}
+            disabled={!authConfigured}
+            style={({ pressed }) => [styles.primaryButton, pressed && styles.primaryPressed, !authConfigured && styles.disabledRow]}
+            onPress={signIn}
+          >
+            <Text style={styles.primaryButtonText}>Sign in with Google or email</Text>
+          </Pressable>
         )}
         {message ? <Text accessibilityLiveRegion="polite" style={styles.message}>{message}</Text> : null}
       </Section>

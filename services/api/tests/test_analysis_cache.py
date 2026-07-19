@@ -45,10 +45,10 @@ def test_analysis_cache_is_bounded_and_refreshes_recent_entries(monkeypatch: pyt
 
 
 def test_analysis_cache_scope_hashes_authenticated_identity() -> None:
-    first = main._analysis_cache_scope({"id": "user-one"})
-    second = main._analysis_cache_scope({"id": "user-two"})
+    first = main._analysis_cache_scope({"sub": "auth0|user-one"})
+    second = main._analysis_cache_scope({"sub": "google-oauth2|user-two"})
 
-    assert first == f"user:{hashlib.sha256(b'user-one').hexdigest()}"
+    assert first == f"user:{hashlib.sha256(b'auth0|user-one').hexdigest()}"
     assert first != second
     assert main._analysis_cache_scope(None) == "anonymous"
 

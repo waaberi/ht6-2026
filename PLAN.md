@@ -24,7 +24,7 @@ Hard requirements:
 Use:
 
 - Expo SDK 57/React Native for the Android application.
-- Supabase for accounts, Postgres, private Storage, Realtime status, preferences, and history.
+- Auth0 for accounts; Supabase for Postgres, private Storage, Realtime status, preferences, and history.
 - One FastAPI service for deterministic analysis, Gemini orchestration, authoritative rendering, and generative diff extraction.
 
 The source of truth for every photo is:

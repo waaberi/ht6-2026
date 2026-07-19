@@ -37,6 +37,7 @@ import {
   type CameraPreferences,
   updateCameraPreferences,
 } from '../data/preferences';
+import { getCurrentAuthUser } from '../services/auth';
 import { supabase } from '../services/supabase';
 import { persistPreferences as persistPreferencesToCloud } from '../services/sync';
 import { useExposure } from '../state/ExposureContext';
@@ -110,8 +111,7 @@ export const CameraScreen = ({ onOpenStudio, onOpenLibrary }: CameraScreenProps)
   const persistCamera = useCallback(async (changes: Partial<CameraPreferences>) => {
     await updateCameraPreferences(changes);
     if (!supabase) return;
-    const { data } = await supabase.auth.getSession();
-    if (data.session) await persistPreferencesToCloud(await loadPreferences());
+    if (getCurrentAuthUser()) await persistPreferencesToCloud(await loadPreferences());
   }, []);
 
   const updateCamera = useCallback((changes: Partial<CameraPreferences>) => {

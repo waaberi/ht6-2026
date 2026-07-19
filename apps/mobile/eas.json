@@ -4,6 +4,7 @@
   },
   "build": {
     "debug": {
+      "developmentClient": true,
       "distribution": "internal",
       "android": {
         "buildType": "apk"

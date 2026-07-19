@@ -22,12 +22,12 @@ import {
 } from '../domain/syncReliability';
 import type { AnalysisResult, Layer, PhotoRecord, PhotoVersion } from '../domain/types';
 import type { PortfolioReview, StyleProfileResult } from './api';
+import { getCurrentAuthUser } from './auth';
 import { supabase } from './supabase';
 
 const requireSessionOwner = async (ownerId: OwnerId) => {
   if (!supabase) throw new Error('Cloud sync is not configured.');
-  const { data } = await supabase.auth.getSession();
-  return assertAuthenticatedOwner(ownerId, data.session?.user.id);
+  return assertAuthenticatedOwner(ownerId, getCurrentAuthUser()?.sub);
 };
 
 const uploadOnce = async (bucket: string, path: string, uri: string, contentType: string) => {

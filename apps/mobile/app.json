@@ -49,9 +49,18 @@
           "motionPermission": "Allow Exposure to show a live camera level"
         }
       ],
+      [
+        "react-native-auth0",
+        {
+          "domain": "dev-40ogr4b5dnzkfkp3.us.auth0.com",
+          "customScheme": "exposure"
+        }
+      ],
       "./plugins/withAndroidNinja",
       "./plugins/withAndroidCleartextTraffic",
-      "expo-video"
+      "expo-video",
+      "expo-web-browser",
+      "expo-secure-store"
     ]
   }
 }

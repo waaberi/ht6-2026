@@ -5,12 +5,11 @@ import * as Sharing from 'expo-sharing';
 import { loadPreferences } from '../data/preferences';
 import type { LayerStack, PhotoRecord } from '../domain/types';
 import { requestRender } from './api';
-import { supabase } from './supabase';
+import { getCurrentAuthUser } from './auth';
 
 export const exportAndShare = async (photo: PhotoRecord, stack: LayerStack) => {
   if (!(await Sharing.isAvailableAsync())) throw new Error('Sharing is unavailable on this device.');
-  const session = await supabase?.auth.getSession();
-  if (!session?.data.session) throw new Error('Sign in to export this photo.');
+  if (!getCurrentAuthUser()) throw new Error('Sign in to export this photo.');
   const preferences = await loadPreferences();
   const rendered = await requestRender(photo, stack, {
     includeMetadata: preferences.exportMetadata,

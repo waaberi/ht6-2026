@@ -5,6 +5,7 @@ from typing import Any
 
 import httpx
 import pytest
+from auth0_api_python.errors import VerifyAccessTokenError
 from fastapi import HTTPException
 
 from exposure_api import auth
@@ -59,7 +60,7 @@ def test_required_auth_rejects_missing_bearer_token(
     assert response.headers["www-authenticate"] == "Bearer"
 
 
-def test_required_auth_accepts_a_remotely_validated_bearer_token(
+def test_required_auth_accepts_a_validated_bearer_token(
     client,
     image_bytes: bytes,
     monkeypatch: pytest.MonkeyPatch,
@@ -68,10 +69,10 @@ def test_required_auth_accepts_a_remotely_validated_bearer_token(
 
     async def validate(access_token: str) -> dict[str, str]:
         seen.append(access_token)
-        return {"id": "user-fixture"}
+        return {"sub": "auth0|user-fixture"}
 
     monkeypatch.setattr(auth, "AUTH_REQUIRED", True)
-    monkeypatch.setattr(auth, "validate_supabase_access_token", validate)
+    monkeypatch.setattr(auth, "validate_auth0_access_token", validate)
 
     response = client.post(
         "/v1/analyze",
@@ -83,100 +84,66 @@ def test_required_auth_accepts_a_remotely_validated_bearer_token(
     assert seen == ["session-fixture"]
 
 
-def test_remote_validation_uses_supabase_user_endpoint_and_public_key(
+def test_validation_uses_auth0_sdk_with_required_subject_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
 
-    class FakeClient:
-        def __init__(self, *, timeout: float) -> None:
-            captured["timeout"] = timeout
+    class FakeApiClient:
+        async def verify_access_token(self, token: str, *, required_claims: list[str]) -> dict[str, str]:
+            captured.update({"token": token, "required_claims": required_claims})
+            return {"sub": "google-oauth2|user-fixture"}
 
-        async def __aenter__(self) -> "FakeClient":
-            return self
+    class FakeAuth0Client:
+        api_client = FakeApiClient()
 
-        async def __aexit__(self, *_args: object) -> None:
-            return None
+    monkeypatch.setattr(auth, "AUTH0_CLIENT", FakeAuth0Client())
 
-        async def get(self, url: str, *, headers: dict[str, str]) -> httpx.Response:
-            captured.update({"url": url, "headers": headers})
-            return httpx.Response(200, json={"id": "user-fixture", "email": "person@example.test"})
+    user = asyncio.run(auth.validate_auth0_access_token("access-fixture"))
 
-    monkeypatch.setattr(auth, "SUPABASE_URL", "https://project.supabase.test")
-    monkeypatch.setattr(auth, "SUPABASE_PUBLIC_KEY", "publishable-fixture")
-    monkeypatch.setattr(auth.httpx, "AsyncClient", FakeClient)
-
-    user = asyncio.run(auth.validate_supabase_access_token("access-fixture"))
-
-    assert user["id"] == "user-fixture"
-    assert captured["url"] == "https://project.supabase.test/auth/v1/user"
-    assert captured["headers"] == {
-        "apikey": "publishable-fixture",
-        "Authorization": "Bearer access-fixture",
-    }
-    assert captured["timeout"] == auth.AUTH_TIMEOUT_SECONDS
+    assert user["sub"] == "google-oauth2|user-fixture"
+    assert captured == {"token": "access-fixture", "required_claims": ["sub"]}
 
 
-@pytest.mark.parametrize("status_code", [401, 403])
-def test_remote_validation_normalizes_rejected_tokens(
-    status_code: int,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class RejectingClient:
-        def __init__(self, **_kwargs: object) -> None:
-            pass
+def test_validation_normalizes_rejected_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    class RejectingApiClient:
+        async def verify_access_token(self, *_args: object, **_kwargs: object) -> dict[str, str]:
+            raise VerifyAccessTokenError("invalid fixture")
 
-        async def __aenter__(self) -> "RejectingClient":
-            return self
+    class RejectingAuth0Client:
+        api_client = RejectingApiClient()
 
-        async def __aexit__(self, *_args: object) -> None:
-            return None
-
-        async def get(self, *_args: object, **_kwargs: object) -> httpx.Response:
-            return httpx.Response(status_code)
-
-    monkeypatch.setattr(auth, "SUPABASE_URL", "https://project.supabase.test")
-    monkeypatch.setattr(auth, "SUPABASE_PUBLIC_KEY", "publishable-fixture")
-    monkeypatch.setattr(auth.httpx, "AsyncClient", RejectingClient)
+    monkeypatch.setattr(auth, "AUTH0_CLIENT", RejectingAuth0Client())
 
     with pytest.raises(HTTPException) as caught:
-        asyncio.run(auth.validate_supabase_access_token("rejected-fixture"))
+        asyncio.run(auth.validate_auth0_access_token("rejected-fixture"))
 
     assert caught.value.status_code == 401
     assert caught.value.headers == {"WWW-Authenticate": "Bearer"}
 
 
-def test_required_auth_fails_closed_when_supabase_is_not_configured(
+def test_required_auth_fails_closed_when_auth0_is_not_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(auth, "SUPABASE_URL", "")
-    monkeypatch.setattr(auth, "SUPABASE_PUBLIC_KEY", "")
+    monkeypatch.setattr(auth, "AUTH0_CLIENT", None)
 
     with pytest.raises(HTTPException) as caught:
-        asyncio.run(auth.validate_supabase_access_token("access-fixture"))
+        asyncio.run(auth.validate_auth0_access_token("access-fixture"))
 
     assert caught.value.status_code == 503
 
 
-def test_remote_auth_timeout_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    class TimingOutClient:
-        def __init__(self, **_kwargs: object) -> None:
-            pass
-
-        async def __aenter__(self) -> "TimingOutClient":
-            return self
-
-        async def __aexit__(self, *_args: object) -> None:
-            return None
-
-        async def get(self, *_args: object, **_kwargs: object) -> httpx.Response:
+def test_auth0_timeout_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    class TimingOutApiClient:
+        async def verify_access_token(self, *_args: object, **_kwargs: object) -> dict[str, str]:
             raise httpx.ReadTimeout("fixture timeout")
 
-    monkeypatch.setattr(auth, "SUPABASE_URL", "https://project.supabase.test")
-    monkeypatch.setattr(auth, "SUPABASE_PUBLIC_KEY", "publishable-fixture")
-    monkeypatch.setattr(auth.httpx, "AsyncClient", TimingOutClient)
+    class TimingOutAuth0Client:
+        api_client = TimingOutApiClient()
+
+    monkeypatch.setattr(auth, "AUTH0_CLIENT", TimingOutAuth0Client())
 
     with pytest.raises(HTTPException) as caught:
-        asyncio.run(auth.validate_supabase_access_token("access-fixture"))
+        asyncio.run(auth.validate_auth0_access_token("access-fixture"))
 
     assert caught.value.status_code == 503

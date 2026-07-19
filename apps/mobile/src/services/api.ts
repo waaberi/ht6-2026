@@ -8,7 +8,7 @@ import { apiErrorMessage, resolveApiUrl } from '../domain/apiConfiguration';
 import { layerAssetsForStack } from '../domain/assets';
 import { parseCoachResponse } from '../domain/coachResponse';
 import { currentVersion } from '../domain/layers';
-import { supabase } from './supabase';
+import { getAuth0AccessToken } from './auth';
 import type {
   AdjustmentValues,
   AnalysisResult,
@@ -42,9 +42,9 @@ const apiFetch = async (path: string, init: Parameters<typeof fetch>[1]) => {
   );
   try {
     const headers = new Headers(init?.headers);
-    const session = await supabase?.auth.getSession();
-    if (session?.data.session?.access_token) {
-      headers.set('Authorization', `Bearer ${session.data.session.access_token}`);
+    const accessToken = await getAuth0AccessToken();
+    if (accessToken) {
+      headers.set('Authorization', `Bearer ${accessToken}`);
     }
     return await fetch(`${apiUrl}${path}`, { ...init, headers, signal: controller.signal });
   } catch (error) {

@@ -30,7 +30,7 @@ pnpm dev
 
 Use `pnpm dev` every day. It starts the API with `.env.local`, waits for its health check, starts the emulator and Metro, opens Exposure, and applies JavaScript/TypeScript edits with Fast Refresh without rebuilding with Gradle. Run `pnpm android` again only after changing `app.json`, native dependencies, or files under `apps/mobile/plugins/`.
 
-For physical Android phones and iPhones, install Expo Go and Tailscale, join the same tailnet as the development machine, and run `pnpm phone`. The command starts the API and Expo Go on the development machine's Tailscale address without changing its Wi-Fi settings. Scan the terminal QR code in Expo Go on Android or with the Camera app on iPhone.
+For physical Android phones and iPhones, install Expo Go and Tailscale, join the same tailnet as the development machine, and run `pnpm phone`. The command starts the API and Metro on the development machine's Tailscale address without changing its Wi-Fi settings. Scan the terminal QR code with Expo Go. Expo Go signs in through browser-based Authorization Code + PKCE; installed Exposure development builds use the native Auth0 SDK.
 
 The first development launch shows Expo's one-time developer-menu introduction. Press **Continue**, then close the menu to reveal Exposure. Fast Refresh is enabled by default.
 
@@ -44,7 +44,7 @@ Run the API with reload:
 pnpm api
 ```
 
-Verify the local API, Supabase auth endpoint, structured Gemini Coach response, and Gemini image-edit model with the configured development credentials:
+Verify the local API, Supabase project, structured Gemini Coach response, and Gemini image-edit model with the configured development credentials:
 
 ```bash
 pnpm network:smoke
@@ -61,7 +61,23 @@ pnpm db:test
 pnpm db:stop
 ```
 
-The migration creates private `originals`, `derived`, and `layer-assets` buckets. Object paths must begin with the authenticated user's UUID. Originals have no client update or delete policy.
+The migration creates private `originals`, `derived`, and `layer-assets` buckets. Object paths must begin with the authenticated user's Auth0 `sub`. Originals have no client update or delete policy.
+
+## Auth0
+
+Exposure uses Auth0 Universal Login. Installed development and production builds lazy-load `react-native-auth0`; Expo Go uses `expo-auth-session` with Authorization Code + PKCE and stores its refreshable session in Secure Store. Both paths use domain `dev-40ogr4b5dnzkfkp3.us.auth0.com`, client ID `L5zovg4M47k5RajkppMMtIT4oBwcWYhq`, and API audience `https://api.exposure.app`. Google OAuth and the tenant's database connection appear together in Universal Login.
+
+The Auth0 application needs these callback URLs in both its allowed callback and logout URL lists:
+
+```text
+exposure://dev-40ogr4b5dnzkfkp3.us.auth0.com/ios/com.ht62026.exposure/callback
+exposure://dev-40ogr4b5dnzkfkp3.us.auth0.com/android/com.ht62026.exposure/callback
+exp://100.117.203.24:8081/--/auth/callback
+```
+
+The `exp://` URL is the stable Tailscale address used by `pnpm phone`. If that development host or Metro port changes, add the URI printed by Expo Go to both Auth0 URL lists before signing in.
+
+Supabase remains the database and storage service, but it accepts the Auth0 ID token through its third-party Auth configuration. FastAPI validates the separate Auth0 access token issued for the Exposure API audience. Production API processes must set `EXPOSURE_REQUIRE_AUTH=true`.
 
 Run every mobile, API, and database check:
 

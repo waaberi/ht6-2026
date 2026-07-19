@@ -6,6 +6,7 @@ import {
   ingestPhoto,
   listPhotoDeletionIds,
   listPhotos,
+  migrateGuestPhotosToOwner,
   savePhoto,
   savePhotos,
   type IngestPhotoInput,
@@ -27,6 +28,7 @@ import {
   syncQueuedPhotos,
 } from '../services/sync';
 import NetInfo from '@react-native-community/netinfo';
+import { useAuthSession } from './AuthContext';
 
 type ExposureState = {
   ownerId: OwnerId;
@@ -53,6 +55,7 @@ type ExposureState = {
 const ExposureContext = createContext<ExposureState | null>(null);
 
 export const ExposureProvider = ({ children }: React.PropsWithChildren) => {
+  const { user } = useAuthSession();
   const [ownerId, setOwnerId] = useState<OwnerId>(GUEST_OWNER_ID);
   const [photos, setPhotos] = useState<PhotoRecord[]>([]);
   const [selectedPhotoId, setSelectedPhotoId] = useState<string>();
@@ -66,8 +69,13 @@ export const ExposureProvider = ({ children }: React.PropsWithChildren) => {
   const ownerIdRef = useRef<OwnerId>(GUEST_OWNER_ID);
   const ownerEpochRef = useRef(0);
   const ownerInitializedRef = useRef(false);
+  const ownerReadyRef = useRef(false);
+  const authUserIdRef = useRef<string | undefined>(undefined);
+  const migrationErrorRef = useRef<string | undefined>(undefined);
   const syncingRef = useRef(false);
   const syncAgainRef = useRef(false);
+
+  authUserIdRef.current = user?.sub;
 
   const publishPhotos = useCallback((updated: PhotoRecord[], expectedOwnerId: OwnerId = ownerIdRef.current) => {
     if (ownerIdRef.current !== expectedOwnerId) return;
@@ -94,6 +102,7 @@ export const ExposureProvider = ({ children }: React.PropsWithChildren) => {
     if (ownerInitializedRef.current && ownerIdRef.current === next) return;
     const epoch = ownerEpochRef.current + 1;
     ownerEpochRef.current = epoch;
+    ownerReadyRef.current = false;
     ownerIdRef.current = next;
     setActiveOwnerId(next);
     setLoading(true);
@@ -103,46 +112,54 @@ export const ExposureProvider = ({ children }: React.PropsWithChildren) => {
     setAnalyses({});
     setAnalyzing(false);
     setSyncError(undefined);
+    migrationErrorRef.current = undefined;
     setLastSyncedAt(undefined);
     syncingRef.current = false;
     syncAgainRef.current = false;
     setSyncing(false);
 
-    const stored = await listPhotos(next);
+    let migrationError: string | undefined;
+    let stored: PhotoRecord[];
+    try {
+      stored = next === GUEST_OWNER_ID
+        ? await listPhotos(next)
+        : await migrateGuestPhotosToOwner(next);
+    } catch {
+      stored = await listPhotos(next);
+      if (next !== GUEST_OWNER_ID) {
+        migrationError = 'Some offline photos could not be copied into this account.';
+      }
+    }
     if (ownerEpochRef.current !== epoch) return;
     ownerInitializedRef.current = true;
+    ownerReadyRef.current = true;
     photosRef.current = stored;
     setOwnerId(next);
     setPhotos(stored);
     setSelectedPhotoId(stored[0]?.id);
+    migrationErrorRef.current = migrationError;
+    setSyncError(migrationError
+      ? `${migrationError} Their guest copies are still safe on this device.`
+      : undefined);
     setLoading(false);
   }, []);
 
   useEffect(() => {
-    if (!supabase) {
-      void activateOwner(GUEST_OWNER_ID);
-      return;
-    }
-    const subscription = supabase.auth.onAuthStateChange((_event, session) => {
-      void activateOwner(session?.user.id);
-    }).data.subscription;
-    void supabase.auth.getSession().then(({ data }) => activateOwner(data.session?.user.id));
-    return () => subscription.unsubscribe();
-  }, [activateOwner]);
+    void activateOwner(supabase ? user?.sub : GUEST_OWNER_ID);
+  }, [activateOwner, user?.sub]);
 
   const synchronize = useCallback(async function runSync() {
-    if (loading || !supabase) return;
+    if (loading || !ownerReadyRef.current || !supabase) return;
     if (syncingRef.current) {
       syncAgainRef.current = true;
       return;
     }
-    const { data } = await supabase.auth.getSession();
     const syncOwnerId = ownerIdRef.current;
     const syncEpoch = ownerEpochRef.current;
-    if (!data.session || data.session.user.id !== syncOwnerId) return;
+    if (!authUserIdRef.current || authUserIdRef.current !== syncOwnerId) return;
     syncingRef.current = true;
     setSyncing(true);
-    setSyncError(undefined);
+    setSyncError(migrationErrorRef.current);
     try {
       const pendingDeletions = await listPhotoDeletionIds(syncOwnerId);
       await syncPhotoDeletions(syncOwnerId, pendingDeletions);
@@ -161,6 +178,8 @@ export const ExposureProvider = ({ children }: React.PropsWithChildren) => {
       setLastSyncedAt(new Date().toISOString());
       if (uploaded.some((photo) => photo.syncState === 'failed')) {
         setSyncError('Some photos could not sync. Your local copies are safe; try again.');
+      } else {
+        setSyncError(migrationErrorRef.current);
       }
     } catch (error) {
       if (ownerEpochRef.current === syncEpoch) {

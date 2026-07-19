@@ -98,7 +98,7 @@ def _canonical_fingerprint(value: object) -> str:
 def _analysis_cache_scope(authenticated_user: dict[str, object] | None) -> str:
     if not authenticated_user:
         return "anonymous"
-    user_id = authenticated_user.get("id")
+    user_id = authenticated_user.get("sub")
     if not isinstance(user_id, str) or not user_id:
         return "anonymous"
     return f"user:{hashlib.sha256(user_id.encode('utf-8')).hexdigest()}"

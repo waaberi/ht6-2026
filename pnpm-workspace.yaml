@@ -6,5 +6,6 @@ enableGlobalVirtualStore: false
 
 allowBuilds:
   "@shopify/react-native-skia": true
+  browser-tabs-lock: false
   esbuild: true
   supabase: true
