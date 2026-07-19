@@ -15,6 +15,13 @@ import { recordRecommendationFeedback } from '../data/preferences';
 import { loadStyleProfiles, type SavedStyleProfile } from '../data/styleRepository';
 import { centeredCrop, restoreManualTransform, rotateClockwise, withStraighten } from '../domain/canvasTransforms';
 import {
+  applyCoachFeedback,
+  buildCoachFeedback,
+  type CoachFeedbackItem,
+  type CoachFeedbackPlan,
+  type CoachFeedbackSection,
+} from '../domain/coachFeedback';
+import {
   buildCoachEditPreview,
   isCoachEditPreviewCurrent,
   isPreviewableCoachActionPlan,
@@ -175,6 +182,12 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     [analysis?.issues, dismissedIssueIds],
   );
   const selectedIssue = visibleIssues.find((issue) => issue.id === selectedIssueId) ?? visibleIssues[0];
+  const coachFeedback = useMemo(
+    () => analysis && version
+      ? buildCoachFeedback(analysis, savedAdjustments, version.stack.canvasTransform)
+      : undefined,
+    [analysis, savedAdjustments, version],
+  );
   const explicitRecommendation = generativeRecommendationId
     ? visibleIssues.find((issue) => issue.id === generativeRecommendationId)
     : undefined;
@@ -499,6 +512,25 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     }
   };
 
+  const acceptAllCoachFeedback = async () => {
+    if (!coachFeedback || applying) return;
+    setApplying(true);
+    setMessage(undefined);
+    try {
+      const next = applyCoachFeedback(version.stack, coachFeedback);
+      const changed = await commit(next, 'Coach: Apply all feedback', version.id);
+      if (!changed) return;
+      setDraftAdjustments(coachFeedback.adjustments);
+      setDraftTransform(next.canvasTransform);
+      setCropAspect(undefined);
+      setAdjustmentSection('light');
+      setTool('adjust');
+      setMessage('Coach adjustments applied.');
+    } finally {
+      setApplying(false);
+    }
+  };
+
   const commitAdjustment = async (key: keyof AdjustmentValues, value: number) => {
     if (adjustmentCommitRef.current) return;
     adjustmentCommitRef.current = true;
@@ -806,7 +838,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
           analysis={analysis}
           target={tool === 'ai' && generativeOperation !== 'expand' ? generativeTarget : undefined}
           onTargetChange={tool === 'ai' && generativeOperation !== 'expand' ? updateGenerativeTarget : undefined}
-          showIssues={tool === 'coach' && !coachEditDraft}
+          showIssues={false}
           editingCrop={tool === 'adjust' && adjustmentSection === 'crop'}
           cropRegion={draftTransform.crop}
           cropAspect={cropAspect}
@@ -838,19 +870,14 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
               <CoachPanel
                 analysis={analysis}
                 analyzing={analyzing}
-                selectedIssue={selectedIssue}
-                response={coachResponse}
-                question={coachQuestion}
-                coachBusy={coachBusy}
                 applying={applying}
+                feedback={coachFeedback}
                 onAnalyze={analyze}
-                onSelectIssue={selectIssue}
-                issues={visibleIssues}
-                onDismissIssue={(issue) => void dismissRecommendation(issue)}
-                onQuestionChange={setCoachQuestion}
-                onAsk={ask}
-                onApplyIssue={applyIssue}
-                onApplyAction={applyCoachAction}
+                onAccept={() => void acceptAllCoachFeedback()}
+                onOpenSection={(section) => {
+                  setAdjustmentSection(section);
+                  setTool('adjust');
+                }}
               />
             )
           ) : null}
@@ -1034,126 +1061,169 @@ const CoachEditPreviewPanel = ({
   </View>
 );
 
-const CoachPanel = ({
-  analysis,
-  analyzing,
-  selectedIssue,
-  response,
-  question,
-  coachBusy,
-  applying,
-  onAnalyze,
-  onSelectIssue,
-  issues,
-  onDismissIssue,
-  onQuestionChange,
-  onAsk,
-  onApplyIssue,
-  onApplyAction,
+type CoachPanelSection = 'feedback' | 'meta' | 'chat';
+
+const coachPanelSections: Array<{ id: CoachPanelSection; label: string }> = [
+  { id: 'feedback', label: 'Feedback' },
+  { id: 'meta', label: 'Meta' },
+  { id: 'chat', label: 'Chat' },
+];
+
+const coachControlLabels: Record<keyof AdjustmentValues, string> = {
+  exposure: 'Exposure',
+  contrast: 'Contrast',
+  highlights: 'Highlights',
+  shadows: 'Shadows',
+  temperature: 'Temperature',
+  tint: 'Tint',
+  saturation: 'Saturation',
+  vibrance: 'Vibrance',
+  sharpening: 'Sharpen',
+  denoise: 'Denoise',
+  grain: 'Grain',
+  vignette: 'Vignette',
+};
+
+const formatCoachTarget = (key: keyof AdjustmentValues, value: number) => {
+  const rounded = Math.round(value * 100);
+  if (key === 'exposure') return `${value >= 0 ? '+' : ''}${value.toFixed(2)} EV`;
+  return `${rounded > 0 ? '+' : ''}${rounded}`;
+};
+
+const CoachFeedbackCard = ({
+  item,
+  onOpenSection,
 }: {
-  analysis: ReturnType<typeof useExposure>['analysis'];
-  analyzing: boolean;
-  selectedIssue?: Issue;
-  response?: CoachResponse;
-  question: string;
-  coachBusy: boolean;
-  applying: boolean;
-  onAnalyze: () => void;
-  onSelectIssue: (issue: Issue) => void;
-  issues: Issue[];
-  onDismissIssue: (issue: Issue) => void;
-  onQuestionChange: (value: string) => void;
-  onAsk: () => void;
-  onApplyIssue: (issue: Issue) => void;
-  onApplyAction: (action: CoachAction) => void;
+  item: CoachFeedbackItem;
+  onOpenSection: (section: CoachFeedbackSection) => void;
 }) => {
-  if (!analysis) {
-    return (
-      <View style={styles.centerAction}>
-        <Pressable accessibilityRole="button" style={styles.primary} onPress={onAnalyze} disabled={analyzing}>
-          {analyzing ? <ActivityIndicator color={colors.onPrimary} /> : <Text style={styles.primaryText}>Analyze photo</Text>}
-        </Pressable>
-      </View>
-    );
-  }
-  const fixable = Boolean(selectedIssue?.fix);
-  const captureAdvice = response?.captureAdvice.length ? response.captureAdvice : analysis.cameraRecommendations;
+  const targets = Object.entries(item.adjustments ?? {}) as Array<[keyof AdjustmentValues, number]>;
+  const icon = item.section === 'light'
+    ? 'white-balance-sunny'
+    : item.section === 'color'
+      ? 'palette-outline'
+      : item.section === 'detail'
+        ? 'image-filter-center-focus'
+        : 'crop';
   return (
-    <>
-      <Text numberOfLines={2} style={styles.summary}>{response?.headline ?? analysis.summary}</Text>
-      {response?.reason ? <Text numberOfLines={3} style={styles.body}>{response.reason}</Text> : null}
-
-      {issues.length > 0 ? (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
-          {issues.slice(0, 6).map((issue) => (
-            <Pressable
-              key={issue.id}
-              accessibilityRole="button"
-              accessibilityState={{ selected: selectedIssue?.id === issue.id }}
-              onPress={() => onSelectIssue(issue)}
-              style={[styles.chip, selectedIssue?.id === issue.id && styles.chipActive]}
-            >
-              <Text numberOfLines={1} style={[styles.chipText, selectedIssue?.id === issue.id && styles.chipTextActive]}>{issue.title}</Text>
-            </Pressable>
-          ))}
-        </ScrollView>
-      ) : null}
-
-      {selectedIssue ? (
-        <View style={styles.focusedFinding}>
-          <Text numberOfLines={2} style={styles.body}>{selectedIssue.explanation}</Text>
-          <View style={styles.findingActions}>
-            {fixable ? (
-              <Pressable accessibilityRole="button" style={styles.inlineAction} onPress={() => onApplyIssue(selectedIssue)} disabled={applying}>
-                <Text style={styles.inlineActionText}>{selectedIssue.fix?.kind === 'retake' ? 'Retake' : 'Preview'}</Text>
-              </Pressable>
-            ) : null}
-            <Pressable accessibilityRole="button" style={styles.inlineAction} onPress={() => onDismissIssue(selectedIssue)} disabled={applying}>
-              <Text style={styles.dismissActionText}>Dismiss</Text>
-            </Pressable>
-          </View>
+    <View accessibilityLabel={`${item.section} feedback`} style={styles.coachFeedbackCard}>
+      <View style={styles.coachFeedbackHeader}>
+        <View style={styles.coachFeedbackSectionTitle}>
+          <MaterialCommunityIcons color={colors.textSecondary} name={icon} size={18} />
+          <Text style={styles.coachFeedbackSectionLabel}>{item.section.toUpperCase()}</Text>
         </View>
-      ) : null}
-
-      {captureAdvice.length > 0 ? (
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Capture advice</Text>
-          {captureAdvice.map((advice, index) => (
-            <View key={`${advice.setting}-${index}`} style={styles.adviceRow}>
-              <Text numberOfLines={1} style={styles.adviceSetting}>{advice.setting.replace('-', ' ')}</Text>
-              <View style={styles.adviceBody}>
-                {advice.value ? <Text numberOfLines={1} style={styles.adviceValue}>{advice.value}</Text> : null}
-                {'tradeoff' in advice && advice.tradeoff ? <Text numberOfLines={2} style={styles.caption}>{advice.tradeoff}</Text> : null}
-                {'explanation' in advice ? <Text numberOfLines={2} style={styles.caption}>{advice.explanation}</Text> : null}
-              </View>
+        <View style={[styles.coachFeedbackStatus, !item.changed && styles.coachFeedbackStatusIdle]}>
+          <Text style={[styles.coachFeedbackStatusText, !item.changed && styles.coachFeedbackStatusTextIdle]}>
+            {item.changed ? 'Suggested' : 'No change'}
+          </Text>
+        </View>
+      </View>
+      <Text style={styles.coachFeedbackTitle}>{item.title}</Text>
+      <Text style={styles.caption}>{item.description}</Text>
+      {item.changed && targets.length > 0 ? (
+        <View style={styles.coachTargets}>
+          {targets.map(([key, value]) => (
+            <View key={key} style={styles.coachTargetRow}>
+              <Text style={styles.coachTargetLabel}>{coachControlLabels[key]}</Text>
+              <Text style={styles.coachTargetValue}>{formatCoachTarget(key, value)}</Text>
             </View>
           ))}
         </View>
       ) : null}
+      {item.changed && item.crop ? (
+        <Text style={styles.coachCropTarget}>
+          Target frame · {Math.round(item.crop.width * 100)}% × {Math.round(item.crop.height * 100)}%
+        </Text>
+      ) : null}
+      <Pressable
+        accessibilityRole="button"
+        onPress={() => onOpenSection(item.section)}
+        style={({ pressed }) => [styles.coachReviewButton, pressed && styles.controlPressed]}
+      >
+        <Text style={styles.coachReviewText}>Review {item.section} controls</Text>
+        <MaterialCommunityIcons color={colors.actionText} name="chevron-right" size={20} />
+      </Pressable>
+    </View>
+  );
+};
 
-      {response?.actions.map((action) => (
-        <View key={action.id} style={styles.actionRow}>
-          <View style={styles.actionCopy}><Text numberOfLines={1} style={styles.findingTitle}>{action.label}</Text><Text numberOfLines={2} style={styles.caption}>{action.reason}</Text></View>
-          <Pressable accessibilityRole="button" style={styles.smallPrimary} onPress={() => onApplyAction(action)}>
-            <Text style={styles.smallPrimaryText}>{action.tool === 'retake' ? 'Retake' : 'Preview'}</Text>
+const CoachPanel = ({
+  analysis,
+  analyzing,
+  applying,
+  feedback,
+  onAnalyze,
+  onAccept,
+  onOpenSection,
+}: {
+  analysis: ReturnType<typeof useExposure>['analysis'];
+  analyzing: boolean;
+  applying: boolean;
+  feedback?: CoachFeedbackPlan;
+  onAnalyze: () => void;
+  onAccept: () => void;
+  onOpenSection: (section: CoachFeedbackSection) => void;
+}) => {
+  const [section, setSection] = useState<CoachPanelSection>('feedback');
+  return (
+    <>
+      <View accessibilityRole="tablist" style={styles.segmented}>
+        {coachPanelSections.map((item) => {
+          const selected = item.id === section;
+          return (
+            <Pressable
+              key={item.id}
+              accessibilityRole="tab"
+              accessibilityState={{ selected }}
+              onPress={() => setSection(item.id)}
+              style={({ pressed }) => [
+                styles.segment,
+                selected && styles.segmentActive,
+                pressed && (selected ? styles.primaryPressed : styles.controlPressed),
+              ]}
+            >
+              <Text style={[styles.segmentText, selected && styles.segmentTextActive]}>{item.label}</Text>
+            </Pressable>
+          );
+        })}
+      </View>
+
+      {section === 'feedback' && !analysis ? (
+        <View style={styles.centerAction}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityState={{ disabled: analyzing }}
+            disabled={analyzing}
+            onPress={onAnalyze}
+            style={({ pressed }) => [styles.primary, pressed && styles.primaryPressed, analyzing && styles.disabled]}
+          >
+            {analyzing ? <ActivityIndicator color={colors.onPrimary} /> : <Text style={styles.primaryText}>Analyse photo</Text>}
           </Pressable>
         </View>
-      ))}
+      ) : null}
 
-      <View style={styles.askRow}>
-        <TextInput
-          accessibilityLabel="Ask the photo coach"
-          value={question}
-          onChangeText={onQuestionChange}
-          onSubmitEditing={onAsk}
-          placeholder="Ask about this photo"
-          placeholderTextColor={colors.textSecondary}
-          style={styles.askInput}
-        />
-        <Pressable accessibilityRole="button" style={styles.askButton} onPress={onAsk} disabled={coachBusy || !question.trim()}>
-          {coachBusy ? <ActivityIndicator color={colors.onPrimary} /> : <Text style={styles.askButtonText}>Ask</Text>}
-        </Pressable>
-      </View>
+      {section === 'feedback' && analysis && feedback ? (
+        <>
+          <Text style={styles.summary}>Four fixes for this photo</Text>
+          <Text style={styles.body}>Review each area, then apply the complete adjustment set at once.</Text>
+          <View style={styles.coachFeedbackList}>
+            {feedback.items.map((item) => (
+              <CoachFeedbackCard key={item.section} item={item} onOpenSection={onOpenSection} />
+            ))}
+          </View>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityState={{ disabled: applying }}
+            disabled={applying}
+            onPress={onAccept}
+            style={({ pressed }) => [styles.coachAcceptAll, pressed && styles.primaryPressed, applying && styles.disabled]}
+          >
+            {applying
+              ? <ActivityIndicator color={colors.onPrimary} />
+              : <Text style={styles.coachAcceptAllText}>Accept all changes</Text>}
+          </Pressable>
+        </>
+      ) : null}
     </>
   );
 };
@@ -1431,6 +1501,25 @@ const styles = StyleSheet.create({
   askInput: { flex: 1, minHeight: 48, color: colors.text, backgroundColor: colors.background, borderWidth: 1, borderColor: colors.outline, borderRadius: 8, paddingHorizontal: 12, fontSize: 13 },
   askButton: { minWidth: 64, minHeight: 48, borderRadius: 8, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' },
   askButtonText: { color: colors.onPrimary, fontSize: 12, fontWeight: '800' },
+  coachFeedbackList: { gap: 10, marginTop: 16 },
+  coachFeedbackCard: { padding: 14, borderRadius: 10, borderWidth: 1, borderColor: colors.separator, backgroundColor: colors.background },
+  coachFeedbackHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 9 },
+  coachFeedbackSectionTitle: { flexDirection: 'row', alignItems: 'center', gap: 7 },
+  coachFeedbackSectionLabel: { color: colors.textSecondary, fontSize: 11, fontWeight: '800', letterSpacing: 0.7 },
+  coachFeedbackStatus: { minHeight: 24, borderRadius: 12, paddingHorizontal: 9, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.primary },
+  coachFeedbackStatusIdle: { backgroundColor: colors.surfaceStrong },
+  coachFeedbackStatusText: { color: colors.onPrimary, fontSize: 10, fontWeight: '800' },
+  coachFeedbackStatusTextIdle: { color: colors.textSecondary },
+  coachFeedbackTitle: { color: colors.text, fontSize: 15, lineHeight: 20, fontWeight: '800', marginBottom: 4 },
+  coachTargets: { marginTop: 10, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.separator },
+  coachTargetRow: { minHeight: 28, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  coachTargetLabel: { color: colors.textSecondary, fontSize: 12, fontWeight: '700' },
+  coachTargetValue: { color: colors.text, fontSize: 12, fontWeight: '800', fontVariant: ['tabular-nums'] },
+  coachCropTarget: { color: colors.text, fontSize: 12, fontWeight: '700', marginTop: 10 },
+  coachReviewButton: { minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 7, marginHorizontal: -8, paddingHorizontal: 8, borderRadius: 8 },
+  coachReviewText: { color: colors.actionText, fontSize: 12, fontWeight: '800' },
+  coachAcceptAll: { minHeight: 52, alignItems: 'center', justifyContent: 'center', borderRadius: 8, backgroundColor: colors.primary, marginTop: 14 },
+  coachAcceptAllText: { color: colors.onPrimary, fontSize: 14, fontWeight: '800' },
   segmented: { flexDirection: 'row', minHeight: 56, borderRadius: 10, padding: 4, backgroundColor: colors.background, marginBottom: 16 },
   segment: { flex: 1, minHeight: 48, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
   segmentActive: { backgroundColor: colors.primary },

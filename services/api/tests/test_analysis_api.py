@@ -32,6 +32,7 @@ def test_analysis_returns_validated_evidence_without_mutating_source(client: Tes
     assert payload["checksum"] == before
     assert payload["deterministicModel"] == "exposure-deterministic-2"
     assert 0 <= payload["lighting"]["clippedHighlights"] <= 1
+    assert 0 <= payload["metrics"]["meanSaturation"] <= 1
     assert all(issue["location"]["width"] > 0 for issue in payload["issues"])
     assert hashlib.sha256(image_bytes).hexdigest() == before
     assert "GPS" not in response.text

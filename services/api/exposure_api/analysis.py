@@ -190,6 +190,15 @@ def analyze_deterministic(
     p05, p50, p95 = (float(value) for value in np.percentile(luminance, [5, 50, 95]))
     clipped_shadows = float(np.mean(luminance <= 3 / 255))
     clipped_highlights = float(np.mean(luminance >= 252 / 255))
+    channel_max = np.max(rgb, axis=2)
+    channel_min = np.min(rgb, axis=2)
+    pixel_saturation = np.divide(
+        channel_max - channel_min,
+        channel_max,
+        out=np.zeros_like(channel_max),
+        where=channel_max > 1e-6,
+    )
+    mean_saturation = float(np.mean(pixel_saturation))
     channel_means = np.mean(rgb, axis=(0, 1))
     neutral = float(np.mean(channel_means))
     color_cast = channel_means - neutral
@@ -238,6 +247,7 @@ def analyze_deterministic(
         "medianLuminance": round(p50, 5),
         "dynamicRangeP05P95": round(p95 - p05, 5),
         "contrastStd": round(contrast, 5),
+        "meanSaturation": round(mean_saturation, 5),
         "sharpnessLaplacianVariance": round(sharpness, 7),
         "estimatedNoise": round(noise, 7),
         "thirdsDistance": round(thirds_distance, 5),
