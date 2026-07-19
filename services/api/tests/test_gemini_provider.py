@@ -93,6 +93,49 @@ def test_semantic_prompt_exposes_grounded_signals_and_concise_contract() -> None
     assert "Explanation: one sentence, at most 22 words" in detailed_prompt
 
 
+def test_semantic_analysis_keeps_valid_response_when_optional_issue_is_malformed() -> None:
+    class Interactions:
+        def create(self, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(output_text=json.dumps({
+                "summary": "Window light gives the portrait a quiet mood.",
+                "assessments": [],
+                "issues": [{
+                    "category": "composition",
+                    "title": "Collapsed subject box",
+                    "explanation": "The proposed location has no measurable width.",
+                    "confidence": 0.8,
+                    "box2d": [120, 680, 820, 680],
+                    "recommendedAction": "Keep the current framing.",
+                    "basedOn": ["metrics.meanLuminance"],
+                }],
+            }))
+
+    analysis = AnalysisResult(
+        version_id="version",
+        checksum="checksum",
+        metrics={"meanLuminance": 0.2},
+        lighting={
+            "exposure": -0.3,
+            "contrast": 0.2,
+            "clippedShadows": 0,
+            "clippedHighlights": 0,
+            "colorCast": {"red": 0, "green": 0, "blue": 0},
+        },
+        signals=[],
+        issues=[],
+        camera_recommendations=[],
+        summary="Measurements ready. AI unavailable.",
+    )
+    provider = GeminiProvider()
+    provider._client = SimpleNamespace(interactions=Interactions())  # type: ignore[assignment]
+
+    result = asyncio.run(provider.analyze_semantics(b"image", "image/png", analysis, {}, {}))
+
+    assert isinstance(result, SemanticProviderResult)
+    assert result.analysis.summary == "Window light gives the portrait a quiet mood."
+    assert result.analysis.issues == []
+
+
 def test_gemini_schemas_use_only_the_supported_structured_output_shape() -> None:
     for model in (SemanticAnalysis, CoachResponse):
         schema_text = json.dumps(_gemini_json_schema(model))

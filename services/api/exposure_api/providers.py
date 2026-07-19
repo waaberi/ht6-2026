@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import os
 import re
 from collections.abc import Callable
@@ -10,8 +11,12 @@ from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from google import genai
+from pydantic import ValidationError
 
-from .models import AnalysisResult, CoachRequest, CoachResponse, Region, SemanticAnalysis
+from .models import AnalysisResult, CoachRequest, CoachResponse, Region, SemanticAnalysis, SemanticIssue
+
+
+logger = logging.getLogger(__name__)
 
 
 COACH_TOOL_GUIDANCE = {
@@ -173,6 +178,21 @@ def _gemini_json_schema(model: type[Any]) -> dict[str, Any]:
     if not isinstance(normalized, dict):
         raise ValueError("Gemini response schema must be an object")
     return normalized
+
+
+def _parse_semantic_analysis(output_text: str) -> SemanticAnalysis:
+    """Keep a malformed optional Gemini issue from discarding the full analysis."""
+    payload = json.loads(output_text)
+    if not isinstance(payload, dict) or not isinstance(payload.get("issues"), list):
+        return SemanticAnalysis.model_validate(payload)
+
+    valid_issues: list[SemanticIssue] = []
+    for issue in payload["issues"]:
+        try:
+            valid_issues.append(SemanticIssue.model_validate(issue))
+        except ValidationError:
+            logger.warning("Discarding a malformed Gemini semantic issue", exc_info=True)
+    return SemanticAnalysis.model_validate({**payload, "issues": valid_issues})
 
 
 def _coach_prompt(request: CoachRequest, available_tools: list[str]) -> str:
@@ -378,7 +398,7 @@ class GeminiProvider:
                 generation_config={"thinking_level": self.thinking_level},
                 **options,
             )
-            return SemanticAnalysis.model_validate_json(interaction.output_text)
+            return _parse_semantic_analysis(interaction.output_text)
 
         analysis, model = await asyncio.to_thread(self._request_with_text_model_fallback, request_model)
         return SemanticProviderResult(analysis=analysis, model=model)
