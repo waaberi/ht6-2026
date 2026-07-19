@@ -303,14 +303,17 @@ const SettingRow = ({ label, detail, value, onChange, disabled = false, last = f
       <Text style={styles.rowLabel}>{label}</Text>
       {detail ? <Text style={styles.rowDetail}>{detail}</Text> : null}
     </View>
-    <Switch
-      value={value}
-      onValueChange={onChange}
-      disabled={disabled}
-      trackColor={{ false: colors.outline, true: colors.primary }}
-      thumbColor={colors.onPrimary}
-      accessibilityLabel={label}
-    />
+    <View style={styles.switchSlot}>
+      <Switch
+        value={value}
+        onValueChange={onChange}
+        disabled={disabled}
+        trackColor={{ false: colors.outline, true: colors.primary }}
+        thumbColor={colors.onPrimary}
+        accessibilityLabel={label}
+        style={styles.switchControl}
+      />
+    </View>
   </View>
 );
 
@@ -348,6 +351,8 @@ const styles = StyleSheet.create({
   settingRow: { minHeight: 60, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.separator },
   disabledRow: { opacity: 0.46 },
   settingCopy: { flex: 1, paddingRight: 14 },
+  switchSlot: { minWidth: 52, alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center' },
+  switchControl: { alignSelf: 'center', marginVertical: 0 },
   lastRow: { borderBottomWidth: 0 },
   developerInput: { marginBottom: 12 },
 });

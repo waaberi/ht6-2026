@@ -198,7 +198,6 @@ export const LibraryScreen = ({ onOpenStudio, onOpenCamera }: LibraryScreenProps
             : 'Library'}
         detail={headerDetail}
         actions={photos.length ? view === 'select' ? [
-          ...(selection.length ? [{ label: 'Clear selection', icon: 'remove-circle-outline' as const, onPress: () => setSelection([]) }] : []),
           { label: 'Cancel selection', icon: 'close', onPress: leaveSelection },
         ] : view === 'portfolio-result' ? [
           { label: 'Close result', icon: 'close', onPress: leaveSelection },
