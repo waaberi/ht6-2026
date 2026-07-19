@@ -134,6 +134,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   const [expansionDirection, setExpansionDirection] = useState<ExpansionDirection>('right');
   const [expansionFraction, setExpansionFraction] = useState(0.25);
   const [generativeDraft, setGenerativeDraft] = useState<GenerativeDraft>();
+  const [generativePreviewLoaded, setGenerativePreviewLoaded] = useState(false);
   const generativeDraftRef = useRef<GenerativeDraft | undefined>(undefined);
   const generativeCommitRef = useRef(false);
   const [coachEditDraft, setCoachEditDraft] = useState<CoachEditDraft>();
@@ -188,7 +189,10 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
     const draft = generativeDraftRef.current;
     if (draft && deleteAssets) deleteDraftAssets(draft);
     generativeDraftRef.current = undefined;
-    if (mountedRef.current) setGenerativeDraft(undefined);
+    if (mountedRef.current) {
+      setGenerativeDraft(undefined);
+      setGenerativePreviewLoaded(false);
+    }
   }, [deleteDraftAssets]);
 
   const releaseCoachEditDraft = useCallback(() => {
@@ -685,6 +689,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   const generateEdit = async () => {
     if (!generativePrompt.trim()) return;
     if (generativeDraftRef.current) releaseGenerativeDraft(true);
+    setGenerativePreviewLoaded(false);
     const sourceVersionId = version.id;
     const sourcePhotoId = selectedPhoto.id;
     setMessage(undefined);
@@ -759,6 +764,10 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   const acceptGenerativeDraft = async () => {
     const draft = generativeDraftRef.current;
     if (!draft) return;
+    if (!generativePreviewLoaded) {
+      setMessage('The generated layer is still loading. Wait for the preview before accepting it.');
+      return;
+    }
     setMessage(undefined);
     setAssetBusy(true);
     generativeCommitRef.current = true;
@@ -779,6 +788,22 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
       if (mountedRef.current) setAssetBusy(false);
     }
   };
+
+  const handleGenerativeLayerReady = useCallback((layerId: string) => {
+    const draft = generativeDraftRef.current;
+    if (!draft || draft.layer.id !== layerId) return;
+    console.info('[generative-preview] decoded image layer');
+    setGenerativePreviewLoaded(true);
+    setMessage('Generated layer loaded. Review the visible change before accepting it.');
+  }, []);
+
+  const handleGenerativeLayerError = useCallback((layerId: string, error: Error) => {
+    const draft = generativeDraftRef.current;
+    if (!draft || draft.layer.id !== layerId) return;
+    console.error('[generative-preview] image layer decode failed', error.message);
+    releaseGenerativeDraft(true);
+    setMessage('The generated PNG could not be decoded on this device, so the preview was discarded.');
+  }, [releaseGenerativeDraft]);
 
   const selectIssue = (issue: Issue) => {
     setSelectedIssueId(issue.id);
@@ -813,6 +838,8 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
           onCropChange={(crop) => setDraftTransform((current) => ({ ...current, crop }))}
           onCropCommit={(crop) => void commitTransform({ ...draftTransform, crop }, 'Crop')}
           onImageSizeChange={handlePreviewImageSizeChange}
+          onGeneratedLayerReady={handleGenerativeLayerReady}
+          onGeneratedLayerError={handleGenerativeLayerError}
         />
       </View>
 
@@ -908,7 +935,8 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
               busy={assetBusy}
               expansionDirection={expansionDirection}
               expansionFraction={expansionFraction}
-              previewReady={Boolean(generativeDraft)}
+              previewLoading={Boolean(generativeDraft && !generativePreviewLoaded)}
+              previewReady={Boolean(generativeDraft && generativePreviewLoaded)}
               onOperationChange={(operation) => {
                 setGenerativeOperation(operation);
                 setGenerativeRecommendationId(undefined);
@@ -1166,6 +1194,7 @@ const AiPanel = ({
   busy,
   expansionDirection,
   expansionFraction,
+  previewLoading,
   previewReady,
   onOperationChange,
   onPromptChange,
@@ -1183,6 +1212,7 @@ const AiPanel = ({
   busy: boolean;
   expansionDirection: ExpansionDirection;
   expansionFraction: number;
+  previewLoading: boolean;
   previewReady: boolean;
   onOperationChange: (operation: GenerativeOperation) => void;
   onPromptChange: (value: string) => void;
@@ -1194,6 +1224,14 @@ const AiPanel = ({
   onExpansionFractionChange: (fraction: number) => void;
 }) => {
   const selected = (candidate: Region) => JSON.stringify(candidate) === JSON.stringify(target);
+  if (previewLoading) {
+    return (
+      <View accessibilityLabel="Loading generated image layer" style={styles.previewLoading}>
+        <ActivityIndicator color={colors.primary} />
+        <Text style={styles.previewLoadingText}>Loading the generated image layer…</Text>
+      </View>
+    );
+  }
   if (previewReady) {
     return (
       <View accessibilityLabel="AI edit preview actions" style={styles.previewActions}>
@@ -1395,6 +1433,8 @@ const styles = StyleSheet.create({
   primary: { backgroundColor: colors.primary, minHeight: 48, alignItems: 'center', justifyContent: 'center', borderRadius: 8, paddingHorizontal: 16 },
   primaryText: { color: colors.onPrimary, fontWeight: '800', fontSize: 13 },
   previewTitle: { color: colors.text, fontSize: 15, lineHeight: 20, fontWeight: '800', marginBottom: 12 },
+  previewLoading: { minHeight: 52, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10 },
+  previewLoadingText: { color: colors.textSecondary, fontSize: 13, lineHeight: 18 },
   previewActions: { flexDirection: 'row', gap: 12, minHeight: 52 },
   previewDiscard: { flex: 1, minHeight: 52, borderRadius: 8, backgroundColor: colors.surfaceStrong, borderWidth: 1, borderColor: colors.outlineStrong, alignItems: 'center', justifyContent: 'center' },
   previewDiscardText: { color: colors.text, fontSize: 14, fontWeight: '800' },

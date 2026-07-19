@@ -73,6 +73,8 @@ export const PhotoCanvas = ({
   onCropChange,
   onCropCommit,
   onImageSizeChange,
+  onGeneratedLayerReady,
+  onGeneratedLayerError,
 }: {
   uri: string;
   stack: LayerStack;
@@ -86,6 +88,8 @@ export const PhotoCanvas = ({
   onCropChange?: (region: Region) => void;
   onCropCommit?: (region: Region) => void;
   onImageSizeChange?: (size: { width: number; height: number }) => void;
+  onGeneratedLayerReady?: (layerId: string) => void;
+  onGeneratedLayerError?: (layerId: string, error: Error) => void;
 }) => {
   const image = useImage(uri);
   const [size, setSize] = useState({ width: 1, height: 1 });
@@ -266,7 +270,18 @@ export const PhotoCanvas = ({
                   if (!layer.enabled) return null;
                   if (layer.type === 'image') return <OverlayImage key={layer.id} uri={layer.uri} opacity={layer.opacity} blendMode={layer.blendMode} rect={geometry.full} />;
                   if (layer.type === 'retouch') return <OverlayImage key={layer.id} uri={layer.patchUri} opacity={layer.opacity} rect={geometry.full} />;
-                  if (layer.type === 'generative-patch' && !layer.canvasSpace) return <OverlayImage key={layer.id} uri={layer.patchUri} opacity={layer.opacity} rect={geometry.full} />;
+                  if (layer.type === 'generative-patch' && !layer.canvasSpace) {
+                    return (
+                      <OverlayImage
+                        key={layer.id}
+                        uri={layer.patchUri}
+                        opacity={layer.opacity}
+                        rect={geometry.full}
+                        onLoad={() => onGeneratedLayerReady?.(layer.id)}
+                        onError={(error) => onGeneratedLayerError?.(layer.id, error)}
+                      />
+                    );
+                  }
                   return null;
                 })}
               </Group>
@@ -284,7 +299,16 @@ export const PhotoCanvas = ({
                 width: (geometry.contentWidth + snapshot.left + snapshot.right) * geometry.scale,
                 height: (geometry.contentHeight + snapshot.top + snapshot.bottom) * geometry.scale,
               };
-              return <OverlayImage key={layer.id} uri={layer.patchUri} opacity={layer.opacity} rect={rect} />;
+              return (
+                <OverlayImage
+                  key={layer.id}
+                  uri={layer.patchUri}
+                  opacity={layer.opacity}
+                  rect={rect}
+                  onLoad={() => onGeneratedLayerReady?.(layer.id)}
+                  onError={(error) => onGeneratedLayerError?.(layer.id, error)}
+                />
+              );
             })}
           </Group>
           {grain > 0 ? (
@@ -360,14 +384,25 @@ const OverlayImage = ({
   opacity,
   blendMode = 'normal',
   rect,
+  onLoad,
+  onError,
 }: {
   uri: string;
   opacity: number;
   blendMode?: 'normal' | 'multiply' | 'screen' | 'overlay';
   rect: { x: number; y: number; width: number; height: number };
+  onLoad?: () => void;
+  onError?: (error: Error) => void;
 }) => {
-  const image = useImage(uri);
+  const image = useImage(uri, onError);
+  const reportedUriRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!image || reportedUriRef.current === uri) return;
+    reportedUriRef.current = uri;
+    onLoad?.();
+  }, [image, onLoad, uri]);
   const skiaBlendMode = blendMode === 'normal' ? 'srcOver' : blendMode;
+  if (!image) return null;
   return (
     <Group opacity={opacity} blendMode={skiaBlendMode}>
       <SkiaImage image={image} {...rect} fit="fill" />
