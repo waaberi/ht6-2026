@@ -7,7 +7,6 @@ import {
   AccessibilityInfo,
   ActivityIndicator,
   Alert,
-  Image,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -16,6 +15,7 @@ import {
   useWindowDimensions,
 } from 'react-native';
 
+import { EditedPhotoThumbnail } from '../components/EditedPhotoThumbnail';
 import { colors, layout, radii, spacing, typography } from '../components/theme';
 import { ActionButton } from '../components/ui/ActionButton';
 import { EmptyState } from '../components/ui/EmptyState';
@@ -305,7 +305,7 @@ const PhotoTile = ({ photo, selected, order, selectionMode, onPress }: {
     onPress={onPress}
     style={({ pressed }) => [styles.tile, selected && styles.selectedTile, pressed && styles.tilePressed]}
   >
-    <Image source={{ uri: photo.thumbnailUri }} style={styles.image} resizeMode="cover" accessible={false} />
+    <EditedPhotoThumbnail photo={photo} style={styles.image} />
     {selectionMode ? (
       <View style={[styles.selectionBadge, selected && styles.selectionBadgeSelected]} accessibilityElementsHidden>
         {selected && order ? (
@@ -337,7 +337,7 @@ const PortfolioResult = ({ review, photoById, onReset }: {
         return (
           <View key={id} style={styles.rankRow}>
             <Text style={styles.rankNumber}>{index + 1}</Text>
-            <Image source={{ uri: photo.thumbnailUri }} style={styles.rankImage} accessible={false} />
+            <EditedPhotoThumbnail photo={photo} style={styles.rankImage} />
             <Text numberOfLines={2} style={styles.rankText}>{review.explanations[id] ?? photo.originalName}</Text>
           </View>
         );

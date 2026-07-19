@@ -37,6 +37,8 @@ export const PhotoCanvas = ({
   onGeneratedLayerError,
   movableLayerId,
   onLayerTranslationChange,
+  hiddenFromAccessibility = false,
+  contentFit = 'contain',
 }: {
   uri: string;
   stack: LayerStack;
@@ -54,6 +56,8 @@ export const PhotoCanvas = ({
   onGeneratedLayerError?: (layerId: string, error: Error) => void;
   movableLayerId?: string;
   onLayerTranslationChange?: (layerId: string, translation: LayerTranslation, commit: boolean) => void;
+  hiddenFromAccessibility?: boolean;
+  contentFit?: 'contain' | 'cover';
 }) => {
   const image = useImage(uri);
   const [size, setSize] = useState({ width: 1, height: 1 });
@@ -89,7 +93,9 @@ export const PhotoCanvas = ({
     const expansion = resolveCanvasExpansion(expansionSource, contentWidth, contentHeight);
     const expandedWidth = contentWidth + expansion.left + expansion.right;
     const expandedHeight = contentHeight + expansion.top + expansion.bottom;
-    const scale = Math.min(size.width / expandedWidth, size.height / expandedHeight);
+    const scale = contentFit === 'cover'
+      ? Math.max(size.width / expandedWidth, size.height / expandedHeight)
+      : Math.min(size.width / expandedWidth, size.height / expandedHeight);
     const displayWidth = expandedWidth * scale;
     const displayHeight = expandedHeight * scale;
     const display = { x: (size.width - displayWidth) / 2, y: (size.height - displayHeight) / 2, width: displayWidth, height: displayHeight };
@@ -127,7 +133,7 @@ export const PhotoCanvas = ({
       straightenScale,
       full: { x: center.x - fullWidth / 2, y: center.y - fullHeight / 2, width: fullWidth, height: fullHeight },
     };
-  }, [editingCrop, image, size, stack.canvasTransform.crop, stack.canvasTransform.expansion, straightenDegrees, swapsDimensions]);
+  }, [contentFit, editingCrop, image, size, stack.canvasTransform.crop, stack.canvasTransform.expansion, straightenDegrees, swapsDimensions]);
   const selectionStart = useRef<{ x: number; y: number } | null>(null);
   const selectionResponder = useMemo(() => {
     const display = geometry.display;
@@ -238,16 +244,23 @@ export const PhotoCanvas = ({
     <View
       style={styles.frame}
       onLayout={(event) => setSize(event.nativeEvent.layout)}
-      accessibilityLabel={onTargetChange
-        ? 'Photo preview. Drag to select an area.'
-        : movableLayer
-          ? `Photo preview. Drag to move ${movableLayer.name}.`
-          : 'Non-destructive photo preview'}
-      accessibilityHint={onTargetChange
-        ? 'Drag a rectangle over the area for the AI edit.'
-        : movableLayer
-          ? 'Drag anywhere on the canvas, or use the precise position controls below.'
-          : undefined}
+      accessible={!hiddenFromAccessibility}
+      accessibilityElementsHidden={hiddenFromAccessibility}
+      importantForAccessibility={hiddenFromAccessibility ? 'no-hide-descendants' : 'auto'}
+      accessibilityLabel={hiddenFromAccessibility
+        ? undefined
+        : onTargetChange
+          ? 'Photo preview. Drag to select an area.'
+          : movableLayer
+            ? `Photo preview. Drag to move ${movableLayer.name}.`
+            : 'Non-destructive photo preview'}
+      accessibilityHint={hiddenFromAccessibility
+        ? undefined
+        : onTargetChange
+          ? 'Drag a rectangle over the area for the AI edit.'
+          : movableLayer
+            ? 'Drag anywhere on the canvas, or use the precise position controls below.'
+            : undefined}
       {...(onTargetChange ? selectionResponder.panHandlers : layerMoveResponder.panHandlers)}
     >
       <Canvas style={StyleSheet.absoluteFill}>
