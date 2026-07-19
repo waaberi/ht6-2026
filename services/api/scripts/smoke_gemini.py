@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import io
 import os
 import sys
 
 from PIL import Image, ImageDraw
 
+from exposure_api.generative import extract_localized_patch
 from exposure_api.models import AnalysisResult, CoachRequest, Region
 from exposure_api.providers import GeminiProvider, SemanticProviderResult
 
@@ -20,8 +22,13 @@ def _timeout_seconds(name: str, default: float) -> float:
 
 
 def _failure_message(error: Exception) -> str:
-    detail = next((line.strip() for line in str(error).splitlines() if line.strip()), type(error).__name__)
-    return f"{type(error).__name__}: {detail}"[:280]
+    details: list[str] = []
+    current: BaseException | None = error
+    while current is not None and len(details) < 3:
+        detail = next((line.strip() for line in str(current).splitlines() if line.strip()), type(current).__name__)
+        details.append(f"{type(current).__name__}: {detail}")
+        current = current.__cause__
+    return " <- ".join(details)[:500]
 
 
 async def run_checks(
@@ -88,12 +95,13 @@ async def run_checks(
     if include_image:
         image_timeout = _timeout_seconds("EXPOSURE_IMAGE_TIMEOUT_SECONDS", 90)
         try:
+            target = Region(x=0.36, y=0.36, width=0.28, height=0.28)
             candidate = await asyncio.wait_for(
                 provider.generate_candidate(
                     image_bytes,
                     "image/png",
                     "Remove the small center square and continue the flat background.",
-                    Region(x=0.36, y=0.36, width=0.28, height=0.28),
+                    target,
                     "remove",
                     request_timeout_seconds=image_timeout,
                 ),
@@ -101,7 +109,19 @@ async def run_checks(
             )
             with Image.open(io.BytesIO(candidate)) as generated:
                 generated.verify()
-            print(f"Gemini image edit: ok ({provider.image_model})")
+            patch = extract_localized_patch(
+                image_bytes,
+                candidate,
+                target,
+                operation="remove",
+                model=provider.image_model,
+                source_version_id="network-smoke",
+                prompt="Remove the small center square and continue the flat background.",
+            )
+            with Image.open(io.BytesIO(base64.b64decode(patch.patch_base64))) as generated_patch:
+                if generated_patch.convert("RGBA").getchannel("A").getbbox() is None:
+                    raise RuntimeError("localized diff produced an empty patch")
+            print(f"Gemini image edit and localized diff: ok ({provider.image_model})")
             results["image"] = True
         except Exception as error:
             print(f"Gemini image edit: failed ({_failure_message(error)})", file=sys.stderr)

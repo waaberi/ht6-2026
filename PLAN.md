@@ -127,15 +127,15 @@ Issue-to-edit mapping:
 Generative workflow:
 
 1. Render the current original-plus-layers composition.
-2. Send it with the target region and preservation instructions to Nano Banana.
+2. For bounded add/remove edits, crop enough surrounding context to make the selected real-world subject visually unambiguous; send that crop and its remapped target to Nano Banana. Send the full expanded canvas for outpainting.
 3. Align the generated candidate with the input.
-4. Calculate SSIM and Lab color-difference maps.
-5. Restrict changes to the intended region plus a contextual margin.
-6. Clean and feather the difference mask.
-7. Extract changed pixels as an RGBA donor patch.
-8. Store the patch and mask separately.
+4. Choose extraction by edit geometry instead of forcing every result through a diff: use a localized Lab difference map for bounded add/remove edits, but use the complete target band for canvas expansion because every pixel there is newly generated.
+5. For localized edits, use pixels outside the intended region to estimate global color drift and codec noise, then restrict the edit alpha to the exact intended region.
+6. Remove isolated noise, pad the solid donor area, and feather the localized mask into matching context so source edges cannot bleed through.
+7. For expansion, keep the new target band solid and complete so dark generated pixels are not mistaken for an unchanged black placeholder, then crossfade across a narrow declared overlap on the old canvas edge to prevent a hard seam.
+8. Extract the selected generated pixels as an RGBA donor patch, map crop-local patches back onto the full canvas, and store the patch and mask separately.
 9. Superpose the patch as a generative or retouch layer.
-10. Reject results with excessive unrelated drift.
+10. Record unrelated drift diagnostically, but never composite generated pixels outside the intended mask or replace the full photograph.
 
 The generated image is never substituted for the photograph; it only supplies localized pixels to add or cover. [Nano Banana image editing](https://ai.google.dev/gemini-api/docs/image-generation).
 

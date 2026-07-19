@@ -19,7 +19,7 @@ from . import auth
 from .analysis import analyze_deterministic, merge_semantic
 from .auth import require_authenticated_user
 from .curation import create_style_profile, review_portfolio
-from .generative import ExcessiveDriftError, extract_localized_patch
+from .generative import embed_localized_patch, extract_localized_patch, prepare_local_generation
 from .models import (
     AnalysisResult,
     CanvasExpansion,
@@ -327,14 +327,23 @@ async def generative_layer(
             reference_width=reference_size[0],
             reference_height=reference_size[1],
         )
-    rendered_bytes, _ = await asyncio.to_thread(encode_image, rendered, "png")
+    generation_source = rendered
+    generation_target = target
+    crop_box: tuple[int, int, int, int] | None = None
+    if operation in {"remove", "add"}:
+        generation_source, generation_target, crop_box = await asyncio.to_thread(
+            prepare_local_generation,
+            rendered,
+            target,
+        )
+    generation_bytes, _ = await asyncio.to_thread(encode_image, generation_source, "png")
     try:
         candidate = await asyncio.wait_for(
             provider.generate_candidate(
-                rendered_bytes,
+                generation_bytes,
                 "image/png",
                 prompt,
-                target,
+                generation_target,
                 operation,
                 request_timeout_seconds=IMAGE_TIMEOUT_SECONDS,
             ),
@@ -349,18 +358,24 @@ async def generative_layer(
     except GeminiImageError as error:
         logger.exception("Gemini image generation failed")
         raise HTTPException(502, str(error)) from error
-    try:
+    result = await asyncio.to_thread(
+        extract_localized_patch,
+        generation_bytes,
+        candidate,
+        generation_target,
+        operation=operation,
+        model=provider.image_model,
+        source_version_id=source_version_id,
+        prompt=prompt,
+    )
+    if crop_box is not None:
         result = await asyncio.to_thread(
-            extract_localized_patch,
-            rendered_bytes,
-            candidate,
-            target,
-            model=provider.image_model,
-            source_version_id=source_version_id,
+            embed_localized_patch,
+            result,
+            rendered,
+            crop_box,
         )
-        return result.model_copy(update={"expansion": cumulative_expansion})
-    except ExcessiveDriftError as error:
-        raise HTTPException(422, str(error)) from error
+    return result.model_copy(update={"expansion": cumulative_expansion})
 
 
 @app.post("/v1/portfolio-review", response_model=PortfolioReview, dependencies=[Depends(require_authenticated_user)])

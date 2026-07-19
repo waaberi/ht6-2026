@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from exposure_api.models import AnalysisResult, CoachResponse
 from scripts.smoke_gemini import run_checks
@@ -30,7 +30,7 @@ def test_smoke_checks_continue_after_semantic_failure() -> None:
 
         async def generate_candidate(self, *_args, **_kwargs):
             calls.append("image")
-            image = Image.new("RGB", (8, 8), "#496b65")
+            image = Image.new("RGB", (64, 64), "#496b65")
             output = io.BytesIO()
             image.save(output, format="PNG")
             return output.getvalue()
@@ -51,10 +51,15 @@ def test_smoke_checks_continue_after_semantic_failure() -> None:
         summary="Fixture",
     )
 
+    source = Image.new("RGB", (64, 64), "#496b65")
+    ImageDraw.Draw(source).rectangle((25, 25, 39, 39), fill="#eabda8")
+    encoded = io.BytesIO()
+    source.save(encoded, format="PNG")
+
     results = asyncio.run(run_checks(
         PartiallyFailingProvider(),  # type: ignore[arg-type]
         analysis,
-        b"fixture-image",
+        encoded.getvalue(),
         include_image=True,
         include_semantic=True,
     ))
