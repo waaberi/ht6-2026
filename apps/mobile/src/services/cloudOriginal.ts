@@ -3,6 +3,7 @@ import { File } from 'expo-file-system';
 import { getActiveOwnerId } from '../data/ownerScope';
 import { assertAuthenticatedOwner, assertOwnerMatches } from '../domain/ownership';
 import type { PhotoRecord } from '../domain/types';
+import { getCurrentAuthUser } from './auth';
 import { supabase } from './supabase';
 
 export const ensureLocalOriginal = async (photo: PhotoRecord) => {
@@ -11,8 +12,7 @@ export const ensureLocalOriginal = async (photo: PhotoRecord) => {
   const local = new File(photo.originalUri);
   if (local.exists) return local;
   if (!supabase || !photo.remoteOriginalPath) throw new Error('The original is not available on this device.');
-  const { data: sessionData } = await supabase.auth.getSession();
-  assertAuthenticatedOwner(photo.ownerId, sessionData.session?.user.id);
+  assertAuthenticatedOwner(photo.ownerId, getCurrentAuthUser()?.sub);
   if (!photo.remoteOriginalPath.startsWith(`${photo.ownerId}/`)) {
     throw new Error('The remote original belongs to a different account.');
   }

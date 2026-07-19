@@ -72,6 +72,27 @@ def test_expansion_fraction_is_rejected_for_other_tools() -> None:
         )
 
 
+def test_amplify_unifies_localized_add_remove_and_restyle_requests() -> None:
+    common = {
+        "id": "amplify-face",
+        "tool": "amplify",
+        "label": "Amplify face",
+        "reason": "The user requested a localized creative edit.",
+        "based_on": ["issues.face.location"],
+    }
+    with pytest.raises(ValidationError, match="requires an explicit target"):
+        CoachAction(**common, prompt="Make the eyes blue.")
+    with pytest.raises(ValidationError, match="requires a prompt"):
+        CoachAction(**common, target={"x": 0.1, "y": 0.1, "width": 0.8, "height": 0.8})
+
+    action = CoachAction(
+        **common,
+        target={"x": 0.1, "y": 0.1, "width": 0.8, "height": 0.8},
+        prompt="Remove the glasses, make the eyes blue, and add a green beard.",
+    )
+    assert action.tool == "amplify"
+
+
 def test_coach_schema_documents_absolute_global_adjustment_targets() -> None:
     schema = CoachAction.model_json_schema(by_alias=True)
     description = schema["properties"]["adjustments"]["description"]

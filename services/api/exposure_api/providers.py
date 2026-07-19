@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import os
 import re
 from collections.abc import Callable
@@ -10,16 +11,22 @@ from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from google import genai
+from pydantic import ValidationError
 
 from .models import (
     AnalysisResult,
     CoachRequest,
     CoachResponse,
+    GenerativeLayerPlan,
     MetadataAdviceRequest,
     MetadataAdviceResponse,
     Region,
     SemanticAnalysis,
+    SemanticIssue,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 COACH_TOOL_GUIDANCE = {
@@ -31,8 +38,10 @@ COACH_TOOL_GUIDANCE = {
     "adjust_masked": "the same reversible adjustments, restricted to an explicit supplied target",
     "crop": "a normalized x, y, width, and height in canvasTransform.crop; preserve the apparent intent",
     "straighten": "canvasTransform.rotationDegrees grounded in a measured horizon or dominant structural line",
-    "remove": "a localized removal of an accidental distraction inside an explicit target",
-    "add": "an intentional creative addition inside an explicit target, with a precise generation prompt",
+    "amplify": (
+        "a localized generative edit inside an explicit target, with a precise prompt that may add, remove, replace, "
+        "or restyle visible content"
+    ),
     "expand": (
         "an outpaint of exactly one canvas edge selected by one positive side in canvasTransform.expansion, plus an "
         "expansionFraction from 0.1 to 0.5 describing how much of the current canvas dimension to add"
@@ -183,6 +192,21 @@ def _gemini_json_schema(model: type[Any]) -> dict[str, Any]:
     return normalized
 
 
+def _parse_semantic_analysis(output_text: str) -> SemanticAnalysis:
+    """Keep a malformed optional Gemini issue from discarding the full analysis."""
+    payload = json.loads(output_text)
+    if not isinstance(payload, dict) or not isinstance(payload.get("issues"), list):
+        return SemanticAnalysis.model_validate(payload)
+
+    valid_issues: list[SemanticIssue] = []
+    for issue in payload["issues"]:
+        try:
+            valid_issues.append(SemanticIssue.model_validate(issue))
+        except ValidationError:
+            logger.warning("Discarding a malformed Gemini semantic issue", exc_info=True)
+    return SemanticAnalysis.model_validate({**payload, "issues": valid_issues})
+
+
 def _coach_prompt(request: CoachRequest, available_tools: list[str]) -> str:
     selected_issue = next(
         (issue for issue in request.analysis.issues if issue.id == request.selected_issue_id),
@@ -226,8 +250,8 @@ def _coach_prompt(request: CoachRequest, available_tools: list[str]) -> str:
         "actions normally contains zero or one reversible proposal; return two only when the user explicitly requests "
         f"distinct alternatives. Action labels use at most 6 words and reasons at most {action_reason_limit}. Every action must include one "
         "to four valid basedOn paths, and requiresConfirmation must be true. Never output a generic photography checklist, "
-        "repeat the question, or restate evidence without a decision. Use "
-        "remove only for a demonstrated accidental distraction; use add only for an explicit creative request. "
+        "repeat the question, or restate evidence without a decision. Use amplify for any localized generative edit "
+        "and include a self-contained prompt describing the intended visible result. "
         "adjust_global adjustments are absolute editor slider targets, not deltas; omitted sliders stay unchanged. "
         "expand must include expansionFraction from 0.1 to 0.5 as well as exactly one selected expansion edge. "
         "Target the selected issue when one is supplied. It is valid to return no action when the current image already "
@@ -410,7 +434,7 @@ class GeminiProvider:
                 generation_config={"thinking_level": self.thinking_level},
                 **options,
             )
-            return SemanticAnalysis.model_validate_json(interaction.output_text)
+            return _parse_semantic_analysis(interaction.output_text)
 
         analysis, model = await asyncio.to_thread(self._request_with_text_model_fallback, request_model)
         return SemanticProviderResult(analysis=analysis, model=model)
@@ -472,6 +496,47 @@ class GeminiProvider:
         result, model = await asyncio.to_thread(self._request_with_text_model_fallback, request_model)
         return result.model_copy(update={"model": model})
 
+    async def plan_generation(
+        self,
+        prompt: str,
+        request_timeout_seconds: float | None = None,
+    ) -> GenerativeLayerPlan:
+        if not self._client:
+            raise RuntimeError("GEMINI_API_KEY is required for generative layers")
+        planning_prompt = (
+            "Split this photo-edit request into the minimum number of independently controllable visual layers. "
+            "Create separate layers when the user requests distinct subjects, regions, attributes, or objects, but "
+            "keep changes together when they visually depend on each other. Each layer prompt must be a complete, "
+            "imperative image-edit instruction that preserves all unrelated pixels. Do not add details the user did "
+            "not request. Layer names must be concise and describe the visible result. For example, green beard, blue "
+            "eyes, and red hair are three layers. Return one layer for one coherent edit and no more than six layers. "
+            f"User request: {json.dumps(prompt)}"
+        )
+
+        def request_model(model: str) -> GenerativeLayerPlan:
+            assert self._client is not None
+            options = {"timeout": request_timeout_seconds} if request_timeout_seconds is not None else {}
+            interaction = self._client.interactions.create(
+                model=model,
+                input=planning_prompt,
+                response_format={
+                    "type": "text",
+                    "mime_type": "application/json",
+                    "schema": _gemini_json_schema(GenerativeLayerPlan),
+                },
+                generation_config={"thinking_level": self.thinking_level},
+                **options,
+            )
+            return GenerativeLayerPlan.model_validate_json(interaction.output_text)
+
+        try:
+            result, _model = await asyncio.to_thread(self._request_with_text_model_fallback, request_model)
+            return result
+        except Exception as error:
+            if _is_timeout_error(error):
+                raise GeminiImageTimeoutError("Gemini prompt planning timed out.") from error
+            raise GeminiImageError("Gemini could not split the edit into layers.") from error
+
     async def generate_candidate(
         self,
         image_bytes: bytes,
@@ -488,8 +553,10 @@ class GeminiProvider:
             f"width={target.width:.4f}, height={target.height:.4f}"
         )
         operation_instruction = {
-            "remove": "Remove the content inside the target and reconstruct only the surrounding background.",
-            "add": "Add the requested element inside the target, matching the scene's perspective, light, focus, and grain.",
+            "amplify": (
+                "Apply only the requested visible change inside the target, whether it adds, removes, replaces, or "
+                "restyles content. Match the scene's perspective, light, focus, and grain."
+            ),
             "expand": "Fill the black target band by continuing the existing scene naturally across the new canvas edge.",
         }[operation]
         preservation_prompt = (

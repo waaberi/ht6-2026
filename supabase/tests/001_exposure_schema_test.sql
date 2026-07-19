@@ -1,5 +1,5 @@
 begin;
-select plan(23);
+select plan(29);
 
 select has_table('public', 'profiles', 'profiles table exists');
 select has_table('public', 'photos', 'photos table exists');
@@ -26,6 +26,25 @@ select is((select relrowsecurity from pg_class where oid = 'public.analyses'::re
 select has_trigger('public', 'photos', 'photos_protect_original', 'photo originals have an immutable-field trigger');
 select has_fk('public', 'photos', 'photos_current_version_fkey');
 select col_is_unique('public', 'jobs', array['owner_id', 'idempotency_key']);
+
+select col_type_is('public', 'profiles', 'id', 'text', 'Auth0 profile subjects are stored as text');
+select col_type_is('public', 'photos', 'owner_id', 'text', 'Auth0 photo owners are stored as text');
+select has_function('public', 'request_user_id', array[]::text[], 'JWT subject helper exists');
+
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"auth0|pgtap-user","role":"authenticated"}', true);
+select is(public.request_user_id(), 'auth0|pgtap-user', 'JWT helper returns an Auth0 subject verbatim');
+select lives_ok(
+  $$insert into public.profiles (id, display_name) values ('auth0|pgtap-user', 'Auth0 pgTAP user')$$,
+  'an authenticated Auth0 subject can insert its own profile'
+);
+select throws_ok(
+  $$insert into public.profiles (id, display_name) values ('google-oauth2|different-user', 'Wrong owner')$$,
+  '42501',
+  'new row violates row-level security policy for table "profiles"',
+  'an authenticated Auth0 subject cannot insert another profile'
+);
+reset role;
 
 select * from finish();
 rollback;

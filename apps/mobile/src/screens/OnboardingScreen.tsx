@@ -15,20 +15,16 @@ import {
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { colors, layout, radii, spacing, typography } from '../components/theme';
-import { listenForAuthLinks, sendMagicLink } from '../services/auth';
-import { supabase } from '../services/supabase';
+import { useAuthSession } from '../state/AuthContext';
 
 const ONBOARDING_COMPLETE_KEY = 'exposure.onboarding.complete.v1';
 const ONBOARDING_VIDEO = require('../../assets/Exposureonboardht6.mp4');
 const TOTAL_STEPS = 3;
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
 type OnboardingStep = 0 | 1 | 2;
 
 export const hasCompletedOnboarding = async () =>
@@ -41,8 +37,8 @@ export const resetOnboarding = () =>
   AsyncStorage.removeItem(ONBOARDING_COMPLETE_KEY);
 
 export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => {
+  const { configured, signIn: signInWithAuth0, user } = useAuthSession();
   const [step, setStep] = useState<OnboardingStep>(0);
-  const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ text: string; tone: 'info' | 'error' }>();
   const [reduceMotion, setReduceMotion] = useState(true);
@@ -89,18 +85,8 @@ export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => 
   }, [pageMotion, reduceMotion, step]);
 
   useEffect(() => {
-    const stopLinks = listenForAuthLinks((error) => setMessage({ text: error.message, tone: 'error' }));
-    void supabase?.auth.getSession().then(({ data }) => {
-      if (data.session) void finish();
-    });
-    const authSubscription = supabase?.auth.onAuthStateChange((event) => {
-      if (event === 'SIGNED_IN') void finish();
-    }).data.subscription;
-    return () => {
-      stopLinks();
-      authSubscription?.unsubscribe();
-    };
-  }, []);
+    if (user) void finish();
+  }, [user]);
 
   useEffect(() => {
     let mounted = true;
@@ -124,16 +110,10 @@ export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => 
   }, [goToStep, step]);
 
   const signIn = async () => {
-    const normalizedEmail = email.trim();
-    if (!EMAIL_PATTERN.test(normalizedEmail)) {
-      setMessage({ text: 'Enter a valid email address.', tone: 'error' });
-      return;
-    }
     setBusy(true);
     setMessage(undefined);
     try {
-      await sendMagicLink(normalizedEmail);
-      setMessage({ text: 'Sign-in link sent. Open your email to finish signing in.', tone: 'info' });
+      await signInWithAuth0();
     } catch (caught) {
       setMessage({
         text: caught instanceof Error ? caught.message : 'Sign-in failed.',
@@ -218,7 +198,7 @@ export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => 
                     <FeatureRow
                       icon="sparkles-outline"
                       title="Generate"
-                      detail="Remove distractions, add elements or expand the frame."
+                      detail="Amplify details or expand the frame with editable AI layers."
                     />
                     <FeatureRow
                       icon="color-palette-outline"
@@ -251,43 +231,30 @@ export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => 
                   </View>
 
                   <View style={styles.form}>
-                    <TextInput
-                      value={email}
-                      onChangeText={(nextEmail) => {
-                        setEmail(nextEmail);
-                        if (message?.tone === 'error') setMessage(undefined);
-                      }}
-                      keyboardType="email-address"
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                      autoComplete="email"
-                      returnKeyType="send"
-                      onSubmitEditing={signIn}
-                      placeholder="Email address"
-                      placeholderTextColor={colors.textSecondary}
-                      style={[styles.input, message?.tone === 'error' && styles.inputError]}
-                      accessibilityLabel="Email address"
-                      accessibilityHint="A sign-in link will be sent to this address"
-                      testID="onboarding-email"
-                    />
                     <Pressable
                       accessibilityRole="button"
-                      accessibilityState={{ disabled: busy, busy }}
+                      accessibilityHint="Opens secure Auth0 login with Google and email options"
+                      accessibilityState={{ disabled: busy || !configured, busy }}
                       style={({ pressed }) => [
                         styles.primary,
                         pressed && styles.primaryPressed,
-                        busy && styles.disabled,
+                        (busy || !configured) && styles.disabled,
                       ]}
                       onPress={signIn}
-                      disabled={busy}
-                      testID="onboarding-email-submit"
+                      disabled={busy || !configured}
+                      testID="onboarding-auth0-submit"
                     >
                       {busy ? (
                         <ActivityIndicator color={colors.onPrimary} />
                       ) : (
-                        <Text style={styles.primaryText}>Send sign-in link</Text>
+                        <Text style={styles.primaryText}>Continue with Google or email</Text>
                       )}
                     </Pressable>
+                    {!configured ? (
+                      <Text accessibilityRole="alert" style={[styles.message, styles.errorMessage]}>
+                        Auth0 is not configured for this build.
+                      </Text>
+                    ) : null}
                     {message ? (
                       <Text
                         accessibilityLiveRegion="polite"
@@ -301,7 +268,7 @@ export const OnboardingScreen = ({ onComplete }: { onComplete: () => void }) => 
                   <View style={styles.privacyNote}>
                     <Ionicons name="lock-closed-outline" size={16} color={colors.textSecondary} />
                     <Text style={styles.privacyText}>
-                      Location stays private unless you choose otherwise.
+                      Auth0 handles sign-in; location stays private unless you choose otherwise.
                     </Text>
                   </View>
 
@@ -426,17 +393,6 @@ const styles = StyleSheet.create({
   featureTitle: { color: colors.text, fontSize: 16, lineHeight: 21, fontWeight: '800' },
   featureDetail: { color: colors.textSecondary, fontSize: 14, lineHeight: 20, marginTop: spacing.xs },
   form: { gap: spacing.sm },
-  input: {
-    minHeight: 52,
-    borderRadius: 10,
-    backgroundColor: colors.surface,
-    color: colors.text,
-    fontSize: 16,
-    paddingHorizontal: 16,
-    borderWidth: 1,
-    borderColor: colors.outline,
-  },
-  inputError: { borderColor: colors.error },
   primary: {
     minHeight: 52,
     borderRadius: 10,

@@ -8,6 +8,7 @@ import {
   highestQualityPictureSize,
   horizonRollForOrientation,
   normalizeFlashMode,
+  preservesCameraReadinessOnSwitch,
   zoomFromPinch,
 } from './cameraControls';
 
@@ -33,6 +34,11 @@ test('Android selects the largest advertised size for the requested ratio', () =
 
 test('Android falls back to its native highest-resolution ratio strategy', () => {
   assert.equal(highestQualityPictureSize(['1024x1024', 'invalid'], '4:3', 'android'), undefined);
+});
+
+test('iOS camera flips preserve readiness because the native session does not remount', () => {
+  assert.equal(preservesCameraReadinessOnSwitch('ios'), true);
+  assert.equal(preservesCameraReadinessOnSwitch('android'), false);
 });
 
 test('pinch zoom is monotonic and clamped to the camera range', () => {

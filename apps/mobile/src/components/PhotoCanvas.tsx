@@ -13,52 +13,12 @@ import {
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { PanResponder, StyleSheet, View } from 'react-native';
 
+import { addPreviewAdjustments, adjustmentPreviewMatrix, globalPreviewAdjustments } from '../domain/adjustmentPreview';
 import { quarterTurnsForRotation, resolveCanvasExpansion } from '../domain/canvasTransforms';
-import type { AdjustmentValues, AnalysisResult, LayerStack, Region } from '../domain/types';
+import { isTranslatableLayer, layerTranslation } from '../domain/layers';
+import type { AdjustmentValues, AnalysisResult, Layer, LayerStack, LayerTranslation, Region } from '../domain/types';
 import { colors } from './theme';
 import { CropOverlay } from './studio/CropOverlay';
-
-const addAdjustments = (target: AdjustmentValues, source: AdjustmentValues, weight = 1) => {
-  for (const [key, value] of Object.entries(source) as Array<[keyof AdjustmentValues, number]>) {
-    (target as Record<string, number>)[key] = (target[key] ?? 0) + value * weight;
-  }
-};
-
-const globalAdjustments = (stack: LayerStack) => {
-  const values: AdjustmentValues = { ...(stack.adjustments ?? {}) };
-  for (const layer of stack.layers) {
-    if (!layer.enabled || (layer.type !== 'adjustment' && layer.type !== 'style')) continue;
-    const weight = layer.opacity * (layer.type === 'style' ? layer.strength : 1);
-    addAdjustments(values, layer.adjustments, weight);
-  }
-  return values;
-};
-
-const adjustmentMatrix = (values: AdjustmentValues) => {
-  const exposure = values.exposure ?? 0;
-  const contrast = (values.contrast ?? 0) + (values.sharpening ?? 0) * 0.18;
-  const saturation = (values.saturation ?? 0) + (values.vibrance ?? 0) * 0.55;
-  const highlights = values.highlights ?? 0;
-  const shadows = values.shadows ?? 0;
-  const temperature = values.temperature ?? 0;
-  const tint = values.tint ?? 0;
-  const brightness = 2 ** exposure;
-  const c = Math.max(0, 1 + contrast);
-  const s = Math.max(0, 1 + saturation);
-  // A color matrix accurately previews exposure, contrast, saturation, temperature, and tint.
-  // Highlight/shadow offsets are intentionally conservative approximations; detail filters remain authoritative on export.
-  const toneScale = brightness * Math.max(0.2, 1 + highlights * 0.16);
-  const offset = (1 - c) * 0.5 + shadows * 0.12;
-  const rw = 0.2126 * (1 - s);
-  const gw = 0.7152 * (1 - s);
-  const bw = 0.0722 * (1 - s);
-  return [
-    toneScale * c * (rw + s), toneScale * c * gw, toneScale * c * bw, 0, offset + temperature * 0.08,
-    toneScale * c * rw, toneScale * c * (gw + s), toneScale * c * bw, 0, offset + tint * 0.06,
-    toneScale * c * rw, toneScale * c * gw, toneScale * c * (bw + s), 0, offset - temperature * 0.08,
-    0, 0, 0, 1, 0,
-  ];
-};
 
 export const PhotoCanvas = ({
   uri,
@@ -73,6 +33,10 @@ export const PhotoCanvas = ({
   onCropChange,
   onCropCommit,
   onImageSizeChange,
+  onGeneratedLayerReady,
+  onGeneratedLayerError,
+  movableLayerId,
+  onLayerTranslationChange,
 }: {
   uri: string;
   stack: LayerStack;
@@ -86,11 +50,15 @@ export const PhotoCanvas = ({
   onCropChange?: (region: Region) => void;
   onCropCommit?: (region: Region) => void;
   onImageSizeChange?: (size: { width: number; height: number }) => void;
+  onGeneratedLayerReady?: (layerId: string) => void;
+  onGeneratedLayerError?: (layerId: string, error: Error) => void;
+  movableLayerId?: string;
+  onLayerTranslationChange?: (layerId: string, translation: LayerTranslation, commit: boolean) => void;
 }) => {
   const image = useImage(uri);
   const [size, setSize] = useState({ width: 1, height: 1 });
-  const adjustments = useMemo(() => globalAdjustments(stack), [stack]);
-  const matrix = useMemo(() => adjustmentMatrix(adjustments), [adjustments]);
+  const adjustments = useMemo(() => globalPreviewAdjustments(stack), [stack]);
+  const matrix = useMemo(() => adjustmentPreviewMatrix(adjustments), [adjustments]);
   const denoise = Math.max(0, adjustments.denoise ?? 0);
   const grain = Math.max(0, adjustments.grain ?? 0);
   const vignette = Math.max(-1, Math.min(1, adjustments.vignette ?? 0));
@@ -215,6 +183,50 @@ export const PhotoCanvas = ({
       onPanResponderTerminationRequest: () => false,
     });
   }, [geometry.display, onTargetChange]);
+  const movableLayer = stack.layers.find((layer) => (
+    layer.id === movableLayerId && layer.enabled && isTranslatableLayer(layer)
+  ));
+  const movableLayerRef = useRef(movableLayer);
+  const movableLayerIdRef = useRef(movableLayerId);
+  const layerTranslationChangeRef = useRef(onLayerTranslationChange);
+  movableLayerRef.current = movableLayer;
+  movableLayerIdRef.current = movableLayerId;
+  layerTranslationChangeRef.current = onLayerTranslationChange;
+  const moveStart = useRef<LayerTranslation | null>(null);
+  const layerMoveResponder = useMemo(() => {
+    const display = geometry.display;
+    const translated = (dx: number, dy: number): LayerTranslation | undefined => {
+      if (!movableLayerIdRef.current || !moveStart.current) return undefined;
+      return {
+        x: Math.max(-1, Math.min(1, moveStart.current.x + dx / Math.max(1, display.width))),
+        y: Math.max(-1, Math.min(1, moveStart.current.y + dy / Math.max(1, display.height))),
+      };
+    };
+    return PanResponder.create({
+      onStartShouldSetPanResponder: () => Boolean(movableLayerRef.current && layerTranslationChangeRef.current),
+      onMoveShouldSetPanResponder: (_event, gesture) => Boolean(
+        movableLayerRef.current
+        && layerTranslationChangeRef.current
+        && (Math.abs(gesture.dx) > 2 || Math.abs(gesture.dy) > 2),
+      ),
+      onPanResponderGrant: () => {
+        if (movableLayerRef.current) moveStart.current = layerTranslation(movableLayerRef.current);
+      },
+      onPanResponderMove: (_event, gesture) => {
+        const next = translated(gesture.dx, gesture.dy);
+        const layerId = movableLayerIdRef.current;
+        if (next && layerId) layerTranslationChangeRef.current?.(layerId, next, false);
+      },
+      onPanResponderRelease: (_event, gesture) => {
+        const next = translated(gesture.dx, gesture.dy);
+        const layerId = movableLayerIdRef.current;
+        moveStart.current = null;
+        if (next && layerId) layerTranslationChangeRef.current?.(layerId, next, true);
+      },
+      onPanResponderTerminate: () => { moveStart.current = null; },
+      onPanResponderTerminationRequest: () => false,
+    });
+  }, [geometry.display.height, geometry.display.width]);
   const targetRect = target ? {
     x: geometry.display.x + target.x * geometry.display.width,
     y: geometry.display.y + target.y * geometry.display.height,
@@ -226,9 +238,17 @@ export const PhotoCanvas = ({
     <View
       style={styles.frame}
       onLayout={(event) => setSize(event.nativeEvent.layout)}
-      accessibilityLabel={onTargetChange ? 'Photo preview. Drag to select an area.' : 'Non-destructive photo preview'}
-      accessibilityHint={onTargetChange ? 'Drag a rectangle over the area for the AI edit.' : undefined}
-      {...selectionResponder.panHandlers}
+      accessibilityLabel={onTargetChange
+        ? 'Photo preview. Drag to select an area.'
+        : movableLayer
+          ? `Photo preview. Drag to move ${movableLayer.name}.`
+          : 'Non-destructive photo preview'}
+      accessibilityHint={onTargetChange
+        ? 'Drag a rectangle over the area for the AI edit.'
+        : movableLayer
+          ? 'Drag anywhere on the canvas, or use the precise position controls below.'
+          : undefined}
+      {...(onTargetChange ? selectionResponder.panHandlers : layerMoveResponder.panHandlers)}
     >
       <Canvas style={StyleSheet.absoluteFill}>
         <Group clip={geometry.display}>
@@ -246,7 +266,7 @@ export const PhotoCanvas = ({
                 {stack.layers.map((layer) => {
                   if (!layer.enabled || layer.type !== 'masked-adjustment' || !layer.mask.region) return null;
                   const maskedValues: AdjustmentValues = {};
-                  addAdjustments(maskedValues, layer.adjustments, layer.opacity);
+                  addPreviewAdjustments(maskedValues, layer.adjustments, layer.opacity);
                   const region = layer.mask.region;
                   const clip = {
                     x: geometry.full.x + region.x * geometry.full.width,
@@ -257,16 +277,27 @@ export const PhotoCanvas = ({
                   return (
                     <Group key={layer.id} clip={clip}>
                       <SkiaImage image={image} {...geometry.full} fit="fill">
-                        <ColorMatrix matrix={adjustmentMatrix(maskedValues)} />
+                        <ColorMatrix matrix={adjustmentPreviewMatrix(maskedValues)} />
                       </SkiaImage>
                     </Group>
                   );
                 })}
                 {stack.layers.map((layer) => {
                   if (!layer.enabled) return null;
-                  if (layer.type === 'image') return <OverlayImage key={layer.id} uri={layer.uri} opacity={layer.opacity} blendMode={layer.blendMode} rect={geometry.full} />;
-                  if (layer.type === 'retouch') return <OverlayImage key={layer.id} uri={layer.patchUri} opacity={layer.opacity} rect={geometry.full} />;
-                  if (layer.type === 'generative-patch' && !layer.canvasSpace) return <OverlayImage key={layer.id} uri={layer.patchUri} opacity={layer.opacity} rect={geometry.full} />;
+                  if (layer.type === 'image') return <OverlayImage key={layer.id} uri={layer.uri} opacity={layer.opacity} blendMode={layer.blendMode} rect={translatedLayerRect(geometry.full, geometry.display, layer, rotation)} />;
+                  if (layer.type === 'retouch') return <OverlayImage key={layer.id} uri={layer.patchUri} opacity={layer.opacity} rect={translatedLayerRect(geometry.full, geometry.display, layer, rotation)} />;
+                  if (layer.type === 'generative-patch' && !layer.canvasSpace) {
+                    return (
+                      <OverlayImage
+                        key={layer.id}
+                        uri={layer.patchUri}
+                        opacity={layer.opacity}
+                        rect={translatedLayerRect(geometry.full, geometry.display, layer, rotation)}
+                        onLoad={() => onGeneratedLayerReady?.(layer.id)}
+                        onError={(error) => onGeneratedLayerError?.(layer.id, error)}
+                      />
+                    );
+                  }
                   return null;
                 })}
               </Group>
@@ -284,7 +315,16 @@ export const PhotoCanvas = ({
                 width: (geometry.contentWidth + snapshot.left + snapshot.right) * geometry.scale,
                 height: (geometry.contentHeight + snapshot.top + snapshot.bottom) * geometry.scale,
               };
-              return <OverlayImage key={layer.id} uri={layer.patchUri} opacity={layer.opacity} rect={rect} />;
+              return (
+                <OverlayImage
+                  key={layer.id}
+                  uri={layer.patchUri}
+                  opacity={layer.opacity}
+                  rect={translatedLayerRect(rect, geometry.display, layer)}
+                  onLoad={() => onGeneratedLayerReady?.(layer.id)}
+                  onError={(error) => onGeneratedLayerError?.(layer.id, error)}
+                />
+              );
             })}
           </Group>
           {grain > 0 ? (
@@ -327,6 +367,9 @@ export const PhotoCanvas = ({
               <Rect {...targetRect} color={colors.primary} style="stroke" strokeWidth={3} />
             </Group>
           ) : null}
+          {movableLayer ? (
+            <Rect {...geometry.display} color={colors.primary} style="stroke" strokeWidth={2} />
+          ) : null}
         </Group>
       </Canvas>
       {editingCrop && onCropChange && onCropCommit ? (
@@ -355,19 +398,51 @@ export const PhotoCanvas = ({
   );
 };
 
+const translatedLayerRect = (
+  rect: { x: number; y: number; width: number; height: number },
+  canvas: { width: number; height: number },
+  layer: Layer,
+  appliedRotation = 0,
+) => {
+  const translation = layerTranslation(layer);
+  const desiredX = translation.x * canvas.width;
+  const desiredY = translation.y * canvas.height;
+  const cosine = Math.cos(appliedRotation);
+  const sine = Math.sin(appliedRotation);
+  return {
+    ...rect,
+    // Pixel overlays live inside the photo's rotation group. Convert the
+    // canvas-axis offset back into local coordinates so X still moves right
+    // and Y still moves down after the photo is rotated.
+    x: rect.x + cosine * desiredX - sine * desiredY,
+    y: rect.y + sine * desiredX + cosine * desiredY,
+  };
+};
+
 const OverlayImage = ({
   uri,
   opacity,
   blendMode = 'normal',
   rect,
+  onLoad,
+  onError,
 }: {
   uri: string;
   opacity: number;
   blendMode?: 'normal' | 'multiply' | 'screen' | 'overlay';
   rect: { x: number; y: number; width: number; height: number };
+  onLoad?: () => void;
+  onError?: (error: Error) => void;
 }) => {
-  const image = useImage(uri);
+  const image = useImage(uri, onError);
+  const reportedUriRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!image || reportedUriRef.current === uri) return;
+    reportedUriRef.current = uri;
+    onLoad?.();
+  }, [image, onLoad, uri]);
   const skiaBlendMode = blendMode === 'normal' ? 'srcOver' : blendMode;
+  if (!image) return null;
   return (
     <Group opacity={opacity} blendMode={skiaBlendMode}>
       <SkiaImage image={image} {...rect} fit="fill" />

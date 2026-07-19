@@ -17,8 +17,7 @@ const COACH_TOOLS = [
   'adjust_masked',
   'crop',
   'straighten',
-  'remove',
-  'add',
+  'amplify',
   'expand',
   'retake',
 ] as const satisfies readonly CoachTool[];
@@ -276,10 +275,10 @@ const coachAction = (value: unknown, path: string): ParsedCoachAction => {
     invalid(`${path}.adjustments`, `must be present only for ${tool === 'adjust_global' || tool === 'adjust_masked' ? tool : 'adjustment tools'}`);
   }
   if (tool === 'adjust_masked' && !target) invalid(`${path}.target`, 'is required for adjust_masked');
-  if ((tool === 'remove' || tool === 'add') && !target) invalid(`${path}.target`, `is required for ${tool}`);
-  if (!['adjust_masked', 'remove', 'add'].includes(tool) && target) invalid(`${path}.target`, `is not valid for ${tool}`);
-  if (tool === 'add' && !prompt) invalid(`${path}.prompt`, 'is required for add');
-  if (!['remove', 'add', 'expand'].includes(tool) && prompt) invalid(`${path}.prompt`, `is not valid for ${tool}`);
+  if (tool === 'amplify' && !target) invalid(`${path}.target`, 'is required for amplify');
+  if (!['adjust_masked', 'amplify'].includes(tool) && target) invalid(`${path}.target`, `is not valid for ${tool}`);
+  if (tool === 'amplify' && !prompt) invalid(`${path}.prompt`, 'is required for amplify');
+  if (!['amplify', 'expand'].includes(tool) && prompt) invalid(`${path}.prompt`, `is not valid for ${tool}`);
 
   if (tool === 'crop' && !transform?.crop) invalid(`${path}.canvasTransform.crop`, 'is required for crop');
   if (tool === 'crop' && transform && Object.keys(transform).some((key) => key !== 'crop')) {

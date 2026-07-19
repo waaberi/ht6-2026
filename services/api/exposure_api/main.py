@@ -19,7 +19,7 @@ from . import auth
 from .analysis import analyze_deterministic, merge_semantic
 from .auth import require_authenticated_user
 from .curation import create_style_profile, review_portfolio
-from .generative import ExcessiveDriftError, extract_localized_patch
+from .generative import embed_localized_patch, extract_localized_patch, prepare_local_generation
 from .models import (
     AnalysisResult,
     CanvasExpansion,
@@ -27,7 +27,10 @@ from .models import (
     CoachEvidence,
     CoachRequest,
     CoachResponse,
-    GenerativePatchResult,
+    GenerativeLayerBatchResult,
+    GenerativeLayerInstruction,
+    GenerativeLayerPlan,
+    GenerativeLayerResult,
     LayerStack,
     MetadataAdviceRequest,
     MetadataAdviceResponse,
@@ -55,6 +58,10 @@ MAX_UPLOAD_BYTES = int(os.getenv("EXPOSURE_MAX_UPLOAD_BYTES", str(25 * 1024 * 10
 SEMANTIC_TIMEOUT_SECONDS = max(5.0, min(40.0, float(os.getenv("EXPOSURE_SEMANTIC_TIMEOUT_SECONDS", "25"))))
 COACH_TIMEOUT_SECONDS = max(5.0, min(60.0, float(os.getenv("EXPOSURE_COACH_TIMEOUT_SECONDS", "25"))))
 IMAGE_TIMEOUT_SECONDS = max(10.0, min(180.0, float(os.getenv("EXPOSURE_IMAGE_TIMEOUT_SECONDS", "90"))))
+GENERATION_PLAN_TIMEOUT_SECONDS = max(
+    5.0,
+    min(60.0, float(os.getenv("EXPOSURE_GENERATION_PLAN_TIMEOUT_SECONDS", "25"))),
+)
 ANALYSIS_CACHE_MAX_ENTRIES = max(1, int(os.getenv("EXPOSURE_ANALYSIS_CACHE_MAX_ENTRIES", "128")))
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/heic", "image/heif", "image/webp"}
 GPS_KEY = re.compile(r"gps|latitude|longitude|location", re.IGNORECASE)
@@ -100,7 +107,7 @@ def _canonical_fingerprint(value: object) -> str:
 def _analysis_cache_scope(authenticated_user: dict[str, object] | None) -> str:
     if not authenticated_user:
         return "anonymous"
-    user_id = authenticated_user.get("id")
+    user_id = authenticated_user.get("sub")
     if not isinstance(user_id, str) or not user_id:
         return "anonymous"
     return f"user:{hashlib.sha256(user_id.encode('utf-8')).hexdigest()}"
@@ -272,18 +279,18 @@ async def render(
     return Response(body, media_type=media_type, headers={"Cache-Control": "private, no-store"})
 
 
-@app.post("/v1/layers/generative", response_model=GenerativePatchResult, dependencies=[Depends(require_authenticated_user)])
+@app.post("/v1/layers/generative", response_model=GenerativeLayerBatchResult, dependencies=[Depends(require_authenticated_user)])
 async def generative_layer(
     image: Annotated[UploadFile, File()],
     target_json: Annotated[str, Form()],
     prompt: Annotated[str, Form(min_length=1, max_length=800)],
     source_version_id: Annotated[str, Form(min_length=1)],
-    operation: Annotated[str, Form(pattern="^(remove|add|expand)$")] = "remove",
+    operation: Annotated[str, Form(pattern="^(amplify|expand)$")] = "amplify",
     expansion_json: Annotated[str, Form()] = "{}",
     layer_stack_json: Annotated[str, Form()] = '{"canvasTransform":{"rotationDegrees":0,"perspective":[1,0,0,0,1,0,0,0,1]},"layers":[]}',
     assets: Annotated[list[UploadFile], File()] = [],
     asset_ids_json: Annotated[str, Form()] = "[]",
-) -> GenerativePatchResult:
+) -> GenerativeLayerBatchResult:
     if not provider.configured:
         raise HTTPException(503, "GEMINI_API_KEY is required for Nano Banana generative layers")
     image_bytes = await _read_image(image)
@@ -329,19 +336,76 @@ async def generative_layer(
             reference_width=reference_size[0],
             reference_height=reference_size[1],
         )
-    rendered_bytes, _ = await asyncio.to_thread(encode_image, rendered, "png")
-    try:
+    generation_source = rendered
+    generation_target = target
+    crop_box: tuple[int, int, int, int] | None = None
+    if operation == "amplify":
+        generation_source, generation_target, crop_box = await asyncio.to_thread(
+            prepare_local_generation,
+            rendered,
+            target,
+        )
+    generation_bytes, _ = await asyncio.to_thread(encode_image, generation_source, "png")
+
+    if operation == "expand":
+        instructions = [GenerativeLayerInstruction(name=f"Expand {direction}", prompt=prompt)]
+    else:
+        planner = getattr(provider, "plan_generation", None)
+        if planner is None:
+            plan = GenerativeLayerPlan(
+                layers=[GenerativeLayerInstruction(name="Amplify edit", prompt=prompt)],
+            )
+        else:
+            try:
+                plan = await asyncio.wait_for(
+                    planner(prompt, request_timeout_seconds=GENERATION_PLAN_TIMEOUT_SECONDS),
+                    timeout=GENERATION_PLAN_TIMEOUT_SECONDS,
+                )
+            except (TimeoutError, GeminiImageTimeoutError) as error:
+                logger.warning("Gemini prompt planning exceeded %.1f seconds", GENERATION_PLAN_TIMEOUT_SECONDS)
+                raise HTTPException(504, "Gemini prompt planning timed out.") from error
+            except GeminiImageError as error:
+                logger.exception("Gemini prompt planning failed")
+                raise HTTPException(502, str(error)) from error
+        instructions = plan.layers
+
+    async def generate_instruction(instruction: GenerativeLayerInstruction) -> GenerativeLayerResult:
         candidate = await asyncio.wait_for(
             provider.generate_candidate(
-                rendered_bytes,
+                generation_bytes,
                 "image/png",
-                prompt,
-                target,
+                instruction.prompt,
+                generation_target,
                 operation,
                 request_timeout_seconds=IMAGE_TIMEOUT_SECONDS,
             ),
             timeout=IMAGE_TIMEOUT_SECONDS,
         )
+        result = await asyncio.to_thread(
+            extract_localized_patch,
+            generation_bytes,
+            candidate,
+            generation_target,
+            operation=operation,
+            model=provider.image_model,
+            source_version_id=source_version_id,
+            prompt=instruction.prompt,
+        )
+        if crop_box is not None:
+            result = await asyncio.to_thread(
+                embed_localized_patch,
+                result,
+                rendered,
+                crop_box,
+            )
+        return GenerativeLayerResult.model_validate({
+            **result.model_dump(),
+            "name": instruction.name,
+            "prompt": instruction.prompt,
+        })
+
+    try:
+        layers = await asyncio.gather(*(generate_instruction(instruction) for instruction in instructions))
     except (TimeoutError, GeminiImageTimeoutError) as error:
         logger.warning("Gemini image generation exceeded %.1f seconds", IMAGE_TIMEOUT_SECONDS)
         raise HTTPException(504, "Gemini image generation timed out.") from error
@@ -351,18 +415,7 @@ async def generative_layer(
     except GeminiImageError as error:
         logger.exception("Gemini image generation failed")
         raise HTTPException(502, str(error)) from error
-    try:
-        result = await asyncio.to_thread(
-            extract_localized_patch,
-            rendered_bytes,
-            candidate,
-            target,
-            model=provider.image_model,
-            source_version_id=source_version_id,
-        )
-        return result.model_copy(update={"expansion": cumulative_expansion})
-    except ExcessiveDriftError as error:
-        raise HTTPException(422, str(error)) from error
+    return GenerativeLayerBatchResult(layers=layers, expansion=cumulative_expansion)
 
 
 @app.post("/v1/portfolio-review", response_model=PortfolioReview, dependencies=[Depends(require_authenticated_user)])

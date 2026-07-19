@@ -176,7 +176,7 @@ try {
     signal: AbortSignal.timeout(10000),
   });
   if (!cloudResponse.ok) throw new Error(`Supabase auth endpoint returned ${cloudResponse.status}.`);
-  console.log('Supabase auth: ok');
+  console.log('Supabase project: ok');
 
   const serviceEnv = parseEnv('services/api/.env.local');
   const serviceUrl = serviceEnv.SUPABASE_URL?.replace(/\/$/, '');

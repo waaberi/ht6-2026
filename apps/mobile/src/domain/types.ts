@@ -44,6 +44,13 @@ export type CanvasTransform = {
   expansion?: CanvasExpansion;
 };
 
+export type LayerTranslation = {
+  /** Horizontal offset as a fraction of the visible canvas width. */
+  x: number;
+  /** Vertical offset as a fraction of the visible canvas height. */
+  y: number;
+};
+
 export const identityCanvasTransform = (): CanvasTransform => ({
   rotationDegrees: 0,
   perspective: [1, 0, 0, 0, 1, 0, 0, 0, 1],
@@ -54,6 +61,8 @@ type LayerBase = {
   name: string;
   enabled: boolean;
   opacity: number;
+  /** Optional for backwards compatibility with layers saved before positioning shipped. */
+  translation?: LayerTranslation;
   createdAt: string;
 };
 
@@ -71,6 +80,8 @@ export type MaskedAdjustmentLayer = LayerBase & {
 export type ImageLayer = LayerBase & {
   type: 'image';
   assetId: Id;
+  /** Stable identity of the first local import, used to avoid duplicate recent sources. */
+  sourceAssetId?: Id;
   uri: string;
   transform: CanvasTransform;
   blendMode: 'normal' | 'multiply' | 'screen' | 'overlay';
@@ -209,8 +220,7 @@ export type CoachTool =
   | 'adjust_masked'
   | 'crop'
   | 'straighten'
-  | 'remove'
-  | 'add'
+  | 'amplify'
   | 'expand'
   | 'retake';
 
@@ -260,7 +270,7 @@ export type MetadataAdvice = {
   model: string;
 };
 
-export type GenerativeOperation = 'remove' | 'add' | 'expand';
+export type GenerativeOperation = 'amplify' | 'expand';
 
 export type AnalysisResult = {
   versionId: Id;

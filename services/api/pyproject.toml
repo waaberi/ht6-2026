@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Deterministic photo analysis, Gemini orchestration, and non-destructive rendering for Exposure"
 requires-python = ">=3.12"
 dependencies = [
+  "auth0-fastapi-api==1.0.0b7",
   "fastapi>=0.116,<1",
   "google-genai>=2.0,<3",
   "httpx>=0.28,<1",

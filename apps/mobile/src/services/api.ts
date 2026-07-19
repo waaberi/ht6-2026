@@ -9,7 +9,7 @@ import { layerAssetsForStack } from '../domain/assets';
 import { parseCoachResponse } from '../domain/coachResponse';
 import { currentVersion } from '../domain/layers';
 import type { EditablePhotoMetadata } from '../domain/photoMetadata';
-import { supabase } from './supabase';
+import { getAuth0AccessToken } from './auth';
 import type {
   AdjustmentValues,
   AnalysisResult,
@@ -45,9 +45,9 @@ const apiFetch = async (path: string, init: Parameters<typeof fetch>[1]) => {
   );
   try {
     const headers = new Headers(init?.headers);
-    const session = await supabase?.auth.getSession();
-    if (session?.data.session?.access_token) {
-      headers.set('Authorization', `Bearer ${session.data.session.access_token}`);
+    const accessToken = await getAuth0AccessToken();
+    if (accessToken) {
+      headers.set('Authorization', `Bearer ${accessToken}`);
     }
     return await fetch(`${apiUrl}${path}`, { ...init, headers, signal: controller.signal });
   } catch (error) {
@@ -113,7 +113,7 @@ export const askCoach = async (
       layerStack: context.stack,
       selectedIssueId: context.selectedIssueId,
       availableTools: context.availableTools
-        ?? ['adjust_global', 'adjust_masked', 'crop', 'straighten', 'remove', 'add', 'expand', 'retake'],
+        ?? ['adjust_global', 'adjust_masked', 'crop', 'straighten', 'amplify', 'expand', 'retake'],
     }),
   });
   return parseCoachResponse(await parseResponse<unknown>(response));
@@ -153,25 +153,31 @@ export const requestRender = async (
   return response.blob();
 };
 
-export type GenerativePatchResult = {
+export type GeneratedLayerResult = {
+  name: string;
+  prompt: string;
   patchBase64: string;
   maskBase64: string;
   target: Region;
   driftScore: number;
   model: string;
   sourceVersionId: string;
+};
+
+export type GenerativeLayerBatchResult = {
+  layers: GeneratedLayerResult[];
   expansion?: CanvasExpansion;
 };
 
-export const createGenerativePatch = async (
+export const createGenerativeLayers = async (
   photo: PhotoRecord,
   stack: LayerStack,
   target: Region,
   prompt: string,
-  operation: GenerativeOperation = 'remove',
+  operation: GenerativeOperation = 'amplify',
   expansionDirection: 'top' | 'right' | 'bottom' | 'left' = 'right',
   expansionFraction = 0.25,
-): Promise<GenerativePatchResult> => {
+): Promise<GenerativeLayerBatchResult> => {
   const form = new FormData();
   const original = await ensureLocalOriginal(photo);
   form.append('image', original as unknown as Blob, original.name);
@@ -193,7 +199,7 @@ export const createGenerativePatch = async (
   }
   form.append('asset_ids_json', JSON.stringify(assets.map((asset) => asset.id)));
   const response = await apiFetch('/v1/layers/generative', { method: 'POST', body: form });
-  return parseResponse<GenerativePatchResult>(response);
+  return parseResponse<GenerativeLayerBatchResult>(response);
 };
 
 export type PortfolioReview = {

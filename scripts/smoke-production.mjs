@@ -8,7 +8,7 @@ const fail = (message) => { throw new Error(`Exposure production smoke failed: $
 const assert = (condition, message) => { if (!condition) fail(message); };
 
 if (!apiUrl) fail('set EXPOSURE_PRODUCTION_API_URL.');
-if (!accessToken) fail('set EXPOSURE_PRODUCTION_ACCESS_TOKEN to a current Supabase user token.');
+if (!accessToken) fail('set EXPOSURE_PRODUCTION_ACCESS_TOKEN to a current Auth0 access token for the Exposure API.');
 
 let parsedUrl;
 try {
@@ -74,7 +74,7 @@ assert(healthResponse.ok, `/health returned ${healthResponse.status}.`);
 const health = await healthResponse.json();
 assert(health.service === 'Exposure', '/health is not an Exposure API.');
 assert(health.authRequired === true, 'authentication is not required.');
-assert(health.authConfigured === true, 'Supabase authentication is not configured.');
+assert(health.authConfigured === true, 'Auth0 authentication is not configured.');
 assert(health.geminiConfigured === true, 'Gemini is not configured.');
 
 const unsigned = await fetch(`${apiUrl}/v1/analyze`, {

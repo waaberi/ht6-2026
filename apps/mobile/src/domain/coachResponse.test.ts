@@ -64,18 +64,18 @@ test('rejects unsupported, non-finite, and out-of-range adjustments', () => {
 
 test('rejects regions outside normalized image bounds', () => {
   assert.throws(
-    () => parseCoachResponse(response({ tool: 'remove', target: { x: 0.8, y: 0, width: 0.3, height: 0.4 } })),
+    () => parseCoachResponse(response({ tool: 'amplify', prompt: 'Remove the wire', target: { x: 0.8, y: 0, width: 0.3, height: 0.4 } })),
     /inside normalized image bounds/,
   );
   assert.throws(
-    () => parseCoachResponse(response({ tool: 'remove', target: { x: 0, y: 0, width: 0, height: 0.4 } })),
+    () => parseCoachResponse(response({ tool: 'amplify', prompt: 'Remove the wire', target: { x: 0, y: 0, width: 0, height: 0.4 } })),
     /greater than 0/,
   );
 });
 
 test('enforces tool-specific target, prompt, crop, and rotation contracts', () => {
   assert.throws(() => parseCoachResponse(response({ tool: 'adjust_masked', adjustments: { shadows: 0.2 } })), /target.*required/);
-  assert.throws(() => parseCoachResponse(response({ tool: 'add', target: { x: 0, y: 0, width: 0.2, height: 0.2 } })), /prompt.*required/);
+  assert.throws(() => parseCoachResponse(response({ tool: 'amplify', target: { x: 0, y: 0, width: 0.2, height: 0.2 } })), /prompt.*required/);
   assert.throws(() => parseCoachResponse(response({ tool: 'crop', canvasTransform: { rotationDegrees: 2 } })), /crop.*required/);
   assert.throws(() => parseCoachResponse(response({ tool: 'straighten', canvasTransform: { rotationDegrees: 46 } })), /between -45 and 45/);
   assert.throws(() => parseCoachResponse(response({ tool: 'retake', canvasTransform: { rotationDegrees: 2 } })), /not valid for retake/);
@@ -95,7 +95,7 @@ test('requires one expansion edge and a fraction from 0.1 to 0.5', () => {
     /exactly one positive edge/,
   );
   assert.throws(
-    () => parseCoachResponse(response({ tool: 'remove', target: { x: 0, y: 0, width: 0.2, height: 0.2 }, expansionFraction: 0.25 })),
+    () => parseCoachResponse(response({ tool: 'amplify', prompt: 'Remove the wire', target: { x: 0, y: 0, width: 0.2, height: 0.2 }, expansionFraction: 0.25 })),
     /only valid for expand/,
   );
 });

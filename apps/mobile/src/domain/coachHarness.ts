@@ -5,7 +5,7 @@ export type CoachActionPlan =
   | { kind: 'collective-adjustment'; adjustments: AdjustmentValues }
   | { kind: 'masked-adjustment'; adjustments: AdjustmentValues; target: Region }
   | { kind: 'canvas-transform'; transform: CanvasTransform }
-  | { kind: 'generative'; operation: 'remove' | 'add'; target: Region; prompt: string }
+  | { kind: 'generative'; target: Region; prompt: string }
   | { kind: 'expand'; direction: 'top' | 'right' | 'bottom' | 'left'; fraction: number; prompt: string }
   | { kind: 'camera' };
 
@@ -103,10 +103,9 @@ export const planCoachAction = (action: CoachAction, currentTransform: CanvasTra
             },
           }
         : incomplete(action.tool);
-    case 'remove':
-    case 'add':
-      return action.target
-        ? { kind: 'generative', operation: action.tool, target: action.target, prompt: action.prompt ?? action.reason }
+    case 'amplify':
+      return action.target && action.prompt
+        ? { kind: 'generative', target: action.target, prompt: action.prompt }
         : incomplete(action.tool);
     case 'expand': {
       const direction = (['top', 'right', 'bottom', 'left'] as const)

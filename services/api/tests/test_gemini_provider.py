@@ -12,6 +12,7 @@ from exposure_api.models import (
     CoachRequest,
     CoachResponse,
     MetadataAdviceRequest,
+    GenerativeLayerPlan,
     Region,
     SemanticAnalysis,
 )
@@ -101,8 +102,51 @@ def test_semantic_prompt_exposes_grounded_signals_and_concise_contract() -> None
     assert "Explanation: one sentence, at most 22 words" in detailed_prompt
 
 
+def test_semantic_analysis_keeps_valid_response_when_optional_issue_is_malformed() -> None:
+    class Interactions:
+        def create(self, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(output_text=json.dumps({
+                "summary": "Window light gives the portrait a quiet mood.",
+                "assessments": [],
+                "issues": [{
+                    "category": "composition",
+                    "title": "Collapsed subject box",
+                    "explanation": "The proposed location has no measurable width.",
+                    "confidence": 0.8,
+                    "box2d": [120, 680, 820, 680],
+                    "recommendedAction": "Keep the current framing.",
+                    "basedOn": ["metrics.meanLuminance"],
+                }],
+            }))
+
+    analysis = AnalysisResult(
+        version_id="version",
+        checksum="checksum",
+        metrics={"meanLuminance": 0.2},
+        lighting={
+            "exposure": -0.3,
+            "contrast": 0.2,
+            "clippedShadows": 0,
+            "clippedHighlights": 0,
+            "colorCast": {"red": 0, "green": 0, "blue": 0},
+        },
+        signals=[],
+        issues=[],
+        camera_recommendations=[],
+        summary="Measurements ready. AI unavailable.",
+    )
+    provider = GeminiProvider()
+    provider._client = SimpleNamespace(interactions=Interactions())  # type: ignore[assignment]
+
+    result = asyncio.run(provider.analyze_semantics(b"image", "image/png", analysis, {}, {}))
+
+    assert isinstance(result, SemanticProviderResult)
+    assert result.analysis.summary == "Window light gives the portrait a quiet mood."
+    assert result.analysis.issues == []
+
+
 def test_gemini_schemas_use_only_the_supported_structured_output_shape() -> None:
-    for model in (SemanticAnalysis, CoachResponse):
+    for model in (SemanticAnalysis, CoachResponse, GenerativeLayerPlan):
         schema_text = json.dumps(_gemini_json_schema(model))
         assert '"$ref"' not in schema_text
         assert '"$defs"' not in schema_text
@@ -117,7 +161,7 @@ def test_gemini_schemas_use_only_the_supported_structured_output_shape() -> None
     assert "severity" not in semantic_schema["properties"]["issues"]["items"]["properties"]
 
 
-def test_generative_prompt_includes_operation_and_target() -> None:
+def test_amplify_prompt_includes_operation_and_target() -> None:
     captured: dict[str, object] = {}
 
     class Interactions:
@@ -132,14 +176,43 @@ def test_generative_prompt_includes_operation_and_target() -> None:
         "image/png",
         "remove the cable",
         Region(x=0.12, y=0.23, width=0.34, height=0.45),
-        "remove",
+        "amplify",
     ))
     assert result == b"candidate"
     prompt = captured["input"][0]["text"]  # type: ignore[index]
-    assert "operation: remove" in prompt
+    assert "operation: amplify" in prompt
     assert "x=0.1200" in prompt
     assert "y=0.2300" in prompt
     assert captured["response_format"] == {"type": "image", "mime_type": "image/jpeg"}
+
+
+def test_generation_planner_splits_independent_visual_changes() -> None:
+    captured: dict[str, object] = {}
+
+    class Interactions:
+        def create(self, **kwargs: object) -> SimpleNamespace:
+            captured.update(kwargs)
+            return SimpleNamespace(output_text=json.dumps({
+                "layers": [
+                    {"name": "Green beard", "prompt": "Make the beard green."},
+                    {"name": "Blue eyes", "prompt": "Make the eyes blue."},
+                    {"name": "Red hair", "prompt": "Make the hair red."},
+                ],
+            }))
+
+    provider = GeminiProvider()
+    provider._client = SimpleNamespace(interactions=Interactions())  # type: ignore[assignment]
+    plan = asyncio.run(provider.plan_generation("Green beard, blue eyes, and red hair."))
+
+    assert [layer.name for layer in plan.layers] == ["Green beard", "Blue eyes", "Red hair"]
+    prompt = captured["input"]
+    assert "minimum number of independently controllable visual layers" in prompt  # type: ignore[operator]
+    assert "green beard, blue eyes, and red hair are three layers" in prompt  # type: ignore[operator]
+    assert captured["response_format"] == {
+        "type": "text",
+        "mime_type": "application/json",
+        "schema": _gemini_json_schema(GenerativeLayerPlan),
+    }
 
 
 def test_expand_prompt_requests_scene_continuation() -> None:
@@ -177,7 +250,7 @@ def test_image_quota_error_is_normalized() -> None:
             "image/png",
             "remove the cable",
             Region(x=0.1, y=0.1, width=0.2, height=0.2),
-            "remove",
+            "amplify",
         ))
     except GeminiImageQuotaError as error:
         assert "quota" in str(error)
@@ -201,7 +274,7 @@ def test_image_timeout_error_is_normalized() -> None:
             "image/png",
             "remove the cable",
             Region(x=0.1, y=0.1, width=0.2, height=0.2),
-            "remove",
+            "amplify",
             request_timeout_seconds=3,
         ))
 
@@ -363,7 +436,7 @@ def test_coach_prompt_exposes_only_enabled_tools_and_photography_contract() -> N
     assert [item.setting for item in result.capture_advice] == ["stability"]
     prompt = captured["input"]
     assert "- crop:" in prompt
-    assert "- remove:" not in prompt
+    assert "- amplify:" not in prompt
     assert "shutter speed, aperture, and ISO as linked exposure tradeoffs" in prompt
     assert "Return the supplied JSON schema only" in prompt
     assert "absolute editor slider targets, not deltas" in prompt
@@ -503,7 +576,7 @@ def test_coach_request_defaults_to_full_tool_contract_but_respects_explicit_empt
         camera_recommendations=[],
         summary="Fixture",
     )
-    assert len(CoachRequest(analysis=analysis, question="Help").available_tools) == 8
+    assert len(CoachRequest(analysis=analysis, question="Help").available_tools) == 7
     assert CoachRequest(analysis=analysis, question="Help", available_tools=[]).available_tools == []
 
 

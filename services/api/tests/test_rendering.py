@@ -155,6 +155,83 @@ def test_image_asset_remains_an_independent_layer(client: TestClient, image_byte
     assert not np.array_equal(with_layer, without_layer)
 
 
+def test_spatial_layer_translation_matches_the_saved_canvas_offset() -> None:
+    source = Image.new("RGB", (5, 5), "black")
+    source_bytes = io.BytesIO()
+    source.save(source_bytes, format="PNG")
+    overlay_pixels = np.zeros((5, 5, 4), dtype=np.uint8)
+    overlay_pixels[2, 1] = (255, 0, 0, 255)
+    overlay_bytes = io.BytesIO()
+    Image.fromarray(overlay_pixels, "RGBA").save(overlay_bytes, format="PNG")
+
+    for layer in (
+        {
+            "id": "imported",
+            "type": "image",
+            "enabled": True,
+            "opacity": 1,
+            "assetId": "overlay",
+            "blendMode": "normal",
+            "translation": {"x": 0.2, "y": -0.2},
+        },
+        {
+            "id": "generated",
+            "type": "generative-patch",
+            "enabled": True,
+            "opacity": 1,
+            "patchAssetId": "overlay",
+            "canvasSpace": True,
+            "canvasExpansion": {"top": 0, "right": 0, "bottom": 0, "left": 0},
+            "translation": {"x": 0.2, "y": -0.2},
+        },
+    ):
+        rendered = np.asarray(render_layer_stack(
+            source_bytes.getvalue(),
+            LayerStack.model_validate({"canvasTransform": IDENTITY, "layers": [layer]}),
+            {"overlay": overlay_bytes.getvalue()},
+        ).convert("RGB"))
+
+        assert tuple(rendered[1, 2]) == (255, 0, 0)
+        assert tuple(rendered[2, 1]) == (0, 0, 0)
+
+
+def test_layer_translation_stays_on_visible_canvas_axes_after_rotation() -> None:
+    source = Image.new("RGB", (7, 7), "black")
+    source_bytes = io.BytesIO()
+    source.save(source_bytes, format="PNG")
+    overlay_pixels = np.zeros((7, 7, 4), dtype=np.uint8)
+    overlay_pixels[3, 3] = (255, 0, 0, 255)
+    overlay_bytes = io.BytesIO()
+    Image.fromarray(overlay_pixels, "RGBA").save(overlay_bytes, format="PNG")
+    base_layer = {
+        "id": "imported",
+        "type": "image",
+        "enabled": True,
+        "opacity": 1,
+        "assetId": "overlay",
+        "blendMode": "normal",
+    }
+    transform = {**IDENTITY, "rotationDegrees": 90}
+    baseline = np.asarray(render_layer_stack(
+        source_bytes.getvalue(),
+        LayerStack.model_validate({"canvasTransform": transform, "layers": [base_layer]}),
+        {"overlay": overlay_bytes.getvalue()},
+    ).convert("RGB"))
+    translated = np.asarray(render_layer_stack(
+        source_bytes.getvalue(),
+        LayerStack.model_validate({
+            "canvasTransform": transform,
+            "layers": [{**base_layer, "translation": {"x": 1 / 7, "y": 0}}],
+        }),
+        {"overlay": overlay_bytes.getvalue()},
+    ).convert("RGB"))
+    baseline_y, baseline_x = np.unravel_index(np.argmax(baseline[..., 0]), baseline[..., 0].shape)
+    translated_y, translated_x = np.unravel_index(np.argmax(translated[..., 0]), translated[..., 0].shape)
+
+    assert translated_x == baseline_x + 1
+    assert translated_y == baseline_y
+
+
 def test_canvas_space_patch_fills_an_expanded_edge() -> None:
     source = Image.new("RGB", (20, 12), "#335577")
     source_bytes = io.BytesIO()

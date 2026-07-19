@@ -1,7 +1,7 @@
 import { Directory, File, Paths } from 'expo-file-system';
 
 import { layerAssetsForStacks } from '../domain/assets';
-import { mergeStyleProfiles, type SavedStyleProfile } from '../data/styleRepository';
+import { clearStyleProfileDeletionId, mergeStyleProfiles, type SavedStyleProfile } from '../data/styleRepository';
 import { clearPhotoDeletionId } from '../data/photoRepository';
 import { loadPreferences, savePreferences, type ExposurePreferences } from '../data/preferences';
 import { getActiveOwnerId } from '../data/ownerScope';
@@ -22,12 +22,12 @@ import {
 } from '../domain/syncReliability';
 import type { AnalysisResult, Layer, PhotoRecord, PhotoVersion } from '../domain/types';
 import type { PortfolioReview, StyleProfileResult } from './api';
+import { getCurrentAuthUser } from './auth';
 import { supabase } from './supabase';
 
 const requireSessionOwner = async (ownerId: OwnerId) => {
   if (!supabase) throw new Error('Cloud sync is not configured.');
-  const { data } = await supabase.auth.getSession();
-  return assertAuthenticatedOwner(ownerId, data.session?.user.id);
+  return assertAuthenticatedOwner(ownerId, getCurrentAuthUser()?.sub);
 };
 
 const uploadOnce = async (bucket: string, path: string, uri: string, contentType: string) => {
@@ -103,6 +103,27 @@ export const syncPhotoDeletions = async (ownerId: OwnerId, photoIds: string[]): 
     ]);
     await clearPhotoDeletionId(photoId, ownerId);
     completed.push(photoId);
+  }
+  return completed;
+};
+
+export const syncStyleProfileDeletions = async (
+  ownerId: OwnerId,
+  styleIds: string[],
+): Promise<string[]> => {
+  if (!supabase || styleIds.length === 0) return [];
+  const userId = await requireSessionOwner(ownerId);
+  const completed: string[] = [];
+  for (const styleId of styleIds) {
+    await requireSessionOwner(ownerId);
+    const { error } = await supabase
+      .from('style_profiles')
+      .delete()
+      .eq('id', styleId)
+      .eq('owner_id', userId);
+    if (error) throw error;
+    await clearStyleProfileDeletionId(styleId, ownerId);
+    completed.push(styleId);
   }
   return completed;
 };
@@ -501,6 +522,7 @@ export const pullRemoteStyles = async (ownerId: OwnerId) => {
     adjustments: (row.adjustments ?? {}) as SavedStyleProfile['adjustments'],
     mood: row.mood as string,
     createdAt: row.created_at as string,
+    updatedAt: (row.updated_at ?? row.created_at) as string,
   })), ownerId);
 };
 
@@ -559,7 +581,9 @@ export const persistStyleProfile = async (style: StyleProfileResult, referencePh
     palette: style.palette,
     adjustments: style.adjustments,
     mood: style.mood,
-    model_versions: { extractor: 'exposure-style-1' },
+    model_versions: referencePhotoIds.length
+      ? { extractor: 'exposure-style-1', source: 'generated' }
+      : { source: 'manual' },
   }, { onConflict: 'id' });
   if (error) throw error;
 };

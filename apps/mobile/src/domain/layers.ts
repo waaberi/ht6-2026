@@ -1,4 +1,4 @@
-import type { AdjustmentValues, CanvasTransform, Layer, LayerStack, PhotoRecord, PhotoVersion } from './types';
+import type { AdjustmentValues, CanvasTransform, Layer, LayerStack, LayerTranslation, PhotoRecord, PhotoVersion } from './types';
 import { identityCanvasTransform } from './types';
 
 const copyStack = (stack: LayerStack): LayerStack => JSON.parse(JSON.stringify(stack)) as LayerStack;
@@ -33,6 +33,23 @@ export const collectiveAdjustmentValues = (stack: LayerStack): AdjustmentValues 
     if (layer.type === 'adjustment' && layer.enabled) addAdjustmentValues(values, layer.adjustments, layer.opacity);
   }
   return values;
+};
+
+/**
+ * Flattens the transferable, global parts of a photo's edit stack into one
+ * reusable preset. Photo-specific geometry, masks, and generated pixels stay
+ * with the source photo, while enabled Looks are folded in at their strength.
+ */
+export const reusableStyleAdjustments = (stack: LayerStack): AdjustmentValues => {
+  const values = collectiveAdjustmentValues(stack);
+  for (const layer of stack.layers) {
+    if (layer.type === 'style' && layer.enabled) {
+      addAdjustmentValues(values, layer.adjustments, layer.opacity * layer.strength);
+    }
+  }
+  return Object.fromEntries(
+    Object.entries(values).filter(([, value]) => Math.abs(value ?? 0) > 0.0001),
+  ) as AdjustmentValues;
 };
 
 export const setCollectiveAdjustments = (stack: LayerStack, adjustments: AdjustmentValues): LayerStack => ({
@@ -96,6 +113,39 @@ export const setLayerOpacity = (stack: LayerStack, layerId: string, opacity: num
   layers: stack.layers.map((layer) =>
     layer.id === layerId ? { ...layer, opacity: Math.max(0, Math.min(1, opacity)) } : layer,
   ),
+});
+
+export type TranslatableLayer = Extract<Layer, { type: 'image' | 'retouch' | 'generative-patch' }>;
+
+export const isTranslatableLayer = (layer: Layer): layer is TranslatableLayer => (
+  layer.type === 'image' || layer.type === 'retouch' || layer.type === 'generative-patch'
+);
+
+export const layerTranslation = (layer: Layer): LayerTranslation => ({
+  x: layer.translation?.x ?? 0,
+  y: layer.translation?.y ?? 0,
+});
+
+const clampLayerTranslation = (value: number) => Math.max(-1, Math.min(1, value));
+
+export const setLayerTranslation = (
+  stack: LayerStack,
+  layerId: string,
+  translation: LayerTranslation,
+): LayerStack => ({
+  ...stack,
+  canvasTransform: { ...stack.canvasTransform },
+  layers: stack.layers.map((layer) => (
+    layer.id === layerId && isTranslatableLayer(layer)
+      ? {
+          ...layer,
+          translation: {
+            x: clampLayerTranslation(translation.x),
+            y: clampLayerTranslation(translation.y),
+          },
+        }
+      : layer
+  )),
 });
 
 export const reorderLayer = (stack: LayerStack, layerId: string, direction: -1 | 1): LayerStack => {
