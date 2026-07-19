@@ -11,7 +11,15 @@ from typing import Any, TypeVar
 
 from google import genai
 
-from .models import AnalysisResult, CoachRequest, CoachResponse, Region, SemanticAnalysis
+from .models import (
+    AnalysisResult,
+    CoachRequest,
+    CoachResponse,
+    MetadataAdviceRequest,
+    MetadataAdviceResponse,
+    Region,
+    SemanticAnalysis,
+)
 
 
 COACH_TOOL_GUIDANCE = {
@@ -269,6 +277,30 @@ def _known_evidence_paths(request: CoachRequest) -> set[str]:
     return paths
 
 
+def _metadata_advice_prompt(request: MetadataAdviceRequest) -> str:
+    return (
+        "You are Exposure's camera and lens specialist. Review how this photograph uses the supplied hardware. "
+        "The metadata fields are user-confirmed but may be incomplete; the measured image analysis is factual. "
+        "Use established product knowledge only. Never invent a feature, sensor, stabilization system, macro mode, "
+        "minimum focus distance, weather sealing, weight, or optical trait. When a model name is ambiguous or a "
+        "trait is uncertain, say so plainly instead of guessing. Do not produce marketing copy.\n\n"
+        "Return JSON matching the schema with these sections:\n"
+        "- cameraProfile: 25-50 words on the named camera's relevant strengths or specialization, such as portability, "
+        "color rendering, low-light ability, autofocus, or macro support, only when genuinely associated with it.\n"
+        "- lensBehavior: 25-50 words on how the named lens and supplied focal length/aperture behave, including useful "
+        "optical strengths or tradeoffs relevant to this image.\n"
+        "- settingsAssessment: 35-65 words explicitly assessing ISO, f-stop, shutter speed, and focal length. Tie them "
+        "to measured brightness, clipping, noise, and detail. Name missing settings without inventing them.\n"
+        "- hardwareUse: 25-50 words deciding whether this shot uses the body and lens well, followed by the single most "
+        "useful capture change. Explain the exposure triangle tradeoff when recommending a setting change.\n"
+        "- strength: zero or one restrained, specific compliment of at most 20 words. Leave it empty unless supported "
+        "by the image measurements or the selected settings. Never flatter the photographer.\n\n"
+        "Keep each section complete but concise. Do not suggest editor sliders, presets, or generated edits. "
+        f"User-confirmed metadata: {request.metadata.model_dump_json(by_alias=True)}\n"
+        f"Measured analysis: {request.analysis.model_dump_json(by_alias=True)}"
+    )
+
+
 def _ground_coach_response(request: CoachRequest, response: CoachResponse) -> CoachResponse:
     allowed_tools = set(request.available_tools)
     known_paths = _known_evidence_paths(request)
@@ -411,6 +443,34 @@ class GeminiProvider:
 
         result, model = await asyncio.to_thread(self._request_with_text_model_fallback, request_model)
         return _ground_coach_response(request, result).model_copy(update={"model": model})
+
+    async def metadata_advice(
+        self,
+        request: MetadataAdviceRequest,
+        request_timeout_seconds: float | None = None,
+    ) -> MetadataAdviceResponse | None:
+        if not self._client:
+            return None
+        prompt = _metadata_advice_prompt(request)
+
+        def request_model(model: str) -> MetadataAdviceResponse:
+            assert self._client is not None
+            options = {"timeout": request_timeout_seconds} if request_timeout_seconds is not None else {}
+            interaction = self._client.interactions.create(
+                model=model,
+                input=prompt,
+                response_format={
+                    "type": "text",
+                    "mime_type": "application/json",
+                    "schema": _gemini_json_schema(MetadataAdviceResponse),
+                },
+                generation_config={"thinking_level": self.thinking_level},
+                **options,
+            )
+            return MetadataAdviceResponse.model_validate_json(interaction.output_text)
+
+        result, model = await asyncio.to_thread(self._request_with_text_model_fallback, request_model)
+        return result.model_copy(update={"model": model})
 
     async def generate_candidate(
         self,

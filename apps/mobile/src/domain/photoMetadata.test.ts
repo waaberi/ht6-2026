@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { analysisWithEditableMetadata, editableMetadataFrom, exifWithEditableMetadata } from './photoMetadata';
+import {
+  analysisWithEditableMetadata,
+  editableMetadataFrom,
+  exifWithEditableMetadata,
+  filledMetadataFieldCount,
+} from './photoMetadata';
 import type { AnalysisResult } from './types';
 
 const analysis = (): AnalysisResult => ({
@@ -78,4 +83,23 @@ test('edited metadata becomes grounded Coach evidence and blank fields stay abse
   assert.equal(enriched.metrics.exifAperture, 1.8);
   assert.equal(enriched.metrics.exifExposureTimeSeconds, 1 / 30);
   assert.equal(enriched.metrics.exifFocalLengthMm, 35);
+});
+
+test('hardware advice requires more than three populated metadata fields', () => {
+  assert.equal(filledMetadataFieldCount({
+    camera: 'Camera Z',
+    lens: '',
+    iso: '800',
+    aperture: 'f/1.8',
+    shutterSpeed: '',
+    focalLength: '',
+  }), 3);
+  assert.equal(filledMetadataFieldCount({
+    camera: 'Camera Z',
+    lens: '35mm F2',
+    iso: '800',
+    aperture: 'f/1.8',
+    shutterSpeed: '',
+    focalLength: '',
+  }), 4);
 });

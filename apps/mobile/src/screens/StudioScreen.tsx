@@ -25,7 +25,7 @@ import {
   analysisWithEditableMetadata,
   editableMetadataFrom,
   exifWithEditableMetadata,
-  METADATA_ADVICE_QUESTION,
+  filledMetadataFieldCount,
   type EditablePhotoMetadata,
 } from '../domain/photoMetadata';
 import {
@@ -46,10 +46,11 @@ import type {
   GenerativePatchLayer,
   Issue,
   LayerStack,
+  MetadataAdvice,
   Region,
   StyleLayer,
 } from '../domain/types';
-import { ApiUnavailableError, askCoach, createGenerativePatch } from '../services/api';
+import { ApiUnavailableError, askCoach, createGenerativePatch, getMetadataAdvice } from '../services/api';
 import { exportAndShare } from '../services/export';
 import { persistPreferences } from '../services/sync';
 import { useExposure } from '../state/ExposureContext';
@@ -139,6 +140,8 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   const [metadataDraft, setMetadataDraft] = useState<EditablePhotoMetadata>(() => (
     editableMetadataFrom(selectedPhoto?.exif ?? {}, analysis)
   ));
+  const [metadataAdvice, setMetadataAdvice] = useState<MetadataAdvice>();
+  const [metadataAdviceBusy, setMetadataAdviceBusy] = useState(false);
   const metadataDraftRef = useRef(metadataDraft);
   metadataDraftRef.current = metadataDraft;
   const [selectedIssueId, setSelectedIssueId] = useState<string>();
@@ -271,6 +274,7 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   useEffect(() => {
     setMetadataDraft(editableMetadataFrom(selectedPhoto?.exif ?? {}, analysis));
     setCoachResponse(undefined);
+    setMetadataAdvice(undefined);
   }, [analysis?.versionId, selectedPhoto?.id]);
 
   useEffect(() => {
@@ -469,20 +473,17 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
   };
 
   const requestMetadataAdvice = async () => {
-    if (!analysis || coachBusy) return;
+    if (!analysis || metadataAdviceBusy || filledMetadataFieldCount(metadataDraftRef.current) <= 3) return;
     setMessage(undefined);
-    setCoachBusy(true);
+    setMetadataAdviceBusy(true);
     try {
       await persistMetadataDraft();
       const groundedAnalysis = analysisWithEditableMetadata(analysis, metadataDraftRef.current);
-      setCoachResponse(await askCoach(groundedAnalysis, METADATA_ADVICE_QUESTION, {
-        stack: version.stack,
-        availableTools: [],
-      }));
+      setMetadataAdvice(await getMetadataAdvice(groundedAnalysis, metadataDraftRef.current));
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Camera advice is unavailable.');
+      setMessage(error instanceof Error ? error.message : 'Hardware advice is unavailable.');
     } finally {
-      setCoachBusy(false);
+      setMetadataAdviceBusy(false);
     }
   };
 
@@ -922,14 +923,14 @@ export const StudioScreen = ({ onClose, onRetake }: { onClose: () => void; onRet
                 applying={applying}
                 feedback={coachFeedback}
                 metadata={metadataDraft}
-                metadataAdvice={coachResponse}
-                metadataAdviceBusy={coachBusy}
+                metadataAdvice={metadataAdvice}
+                metadataAdviceBusy={metadataAdviceBusy}
                 onAnalyze={analyze}
                 onAccept={() => void acceptAllCoachFeedback()}
                 onMetadataAdvice={() => void requestMetadataAdvice()}
                 onMetadataChange={(key, value) => {
                   setMetadataDraft((current) => ({ ...current, [key]: value }));
-                  setCoachResponse(undefined);
+                  setMetadataAdvice(undefined);
                 }}
                 onMetadataCommit={() => void saveMetadataDraft()}
                 onOpenSection={(section) => {
@@ -1119,12 +1120,11 @@ const CoachEditPreviewPanel = ({
   </View>
 );
 
-type CoachPanelSection = 'feedback' | 'meta' | 'chat';
+type CoachPanelSection = 'feedback' | 'meta';
 
 const coachPanelSections: Array<{ id: CoachPanelSection; label: string }> = [
   { id: 'feedback', label: 'Feedback' },
   { id: 'meta', label: 'Meta' },
-  { id: 'chat', label: 'Chat' },
 ];
 
 const coachControlLabels: Record<keyof AdjustmentValues, string> = {
@@ -1228,13 +1228,22 @@ const MetadataPanel = ({
   onAdvice,
 }: {
   metadata: EditablePhotoMetadata;
-  advice?: CoachResponse;
+  advice?: MetadataAdvice;
   busy: boolean;
   onChange: (key: keyof EditablePhotoMetadata, value: string) => void;
   onCommit: () => void;
   onAdvice: () => void;
-}) => (
-  <>
+}) => {
+  const populatedFields = filledMetadataFieldCount(metadata);
+  const hasEnoughMetadata = populatedFields > 3;
+  const sections = advice ? [
+    { title: 'Camera profile', body: advice.cameraProfile },
+    { title: 'Lens behavior', body: advice.lensBehavior },
+    { title: 'Settings assessment', body: advice.settingsAssessment },
+    { title: 'Hardware use', body: advice.hardwareUse },
+  ] : [];
+  return (
+    <>
     <Text style={styles.metaIntro}>Photo metadata is saved automatically and used to ground camera advice.</Text>
     <View style={styles.metaFields}>
       {metadataFields.map((field) => (
@@ -1258,33 +1267,47 @@ const MetadataPanel = ({
       ))}
     </View>
 
+    {!hasEnoughMetadata ? (
+      <Text accessibilityRole="alert" style={styles.metaInsufficient}>
+        There isn&apos;t enough information to provide hardware feedback. Fill in at least 4 of the 6 fields above.
+      </Text>
+    ) : null}
+
     <Pressable
       accessibilityRole="button"
-      accessibilityState={{ disabled: busy }}
-      disabled={busy}
+      accessibilityState={{ disabled: busy || !hasEnoughMetadata }}
+      disabled={busy || !hasEnoughMetadata}
       onPress={onAdvice}
-      style={({ pressed }) => [styles.metaAdviceButton, pressed && styles.primaryPressed, busy && styles.disabled]}
+      style={({ pressed }) => [
+        styles.metaAdviceButton,
+        pressed && styles.primaryPressed,
+        (busy || !hasEnoughMetadata) && styles.disabled,
+      ]}
     >
       {busy
         ? <ActivityIndicator color={colors.onPrimary} />
-        : <Text style={styles.metaAdviceButtonText}>{advice ? 'Refresh camera advice' : 'Get camera advice'}</Text>}
+        : <Text style={styles.metaAdviceButtonText}>{advice ? 'Refresh hardware review' : 'Review my hardware use'}</Text>}
     </Pressable>
 
     {advice ? (
-      <View accessibilityLabel="Camera advice" style={styles.metaAdviceCard}>
-        <Text style={styles.metaAdviceTitle}>{advice.headline}</Text>
-        <Text style={styles.metaAdviceReason}>{advice.reason}</Text>
-        {advice.captureAdvice.map((item, index) => (
-          <View key={`${item.setting}-${index}`} style={styles.metaAdviceRow}>
-            <Text style={styles.metaAdviceSetting}>{item.setting.replace('-', ' ')}</Text>
-            {item.value ? <Text style={styles.metaAdviceValue}>{item.value}</Text> : null}
-            {item.tradeoff ? <Text style={styles.metaAdviceTradeoff}>{item.tradeoff}</Text> : null}
+      <View accessibilityLabel="Hardware advice" style={styles.metaAdviceCard}>
+        {sections.map((item, index) => (
+          <View key={item.title} style={[styles.metaAdviceSection, index === 0 && styles.metaAdviceSectionFirst]}>
+            <Text style={styles.metaAdviceSectionTitle}>{item.title}</Text>
+            <Text style={styles.metaAdviceReason}>{item.body}</Text>
           </View>
         ))}
+        {advice.strength ? (
+          <View style={styles.metaStrength}>
+            <MaterialCommunityIcons color={colors.success} name="check-circle-outline" size={18} />
+            <Text style={styles.metaStrengthText}>{advice.strength}</Text>
+          </View>
+        ) : null}
       </View>
     ) : null}
-  </>
-);
+    </>
+  );
+};
 
 const CoachPanel = ({
   analysis,
@@ -1306,7 +1329,7 @@ const CoachPanel = ({
   applying: boolean;
   feedback?: CoachFeedbackPlan;
   metadata: EditablePhotoMetadata;
-  metadataAdvice?: CoachResponse;
+  metadataAdvice?: MetadataAdvice;
   metadataAdviceBusy: boolean;
   onAnalyze: () => void;
   onAccept: () => void;
@@ -1688,15 +1711,16 @@ const styles = StyleSheet.create({
   metaField: { gap: 6 },
   metaLabel: { color: colors.text, fontSize: 12, fontWeight: '800' },
   metaInput: { minHeight: 48, color: colors.text, backgroundColor: colors.background, borderWidth: 1, borderColor: colors.outline, borderRadius: 8, paddingHorizontal: 12, fontSize: 14 },
+  metaInsufficient: { color: colors.warning, fontSize: 12, lineHeight: 18, marginTop: 14 },
   metaAdviceButton: { minHeight: 52, alignItems: 'center', justifyContent: 'center', borderRadius: 8, backgroundColor: colors.primary, marginTop: 16 },
   metaAdviceButtonText: { color: colors.onPrimary, fontSize: 14, fontWeight: '800' },
   metaAdviceCard: { marginTop: 14, padding: 14, borderRadius: 10, borderWidth: 1, borderColor: colors.outline, backgroundColor: colors.background },
-  metaAdviceTitle: { color: colors.text, fontSize: 15, lineHeight: 21, fontWeight: '800' },
-  metaAdviceReason: { color: colors.textSecondary, fontSize: 13, lineHeight: 19, marginTop: 5 },
-  metaAdviceRow: { paddingTop: 10, marginTop: 10, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.separator },
-  metaAdviceSetting: { color: colors.textSecondary, fontSize: 11, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.6 },
-  metaAdviceValue: { color: colors.text, fontSize: 13, lineHeight: 19, fontWeight: '800', marginTop: 3 },
-  metaAdviceTradeoff: { color: colors.textSecondary, fontSize: 12, lineHeight: 18, marginTop: 2 },
+  metaAdviceSection: { paddingTop: 13, marginTop: 13, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.separator },
+  metaAdviceSectionFirst: { paddingTop: 0, marginTop: 0, borderTopWidth: 0 },
+  metaAdviceSectionTitle: { color: colors.text, fontSize: 14, lineHeight: 20, fontWeight: '800' },
+  metaAdviceReason: { color: colors.textSecondary, fontSize: 13, lineHeight: 20, marginTop: 5 },
+  metaStrength: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, paddingTop: 13, marginTop: 13, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.separator },
+  metaStrengthText: { flex: 1, color: colors.text, fontSize: 12, lineHeight: 18, fontWeight: '700' },
   segmented: { flexDirection: 'row', minHeight: 56, borderRadius: 10, padding: 4, backgroundColor: colors.background, marginBottom: 16 },
   segment: { flex: 1, minHeight: 48, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
   segmentActive: { backgroundColor: colors.primary },

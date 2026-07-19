@@ -337,6 +337,37 @@ def test_coach_returns_structured_fallback(client: TestClient, image_bytes: byte
     assert len(payload["actions"]) <= 2
 
 
+def test_metadata_advice_requires_four_fields_and_returns_full_review(client: TestClient, image_bytes: bytes) -> None:
+    analysis = client.post(
+        "/v1/analyze",
+        files={"image": ("photo.png", image_bytes, "image/png")},
+        data={"version_id": "metadata-advice"},
+    ).json()
+    insufficient = client.post("/v1/metadata-advice", json={
+        "analysis": analysis,
+        "metadata": {"camera": "Camera X", "iso": "400", "aperture": "f/2.8"},
+    })
+    assert insufficient.status_code == 422
+
+    response = client.post("/v1/metadata-advice", json={
+        "analysis": analysis,
+        "metadata": {
+            "camera": "Camera X",
+            "lens": "35mm F2",
+            "iso": "400",
+            "aperture": "f/2.8",
+            "shutterSpeed": "1/60 s",
+            "focalLength": "35 mm",
+        },
+    })
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["cameraProfile"]
+    assert payload["lensBehavior"]
+    assert payload["settingsAssessment"]
+    assert payload["hardwareUse"]
+
+
 def test_coach_timeout_returns_structured_local_response(
     client: TestClient,
     image_bytes: bytes,

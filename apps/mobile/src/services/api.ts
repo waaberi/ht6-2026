@@ -8,6 +8,7 @@ import { apiErrorMessage, resolveApiUrl } from '../domain/apiConfiguration';
 import { layerAssetsForStack } from '../domain/assets';
 import { parseCoachResponse } from '../domain/coachResponse';
 import { currentVersion } from '../domain/layers';
+import type { EditablePhotoMetadata } from '../domain/photoMetadata';
 import { supabase } from './supabase';
 import type {
   AdjustmentValues,
@@ -17,6 +18,7 @@ import type {
   CoachTool,
   GenerativeOperation,
   LayerStack,
+  MetadataAdvice,
   PhotoRecord,
   Region,
 } from '../domain/types';
@@ -115,6 +117,18 @@ export const askCoach = async (
     }),
   });
   return parseCoachResponse(await parseResponse<unknown>(response));
+};
+
+export const getMetadataAdvice = async (
+  analysis: AnalysisResult,
+  metadata: EditablePhotoMetadata,
+): Promise<MetadataAdvice> => {
+  const response = await apiFetch('/v1/metadata-advice', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ analysis, metadata }),
+  });
+  return parseResponse<MetadataAdvice>(response);
 };
 
 export const requestRender = async (

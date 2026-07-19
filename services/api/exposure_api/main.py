@@ -29,6 +29,8 @@ from .models import (
     CoachResponse,
     GenerativePatchResult,
     LayerStack,
+    MetadataAdviceRequest,
+    MetadataAdviceResponse,
     PortfolioReview,
     Region,
     StyleProfile,
@@ -454,4 +456,54 @@ async def coach(request: CoachRequest) -> CoachResponse:
         capture_advice=capture_advice,
         actions=[],
         model="exposure-fallback-coach-1",
+    )
+
+
+@app.post(
+    "/v1/metadata-advice",
+    response_model=MetadataAdviceResponse,
+    dependencies=[Depends(require_authenticated_user)],
+)
+async def metadata_advice(request: MetadataAdviceRequest) -> MetadataAdviceResponse:
+    if provider.configured:
+        try:
+            response = await asyncio.wait_for(
+                provider.metadata_advice(request, request_timeout_seconds=COACH_TIMEOUT_SECONDS),
+                timeout=COACH_TIMEOUT_SECONDS,
+            )
+            if response:
+                return response
+        except TimeoutError:
+            logger.warning("Gemini metadata advice exceeded %.1f seconds; returning the local response", COACH_TIMEOUT_SECONDS)
+        except Exception:
+            logger.exception("Gemini metadata advice request failed")
+
+    mean_luminance = request.analysis.metrics.get("meanLuminance")
+    luminance = float(mean_luminance) if isinstance(mean_luminance, (int, float)) else 0.5
+    exposure_state = "underexposed" if luminance < 0.42 else "overexposed" if luminance > 0.62 else "evenly exposed"
+    metadata = request.metadata
+    setting_summary = (
+        f"ISO {metadata.iso or 'not supplied'}, aperture {metadata.aperture or 'not supplied'}, "
+        f"shutter {metadata.shutter_speed or 'not supplied'}, and focal length {metadata.focal_length or 'not supplied'} "
+        f"produced a measured luminance of {luminance:.2f}, which is {exposure_state}."
+    )
+    if exposure_state == "underexposed":
+        setting_summary += " Raise ISO or slow the shutter; choose between added noise and greater motion-blur risk."
+    elif exposure_state == "overexposed":
+        setting_summary += " Lower ISO or use a faster shutter; preserve highlights while checking motion remains controlled."
+    else:
+        setting_summary += " The exposure triangle is already balanced, so change a setting only for motion or depth-of-field intent."
+    return MetadataAdviceResponse(
+        camera_profile=(
+            f"{metadata.camera or 'The camera model'} is recorded, but model-specific strengths cannot be verified while the AI hardware review is unavailable."
+        ),
+        lens_behavior=(
+            f"{metadata.lens or 'The lens model'} is recorded. Its optical behavior cannot be identified reliably without the AI hardware review."
+        ),
+        settings_assessment=setting_summary,
+        hardware_use=(
+            "The measured exposure provides a reliable baseline, but a model-specific judgment about whether this capture uses the body and lens optimally is temporarily unavailable."
+        ),
+        strength="The supplied settings give the review a useful, concrete starting point.",
+        model="exposure-fallback-metadata-1",
     )

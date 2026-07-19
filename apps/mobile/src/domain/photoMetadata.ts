@@ -132,9 +132,5 @@ export const analysisWithEditableMetadata = (
   return { ...analysis, metrics };
 };
 
-export const METADATA_ADVICE_QUESTION = (
-  'Give brief capture-setting advice for a retake using the supplied EXIF metrics and measured exposure. ' +
-  'If underexposed, recommend a concrete ISO increase, slower shutter speed, or wider aperture with one tradeoff; ' +
-  'if overexposed, recommend the reverse. Put one or two setting recommendations in captureAdvice, ' +
-  'return no editor action, and do not invent missing settings.'
-);
+export const filledMetadataFieldCount = (metadata: EditablePhotoMetadata) =>
+  Object.values(metadata).filter((value) => value.trim().length > 0).length;
