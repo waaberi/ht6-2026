@@ -11,6 +11,7 @@ from exposure_api.models import (
     AnalysisSignal,
     CoachRequest,
     CoachResponse,
+    LibraryChatRequest,
     MetadataAdviceRequest,
     GenerativeLayerPlan,
     Region,
@@ -452,6 +453,45 @@ def test_coach_prompt_exposes_only_enabled_tools_and_photography_contract() -> N
     assert "reasons at most 14" in prompt
     schema = captured["response_format"]["schema"]  # type: ignore[index]
     assert {"headline", "reason"}.issubset(schema["required"])
+
+
+def test_library_chat_grounds_equipment_advice_and_attached_images() -> None:
+    captured: dict[str, object] = {}
+
+    class Interactions:
+        def create(self, **kwargs: object) -> SimpleNamespace:
+            captured.update(kwargs)
+            return SimpleNamespace(output_text=json.dumps({
+                "answer": "The recorded Fujifilm body uses X mount, and your attached street photograph favors a compact normal perspective. A native 33mm prime would preserve that framing while giving you more low-light flexibility.\n\nConfirm the exact body model before buying, because the abbreviated camera name in this fixture could be ambiguous."
+            }))
+
+    request = LibraryChatRequest.model_validate({
+        "question": "What lens should I pick up next?",
+        "history": [{"role": "user", "content": "I prefer compact kits."}],
+        "library": [{
+            "id": "photo-1",
+            "name": "Street frame",
+            "metadata": {"Model": "Fujifilm X-T5", "LensModel": "XF 23mm F2"},
+        }],
+        "attachedPhotoIds": ["photo-1"],
+    })
+    provider = GeminiProvider()
+    provider._client = SimpleNamespace(interactions=Interactions())  # type: ignore[assignment]
+
+    result = asyncio.run(provider.library_chat(
+        request,
+        [("photo-1", "Street frame", b"image", "image/jpeg")],
+    ))
+
+    assert result is not None
+    assert result.model == provider.semantic_model
+    assert len(result.answer.split("\n\n")) == 2
+    inputs = captured["input"]
+    assert isinstance(inputs, list)
+    assert "first establish the exact camera body and lens mount" in inputs[0]["text"]
+    assert "Fujifilm X-T5" in inputs[0]["text"]
+    assert inputs[1]["text"] == "Attached library photo photo-1: Street frame"
+    assert base64.b64decode(inputs[2]["data"]) == b"image"
 
 
 def test_coach_reports_the_fallback_model_that_succeeded(monkeypatch: pytest.MonkeyPatch) -> None:

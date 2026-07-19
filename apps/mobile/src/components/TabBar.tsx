@@ -6,13 +6,14 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { colors, layout, spacing, typography } from './theme';
 
-export type MainTab = 'camera' | 'library' | 'settings';
+export type MainTab = 'camera' | 'library' | 'chat' | 'settings';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
 
 const items: Array<{ id: MainTab; label: string; icon: IoniconName }> = [
   { id: 'camera', label: 'Camera', icon: 'camera-outline' },
   { id: 'library', label: 'Library', icon: 'images-outline' },
+  { id: 'chat', label: 'Chat', icon: 'chatbubble-ellipses-outline' },
   { id: 'settings', label: 'Settings', icon: 'settings-outline' },
 ];
 

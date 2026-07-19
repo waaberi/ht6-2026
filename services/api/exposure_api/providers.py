@@ -18,6 +18,8 @@ from .models import (
     CoachRequest,
     CoachResponse,
     GenerativeLayerPlan,
+    LibraryChatRequest,
+    LibraryChatResponse,
     MetadataAdviceRequest,
     MetadataAdviceResponse,
     Region,
@@ -325,6 +327,51 @@ def _metadata_advice_prompt(request: MetadataAdviceRequest) -> str:
     )
 
 
+def _library_chat_prompt(request: LibraryChatRequest) -> str:
+    attachment_labels = [
+        {"id": photo.id, "name": photo.name}
+        for photo in request.library
+        if photo.id in request.attached_photo_ids
+    ]
+    return (
+        "You are Exposure Chat, a knowledgeable photography and camera-equipment assistant. Answer the user's exact "
+        "question in one or two concise prose paragraphs, normally 70-180 words and never more than 220 words. Do not "
+        "use headings, bullets, tables, or filler. The supplied conversation history exists only for this app session.\n\n"
+        "LIBRARY GROUNDING\n"
+        "Treat the GPS-free library metadata and saved analysis summaries as evidence. You may identify repeated cameras, "
+        "lenses, focal lengths, settings, subjects, or visual tendencies when the supplied records support them. Only claim "
+        "to see a photo when its id is listed under attached photos and an image input follows this prompt. Never invent "
+        "missing EXIF, locations, image contents, ownership, or prior messages.\n\n"
+        "EQUIPMENT GUIDANCE\n"
+        "For lens recommendations, first establish the exact camera body and lens mount from supplied metadata. Recommend "
+        "a specific lens only when compatibility is reliable; state the mount and connect focal length, aperture, size, or "
+        "specialization to the user's demonstrated style. If the body name is absent or ambiguous, ask for the exact model "
+        "instead of guessing. Do not invent specifications, prices, current stock, or newly released products. Distinguish "
+        "native lenses from adapted lenses and mention an adapter only when relevant.\n\n"
+        f"Conversation history: {json.dumps([item.model_dump(mode='json', by_alias=True) for item in request.history], separators=(',', ':'))}\n"
+        f"Library records: {json.dumps([item.model_dump(mode='json', by_alias=True) for item in request.library], separators=(',', ':'), default=str)}\n"
+        f"Attached photos: {json.dumps(attachment_labels, separators=(',', ':'))}\n"
+        f"Current question: {json.dumps(request.question)}"
+    )
+
+
+def _normalize_library_chat_answer(answer: str) -> str:
+    paragraphs = [" ".join(part.split()) for part in re.split(r"\n\s*\n", answer) if part.strip()]
+    normalized = paragraphs[:2] or ["I couldn't produce a useful response. Please try asking again."]
+    remaining = 220
+    bounded: list[str] = []
+    for paragraph in normalized:
+        words = paragraph.split()
+        if remaining <= 0:
+            break
+        if len(words) > remaining:
+            paragraph = " ".join(words[:remaining]).rstrip(".,;:") + "..."
+            words = paragraph.split()
+        bounded.append(paragraph)
+        remaining -= len(words)
+    return "\n\n".join(bounded)
+
+
 def _ground_coach_response(request: CoachRequest, response: CoachResponse) -> CoachResponse:
     allowed_tools = set(request.available_tools)
     known_paths = _known_evidence_paths(request)
@@ -492,6 +539,46 @@ class GeminiProvider:
                 **options,
             )
             return MetadataAdviceResponse.model_validate_json(interaction.output_text)
+
+        result, model = await asyncio.to_thread(self._request_with_text_model_fallback, request_model)
+        return result.model_copy(update={"model": model})
+
+    async def library_chat(
+        self,
+        request: LibraryChatRequest,
+        attached_images: list[tuple[str, str, bytes, str]],
+        request_timeout_seconds: float | None = None,
+    ) -> LibraryChatResponse | None:
+        if not self._client:
+            return None
+        prompt = _library_chat_prompt(request)
+
+        def request_model(model: str) -> LibraryChatResponse:
+            assert self._client is not None
+            options = {"timeout": request_timeout_seconds} if request_timeout_seconds is not None else {}
+            input_content: list[dict[str, str]] = [{"type": "text", "text": prompt}]
+            for photo_id, name, image_bytes, mime_type in attached_images:
+                input_content.extend([
+                    {"type": "text", "text": f"Attached library photo {photo_id}: {name}"},
+                    {
+                        "type": "image",
+                        "data": base64.b64encode(image_bytes).decode(),
+                        "mime_type": mime_type,
+                    },
+                ])
+            interaction = self._client.interactions.create(
+                model=model,
+                input=input_content,
+                response_format={
+                    "type": "text",
+                    "mime_type": "application/json",
+                    "schema": _gemini_json_schema(LibraryChatResponse),
+                },
+                generation_config={"thinking_level": self.thinking_level},
+                **options,
+            )
+            response = LibraryChatResponse.model_validate_json(interaction.output_text)
+            return response.model_copy(update={"answer": _normalize_library_chat_answer(response.answer)})
 
         result, model = await asyncio.to_thread(self._request_with_text_model_fallback, request_model)
         return result.model_copy(update={"model": model})

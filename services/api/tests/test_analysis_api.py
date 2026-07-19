@@ -10,7 +10,7 @@ from PIL import Image, ImageDraw
 
 from exposure_api import main
 from exposure_api import auth
-from exposure_api.models import SemanticAnalysis
+from exposure_api.models import LibraryChatResponse, SemanticAnalysis
 from exposure_api.providers import SemanticProviderResult
 
 
@@ -366,6 +366,59 @@ def test_metadata_advice_requires_four_fields_and_returns_full_review(client: Te
     assert payload["lensBehavior"]
     assert payload["settingsAssessment"]
     assert payload["hardwareUse"]
+
+
+def test_library_chat_sends_attached_photos_and_strips_private_metadata(
+    client: TestClient,
+    image_bytes: bytes,
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class ChatProvider:
+        configured = True
+
+        async def library_chat(self, request, attached_images, **_kwargs):
+            captured["request"] = request
+            captured["images"] = attached_images
+            return LibraryChatResponse(answer="A compatible prime would suit the supplied camera and framing.", model="chat-fixture")
+
+    monkeypatch.setattr(main, "provider", ChatProvider())
+    response = client.post(
+        "/v1/chat",
+        files=[("images", ("photo.png", image_bytes, "image/png"))],
+        data={
+            "question": "What lens should I pick up next?",
+            "history_json": '[{"role":"user","content":"I shoot street scenes."}]',
+            "library_json": json.dumps([{
+                "id": "photo-1",
+                "name": "Street frame",
+                "metadata": {
+                    "Model": "Fujifilm X-T5",
+                    "LensModel": "XF 23mm F2",
+                    "GPSLatitude": 45.4,
+                    "Nested": {"Location": "private"},
+                },
+            }]),
+            "attached_photo_ids_json": '["photo-1"]',
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "answer": "A compatible prime would suit the supplied camera and framing.",
+        "model": "chat-fixture",
+    }
+    assert response.headers["cache-control"] == "private, no-store"
+    request = captured["request"]
+    assert request.library[0].metadata == {
+        "Model": "Fujifilm X-T5",
+        "LensModel": "XF 23mm F2",
+        "Nested": {},
+    }
+    attached = captured["images"]
+    assert attached[0][0] == "photo-1"
+    assert attached[0][2] == image_bytes
 
 
 def test_coach_timeout_returns_structured_local_response(
